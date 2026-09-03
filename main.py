@@ -14,6 +14,7 @@ import numpy as np
 
 from engine.config_loader import load_camera_config
 from engine.dual_subtractor import DualSubtractor
+from engine.logger import logger
 from engine.retention import cleanup_old_records
 from engine.rtsp_stream import ThreadedCapture
 from engine.tracker import CentroidTracker, TrackedObject
@@ -99,8 +100,9 @@ class CameraPipeline:
         """I/O worker task: mark event resolved in SQLite."""
         try:
             resolve_event(event_id=event_id)
+            logger.info(f"[{self.camera_id}] Event ID {event_id} marked as resolved.")
         except Exception as e:
-            print(f"[ERROR] [{self.camera_id}] Async resolve failed: {e}")
+            logger.error(f"[{self.camera_id}] Async resolve failed for event {event_id}: {e}")
 
     def _run_pipeline(self) -> None:
         """Continuous camera frame processing loop."""
@@ -185,8 +187,12 @@ class CameraPipeline:
                             )
                             track.db_event_id = event_id
                             self.active_db_events[track.track_id] = event_id
+                            logger.warning(
+                                f"[{self.camera_id}] Dwell violation triggered in '{track.zone_id}' "
+                                f"by Track ID {track.track_id} (Dwell: {track.dwell_duration:.1f}s). Event ID: {event_id}"
+                            )
                         except Exception as e:
-                            print(f"[ERROR] [{self.camera_id}] DB event log failed: {e}")
+                            logger.error(f"[{self.camera_id}] DB event log failed: {e}")
 
                         # Async snapshot image write
                         self.io_executor.submit(cv2.imwrite, str(filepath), raw_clean_frame)
@@ -245,30 +251,25 @@ def discover_cameras(base_dir: Path) -> List[Path]:
 
 def main() -> None:
     """Bootstrap multi-camera pipelines and run primary window event loop."""
-    print("==================================================")
-    print("       Smart CCTV 2.0 - Core Orchestrator         ")
-    print("==================================================")
+    logger.info("==================================================")
+    logger.info("       Smart CCTV 2.0 - Core Orchestrator         ")
+    logger.info("==================================================")
 
     # Initialize SQLite database
     init_db()
-    print("[STORAGE] Database tables verified.")
+    logger.info("Database tables and indexes verified.")
 
     # Execute auto-purge retention maintenance
-    purge_stats = cleanup_old_records(retention_days=30)
-    if purge_stats["deleted_records"] > 0 or purge_stats["deleted_snapshots"] > 0:
-        print(
-            f"[RETENTION] Cleaned {purge_stats['deleted_records']} old record(s) "
-            f"and {purge_stats['deleted_snapshots']} snapshot(s)."
-        )
+    cleanup_old_records(retention_days=30)
 
     workspace_dir = Path(__file__).resolve().parent
     camera_dirs = discover_cameras(workspace_dir)
 
     if not camera_dirs:
-        print("[WARN] No camera workspaces discovered in cameras/. Exiting.")
+        logger.warning("No camera workspaces discovered in cameras/. Exiting.")
         sys.exit(0)
 
-    print(f"[SYSTEM] Discovered {len(camera_dirs)} camera workspace(s): {[c.name for c in camera_dirs]}")
+    logger.info(f"Discovered {len(camera_dirs)} camera workspace(s): {[c.name for c in camera_dirs]}")
 
     # Instantiate and start all camera pipelines
     pipelines: List[CameraPipeline] = []
@@ -277,16 +278,16 @@ def main() -> None:
             pipe = CameraPipeline(camera_dir=c_dir)
             pipe.start()
             pipelines.append(pipe)
-            print(f"[OK] Pipeline started for: {pipe.camera_id}")
+            logger.info(f"Pipeline started for camera: {pipe.camera_id}")
         except Exception as e:
-            print(f"[ERROR] Failed to start pipeline for {c_dir.name}: {e}")
+            logger.error(f"Failed to start pipeline for {c_dir.name}: {e}")
 
     # Initialize display windows with WINDOW_NORMAL for dynamic resizing
     for pipe in pipelines:
         win_name = f"Smart CCTV - {pipe.camera_id}"
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
 
-    print("\n[INFO] Running live display. Press 'q' or 'ESC' to terminate safely.\n")
+    logger.info("Running live display. Press 'q' or 'ESC' on display window to terminate.")
 
     try:
         while True:
@@ -306,15 +307,15 @@ def main() -> None:
 
             key = cv2.waitKey(15) & 0xFF
             if key in (ord("q"), 27):
-                print("\n[INFO] Termination signal received. Stopping pipelines...")
+                logger.info("Termination key received. Shutting down camera pipelines...")
                 break
     except KeyboardInterrupt:
-        print("\n[INFO] Interrupted by user.")
+        logger.info("Shutdown requested via KeyboardInterrupt.")
     finally:
         for pipe in pipelines:
             pipe.stop()
         cv2.destroyAllWindows()
-        print("[SHUTDOWN] All camera pipelines terminated gracefully.")
+        logger.info("All camera pipelines terminated gracefully.")
 
 
 if __name__ == "__main__":

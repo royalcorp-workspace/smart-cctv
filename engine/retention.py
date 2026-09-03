@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Optional
 
+from engine.logger import logger
 from storage.db import DEFAULT_DB_PATH, get_connection
 
 
@@ -70,7 +71,7 @@ def cleanup_old_records(
                         snap_file.unlink()
                         summary["deleted_snapshots"] += 1
                     except OSError as e:
-                        print(f"[WARN] Failed to delete snapshot {snap_file}: {e}")
+                        logger.warning(f"Failed to delete expired snapshot {snap_file}: {e}")
                         summary["failed_snapshots"] += 1
 
         # Delete database records in bulk
@@ -87,12 +88,18 @@ def cleanup_old_records(
             conn.execute("VACUUM;")
         except sqlite3.OperationalError as e:
             # VACUUM can fail if another transaction is pending in WAL mode
-            print(f"[INFO] VACUUM skipped or deferred: {e}")
+            logger.info(f"SQLite VACUUM deferred: {e}")
 
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
-        print(f"[ERROR] Retention cleanup failed due to database error: {e}")
+        logger.error(f"Retention cleanup failed due to database error: {e}")
     finally:
         if conn is not None:
             conn.close()
+
+    if summary["deleted_records"] > 0 or summary["deleted_snapshots"] > 0:
+        logger.info(
+            f"Retention auto-purge executed: {summary['deleted_records']} record(s) "
+            f"and {summary['deleted_snapshots']} snapshot(s) deleted."
+        )
 
     return summary

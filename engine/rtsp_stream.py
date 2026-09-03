@@ -9,6 +9,8 @@ from typing import Optional, Tuple, Union
 import cv2
 import numpy as np
 
+from engine.logger import logger
+
 
 class ThreadedCapture:
     """Non-blocking threaded video capture with auto-reconnect and frame dropping."""
@@ -50,9 +52,11 @@ class ThreadedCapture:
         self._cap = cv2.VideoCapture(self.source)
         if self._cap.isOpened():
             self.is_connected = True
+            logger.info("Video capture session established successfully.")
             return True
 
         self.is_connected = False
+        logger.warning(f"Failed to open video capture source. Retrying in {self.reconnect_interval_sec}s...")
         return False
 
     def _capture_worker(self) -> None:
@@ -73,6 +77,9 @@ class ThreadedCapture:
                 else:
                     self.is_connected = False
                     self._cap.release()
+                    logger.warning(
+                        f"Stream frame read failed or dropped. Reconnecting in {self.reconnect_interval_sec}s..."
+                    )
                     time.sleep(self.reconnect_interval_sec)
                     continue
 

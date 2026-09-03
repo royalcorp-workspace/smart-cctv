@@ -34,6 +34,10 @@ cameras/**/snapshots/*
 reports/*
 !reports/.gitkeep
 
+# Application Logs
+logs/*.log
+!logs/.gitkeep
+
 # Temporary Test Media & Logs
 *.mp4
 *.avi
