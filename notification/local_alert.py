@@ -1,5 +1,6 @@
 """Local audio alerts and dynamic visual HUD renderer."""
 
+import datetime
 import math
 import struct
 import threading
@@ -134,64 +135,131 @@ class VisualHUD:
 
             if is_violated:
                 zone_color = COLOR_VIOLATION if blink_state else COLOR_WARNING
-                thickness = 4
+                thickness = 2
             else:
                 zone_color = COLOR_SAFE
-                thickness = 2
+                thickness = 1
 
             cv2.polylines(canvas, [np_pts], isClosed=True, color=zone_color, thickness=thickness, lineType=cv2.LINE_AA)
-            label_pos = (pts[0][0] + 5, pts[0][1] + 20)
-            cv2.putText(canvas, zone_id, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, zone_color, 1)
 
-        # 2. Draw Bounding Boxes and Status Badges
+        # 2. Draw Bounding Boxes and Status Badges (Refined for 640x480)
+        font_scale = 0.40
+        font_thick = 1
+        pad_x = 3
+        pad_y = 2
+
         for obj in tracked_objects:
             x, y, bw, bh = obj.bbox
             track_id = obj.track_id
             dwell = obj.dwell_duration
+            is_zone_2 = "zone_2" in getattr(obj, "zone_id", "")
+            is_attended = getattr(obj, "is_attended", False)
+            raw_label = getattr(obj, "class_label", "object")
+            label_name = "Tas" if (is_zone_2 or raw_label == "tas") else "Person"
 
-            if getattr(obj, "is_triggered", False):
-                box_color = COLOR_VIOLATION
-                badge_text = f"ID {track_id}: VIOLATION! ({dwell:.1f}s)"
-            elif getattr(obj, "is_stationary", False):
-                box_color = COLOR_WARNING
-                badge_text = f"ID {track_id}: Dwell {dwell:.1f}s"
+            if is_zone_2:
+                if is_attended:
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Tas"
+                elif getattr(obj, "is_triggered", False) or dwell >= 60.0:
+                    # Blinking effect based on timestamp toggle (Merah)
+                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                    badge_text = "[ALERT] Tas Tertinggal"
+                elif getattr(obj, "is_stationary", False):
+                    if dwell <= 30.0:
+                        box_color = (0, 255, 255)  # 0 s.d. 30 detik: Kuning (Wajar)
+                    else:
+                        box_color = (0, 165, 255)  # 31 s.d. 59 detik: Oranye (Warning)
+                    badge_text = f"ID {track_id} | Tas"
+                else:
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Moving"
             else:
-                box_color = COLOR_SAFE
-                badge_text = f"ID {track_id}: Moving"
+                if getattr(obj, "is_triggered", False):
+                    box_color = COLOR_VIOLATION
+                    badge_text = "[ALERT] Violation"
+                elif getattr(obj, "is_stationary", False):
+                    box_color = COLOR_WARNING
+                    badge_text = f"ID {track_id} | Person"
+                else:
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Moving"
 
-            # Draw bounding rectangle
-            cv2.rectangle(canvas, (x, y), (x + bw, y + bh), box_color, 2)
-            cv2.circle(canvas, obj.centroid, 4, box_color, -1)
+            # Draw crisp thin bounding rectangle (thickness = 1) and small centroid
+            cv2.rectangle(canvas, (x, y), (x + bw, y + bh), box_color, 1)
+            cv2.circle(canvas, obj.centroid, 2, box_color, -1)
 
-            # Badge background for high legibility
-            text_size = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
-            badge_y1 = max(0, y - text_size[1] - 6)
+            # Compact badge background with minimal padding
+            (text_w, text_h), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+            badge_y1 = max(0, y - text_h - (pad_y * 2) - 1)
             badge_y2 = y
-            cv2.rectangle(canvas, (x, badge_y1), (x + text_size[0] + 8, badge_y2), box_color, -1)
+            badge_x2 = min(w, x + text_w + (pad_x * 2))
+
+            cv2.rectangle(canvas, (x, badge_y1), (badge_x2, badge_y2), box_color, -1)
+            
+            # High-contrast text color: white on red, black on green/yellow/orange
+            is_dark_bg = box_color == (0, 0, 255)
+            text_color = (255, 255, 255) if is_dark_bg else (0, 0, 0)
+
             cv2.putText(
                 canvas,
                 badge_text,
-                (x + 4, badge_y2 - 3),
+                (x + pad_x, badge_y2 - pad_y - 1),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (0, 0, 0) if box_color != COLOR_VIOLATION else (255, 255, 255),
-                1,
+                font_scale,
+                text_color,
+                font_thick,
+                cv2.LINE_AA,
             )
 
-        # 3. Top HUD Banner
-        hud_height = 42
-        hud_bar = np.zeros((hud_height, w, 3), dtype=np.uint8)
-        hud_bar[:] = COLOR_HUD_BG
-        canvas[0:hud_height, 0:w] = cv2.addWeighted(canvas[0:hud_height, 0:w], 0.25, hud_bar, 0.75, 0)
-
+        # 3. Top-Right Status Card (Leaves left & center open for native Hikvision camera OSD)
         conn_text = "ONLINE" if is_connected else "RECONNECTING"
-        conn_color = COLOR_SAFE if is_connected else COLOR_VIOLATION
+        conn_color = (0, 255, 0) if is_connected else (0, 0, 255)
+        text_color_main = (255, 255, 255)
 
-        hud_left = f"CAM: {camera_id} | RES: {w}x{h} | FPS: {fps:.1f}"
-        hud_right = f"ACTIVE TARGETS: {len(tracked_objects)} | RTSP: {conn_text}"
+        line_1 = f"CAM: {camera_id} | {w}x{h} | FPS: {fps:.1f}"
+        line_2 = f"TARGETS: {len(tracked_objects)} | RTSP: {conn_text}"
 
-        cv2.putText(canvas, hud_left, (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_TEXT_MAIN, 1, cv2.LINE_AA)
-        r_size = cv2.getTextSize(hud_right, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
-        cv2.putText(canvas, hud_right, (w - r_size[0] - 15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, conn_color, 2, cv2.LINE_AA)
+        font_scale_hud = 0.38
+        font_thick_hud = 1
+
+        size_1 = cv2.getTextSize(line_1, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)[0]
+        size_2 = cv2.getTextSize(line_2, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)[0]
+
+        card_w = max(size_1[0], size_2[0]) + 16
+        card_h = 36
+        card_x1 = max(0, w - card_w - 8)
+        card_y1 = 6
+        card_x2 = min(w, card_x1 + card_w)
+        card_y2 = card_y1 + card_h
+
+        # Semi-transparent dark card background only at top-right corner
+        sub_img = canvas[card_y1:card_y2, card_x1:card_x2]
+        dark_rect = np.zeros_like(sub_img, dtype=np.uint8)
+        dark_rect[:] = (15, 15, 15)
+        canvas[card_y1:card_y2, card_x1:card_x2] = cv2.addWeighted(sub_img, 0.30, dark_rect, 0.70, 0)
+        cv2.rectangle(canvas, (card_x1, card_y1), (card_x2, card_y2), (60, 60, 60), 1)
+
+        # Draw 2 lines of status info
+        cv2.putText(
+            canvas,
+            line_1,
+            (card_x1 + 8, card_y1 + 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale_hud,
+            text_color_main,
+            font_thick_hud,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            line_2,
+            (card_x1 + 8, card_y1 + 29),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale_hud,
+            conn_color,
+            font_thick_hud,
+            cv2.LINE_AA,
+        )
 
         return canvas

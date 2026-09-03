@@ -144,7 +144,7 @@ class ROICalibrator:
     def _draw_hud(self, canvas: np.ndarray) -> None:
         """Render HUD status and shortcuts overlay."""
         h, w = canvas.shape[:2]
-        hud_height: int = 55
+        hud_height: int = 40
         hud_bar: np.ndarray = np.zeros((hud_height, w, 3), dtype=np.uint8)
         hud_bar[:] = COLOR_HUD_BG
         canvas[0:hud_height, 0:w] = cv2.addWeighted(canvas[0:hud_height, 0:w], 0.3, hud_bar, 0.7, 0)
@@ -152,12 +152,12 @@ class ROICalibrator:
         active_color = COLOR_ZONE_1 if self.active_zone_key == "zone_1_koridor" else COLOR_ZONE_2
         status_line = (
             f"Cam: {self.camera_id} ({w}x{h}) | Active: {self.active_zone_key} "
-            f"| Z1 Pts: {len(self.zones['zone_1_koridor'])} | Z2 Pts: {len(self.zones['zone_2_transit'])}"
+            f"| Z1: {len(self.zones['zone_1_koridor'])} pts | Z2: {len(self.zones['zone_2_transit'])} pts"
         )
-        cmd_line = "[1] Zone 1  [2] Zone 2  [U/Z] Undo  [C] Clear  [S] Save  [Q/ESC] Quit"
+        cmd_line = "[1] Z1  [2] Z2  [U/Z] Undo  [C] Clear  [S] Save  [Q/ESC] Quit"
 
-        cv2.putText(canvas, status_line, (15, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, active_color, 2)
-        cv2.putText(canvas, cmd_line, (15, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+        cv2.putText(canvas, status_line, (10, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.40, active_color, 1, cv2.LINE_AA)
+        cv2.putText(canvas, cmd_line, (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
 
     def _draw_zones(self, canvas: np.ndarray) -> np.ndarray:
         """Render polygon vertices, borders, and semi-transparent masks."""
@@ -179,21 +179,22 @@ class ROICalibrator:
             if len(pts) >= 3:
                 cv2.fillPoly(overlay, [np_pts], color)
 
-            # Draw polygon perimeter or segments
+            # Draw polygon perimeter or segments (clean thickness = 1)
             is_closed = len(pts) >= 3
-            cv2.polylines(canvas, [np_pts], is_closed, color, 2, cv2.LINE_AA)
+            cv2.polylines(canvas, [np_pts], is_closed, color, 1, cv2.LINE_AA)
 
             # Draw vertices
             for idx, pt in enumerate(pts):
-                cv2.circle(canvas, (pt[0], pt[1]), 5, color, -1)
+                cv2.circle(canvas, (pt[0], pt[1]), 3, color, -1)
                 cv2.putText(
                     canvas,
                     str(idx + 1),
-                    (pt[0] + 6, pt[1] - 6),
+                    (pt[0] + 4, pt[1] - 4),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
+                    0.35,
                     (255, 255, 255),
                     1,
+                    cv2.LINE_AA,
                 )
 
         # Blend semi-transparent polygon fill

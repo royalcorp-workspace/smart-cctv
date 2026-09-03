@@ -79,12 +79,21 @@ class ZoneFilter:
             if matched_zone is None:
                 continue
 
-            # Area threshold validation per zone
+            # Area threshold validation per zone (support single or double underscore)
             zone_cfg = self.zone_configs.get(matched_zone, {})
+            if not zone_cfg and matched_zone.replace("__", "_") in self.zone_configs:
+                zone_cfg = self.zone_configs[matched_zone.replace("__", "_")]
             min_area = zone_cfg.get("min_contour_area", min_area_default)
 
             if area >= min_area:
                 x, y, w, h = cv2.boundingRect(cnt)
+                # Anti-reflection and tile glare filter (prevent duplicate boxes on glossy tiles)
+                if w < 12 or h < 12:
+                    continue
+                aspect_ratio = w / float(h)
+                if aspect_ratio < 0.15 or aspect_ratio > 6.0:
+                    continue
+
                 valid_detections.append((cnt, (x, y, w, h), centroid, matched_zone))
 
         return valid_detections

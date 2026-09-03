@@ -47,16 +47,23 @@ def test_tcp_connectivity(host: str, port: int = 554, timeout_sec: float = 3.0) 
         return False, f"Socket error reaching {host}:{port}: {e}."
 
 
+# Force TCP transport for RTSP streaming
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+
 def test_stream_decode(source: Union[int, str]) -> Tuple[bool, Optional[Tuple[int, int]], float, str]:
     """Test opening stream and grabbing one valid decoded frame."""
-    cap = cv2.VideoCapture(source)
+    backend = cv2.CAP_FFMPEG if isinstance(source, str) and source.startswith("rtsp://") else cv2.CAP_ANY
+    cap = cv2.VideoCapture(source, backend)
     if not cap.isOpened():
         cap.release()
         return False, None, 0.0, "OpenCV VideoCapture failed to establish RTSP session (Handshake/Authentication failure)."
 
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     ret, frame = cap.read()
     if not ret or frame is None:
-        cap.release()
+        cap.release()   
         return False, None, 0.0, "Connected to stream, but failed to decode video frame (Corrupted feed, invalid codec, or path error)."
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

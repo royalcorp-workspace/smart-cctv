@@ -106,32 +106,42 @@ class CameraPipeline:
 
     def _run_pipeline(self) -> None:
         """Continuous camera frame processing loop."""
+        last_valid_frame_time = time.time()
         while not self._stopped.is_set():
-            ret, frame = self.capture.read()
+            ret, frame = self.capture.read(timeout=0.15)
             now = time.time()
 
             if not ret or frame is None:
-                # Evaluate tracker timeout during stream idle/disconnection
-                _, purged_tracks = self.tracker.update([], timestamp=now)
-                for purged in purged_tracks:
-                    eid = self.active_db_events.pop(purged.track_id, purged.db_event_id)
-                    if purged.is_triggered and eid is not None:
-                        self._resolve_event_async(eid)
+                # Only enter offline state if actually disconnected or timeout exceeded (>2.5s)
+                if not self.capture.is_connected or (now - last_valid_frame_time > 2.5):
+                    # Evaluate tracker timeout during stream idle/disconnection
+                    _, purged_tracks = self.tracker.update([], timestamp=now)
+                    for purged in purged_tracks:
+                        eid = self.active_db_events.pop(purged.track_id, purged.db_event_id)
+                        if purged.is_triggered and eid is not None:
+                            self._resolve_event_async(eid)
 
-                # Render offline canvas
-                placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
-                VisualHUD.render(
-                    canvas=placeholder,
-                    zones=self.roi_zones,
-                    tracked_objects=[],
-                    camera_id=self.camera_id,
-                    fps=self.current_fps,
-                    is_connected=False,
-                )
-                with self._display_lock:
-                    self._latest_display_frame = placeholder
-                time.sleep(0.05)
+                    # Render offline canvas using target resolution dimensions
+                    target_w = self.target_resolution[0] if self.target_resolution else 640
+                    target_h = self.target_resolution[1] if self.target_resolution else 480
+                    placeholder = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                    VisualHUD.render(
+                        canvas=placeholder,
+                        zones=self.roi_zones,
+                        tracked_objects=[],
+                        camera_id=self.camera_id,
+                        fps=self.current_fps,
+                        is_connected=False,
+                    )
+                    with self._display_lock:
+                        self._latest_display_frame = placeholder
+                    time.sleep(0.05)
+                else:
+                    # Transient inter-frame delay on low FPS cameras
+                    time.sleep(0.01)
                 continue
+
+            last_valid_frame_time = now
 
             # Target resolution normalization
             if self.target_resolution is not None:
@@ -158,28 +168,56 @@ class CameraPipeline:
             # 4. Handle Violation Triggers
             zones_cfg = self.config.get("zones", {})
             for track in active_tracks:
+                if getattr(track, "is_attended", False):
+                    # If previously triggered but owner returned nearby, disarm trigger
+                    if track.is_triggered:
+                        track.is_triggered = False
+                        eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                        if eid is not None:
+                            self._resolve_event_async(eid)
+                    continue
+
                 if track.is_stationary:
                     zone_info = zones_cfg.get(track.zone_id, {})
-                    dwell_thresh = zone_info.get("dwell_threshold_sec", 15.0)
+                    if not zone_info and track.zone_id.replace("__", "_") in zones_cfg:
+                        zone_info = zones_cfg[track.zone_id.replace("__", "_")]
+                    
+                    is_zone_2 = "zone_2" in track.zone_id
+                    default_thresh = 60.0 if is_zone_2 else 15.0
+                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", default_thresh))
 
                     if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                         track.is_triggered = True
                         self.audio_worker.request_alarm()
                         trigger_iso = datetime.datetime.now().isoformat()
                         start_iso = datetime.datetime.fromtimestamp(track.stationary_start).isoformat()
-                        
-                        # Prepare snapshot path
                         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        
+                        # Dedicated abandoned bag snapshot naming
+                        if is_zone_2:
+                            bag_filename = f"ALERT_ABANDONED_BAG_cam01_{timestamp_str}.jpg"
+                            storage_path = Path(__file__).resolve().parent / "storage" / bag_filename
+                            reports_path = Path(__file__).resolve().parent / "reports" / bag_filename
+                            self.io_executor.submit(cv2.imwrite, str(storage_path), raw_clean_frame)
+                            self.io_executor.submit(cv2.imwrite, str(reports_path), raw_clean_frame)
+                            
+                            alert_msg = f"[ALERT] Unattended Bag detected in {track.zone_id} for over {int(dwell_thresh)} seconds!"
+                            print(f"\n{alert_msg}\n")
+                            logger.warning(alert_msg)
+
+                        # Camera workspace snapshot path
                         filename = f"{timestamp_str}_{track.zone_id}_{track.track_id}.jpg"
                         filepath = self.snapshots_dir / filename
+                        self.io_executor.submit(cv2.imwrite, str(filepath), raw_clean_frame)
 
-                        # Immediate synchronous DB event registration to avoid race condition on resolve
+                        # Immediate synchronous DB event registration
                         try:
+                            event_type = "UNATTENDED_BAG" if is_zone_2 else "DWELL_VIOLATION"
                             event_id = log_event(
                                 camera_id=self.camera_id,
                                 zone_id=track.zone_id,
                                 track_id=track.track_id,
-                                event_type="DWELL_VIOLATION",
+                                event_type=event_type,
                                 dwell_duration=track.dwell_duration,
                                 start_time=start_iso,
                                 trigger_time=trigger_iso,
@@ -188,14 +226,11 @@ class CameraPipeline:
                             track.db_event_id = event_id
                             self.active_db_events[track.track_id] = event_id
                             logger.warning(
-                                f"[{self.camera_id}] Dwell violation triggered in '{track.zone_id}' "
+                                f"[{self.camera_id}] Violation registered in '{track.zone_id}' "
                                 f"by Track ID {track.track_id} (Dwell: {track.dwell_duration:.1f}s). Event ID: {event_id}"
                             )
                         except Exception as e:
                             logger.error(f"[{self.camera_id}] DB event log failed: {e}")
-
-                        # Async snapshot image write
-                        self.io_executor.submit(cv2.imwrite, str(filepath), raw_clean_frame)
                     elif track.is_triggered:
                         # Continue requesting alarm pulses within cooldown
                         self.audio_worker.request_alarm()

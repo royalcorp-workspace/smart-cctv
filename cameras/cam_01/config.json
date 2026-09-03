@@ -1,21 +1,55 @@
 {
   "camera_id": "cam_01",
   "name": "Koridor & Area Transit Depan",
-  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@192.212.160.70:554/Streaming/Channels/102",
+  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@${CAM01_IP}:${CAM01_PORT}/Streaming/Channels/102",
   "target_resolution": [
-    1280,
-    720
+    640,
+    480
   ],
+  "detector": {
+    "enabled_classes": [
+      "person",
+      "backpack",
+      "handbag",
+      "suitcase"
+    ],
+    "target_classes": [
+      "backpack",
+      "handbag",
+      "suitcase"
+    ],
+    "confidence_threshold": 0.50
+  },
   "zones": {
     "zone_1_koridor": {
       "name": "Koridor Utama",
       "dwell_threshold_sec": 15,
-      "min_contour_area": 400
+      "min_contour_area": 300
+    },
+    "zone_1__koridor": {
+      "name": "Koridor Utama",
+      "dwell_threshold_sec": 15,
+      "min_contour_area": 300
     },
     "zone_2_transit": {
       "name": "Area Transit Depan",
-      "dwell_threshold_sec": 1800,
-      "min_contour_area": 2500
+      "dwell_threshold_sec": 60,
+      "min_contour_area": 250,
+      "target_classes": [
+        "backpack",
+        "handbag",
+        "suitcase"
+      ]
+    },
+    "zone_2__transit": {
+      "name": "Area Transit Depan",
+      "dwell_threshold_sec": 60,
+      "min_contour_area": 250,
+      "target_classes": [
+        "backpack",
+        "handbag",
+        "suitcase"
+      ]
     }
   }
 }

@@ -1,4 +1,4 @@
-"""Centroid tracking engine with dwell calculation, deregistration hooks, and anti-leak."""
+"""Centroid tracking engine with dwell calculation, deregistration hooks, and flicker tolerance."""
 
 import time
 from dataclasses import dataclass
@@ -11,6 +11,7 @@ class TrackedObject:
     """State of an individually tracked target."""
     track_id: int
     centroid: Tuple[int, int]
+    anchor_centroid: Tuple[int, int]
     bbox: Tuple[int, int, int, int]
     zone_id: str
     contour_area: float
@@ -20,6 +21,8 @@ class TrackedObject:
     dwell_duration: float = 0.0
     is_stationary: bool = False
     is_triggered: bool = False
+    is_attended: bool = False
+    class_label: str = "object"
     db_event_id: Optional[int] = None
 
 
@@ -28,12 +31,16 @@ class CentroidTracker:
 
     def __init__(
         self,
-        max_distance_px: float = 50.0,
-        movement_threshold_px: float = 8.0,
+        max_distance_px: float = 60.0,
+        movement_threshold_px: float = 12.0,
+        anchor_radius_px: float = 25.0,
+        flicker_tolerance_sec: float = 2.0,
         max_disappeared_sec: float = 5.0,
     ) -> None:
         self.max_distance_px: float = max_distance_px
         self.movement_threshold_px: float = movement_threshold_px
+        self.anchor_radius_px: float = anchor_radius_px
+        self.flicker_tolerance_sec: float = flicker_tolerance_sec
         self.max_disappeared_sec: float = max_disappeared_sec
 
         self._next_id: int = 1
@@ -48,9 +55,11 @@ class CentroidTracker:
         timestamp: float,
     ) -> TrackedObject:
         """Register a new tracked object."""
+        label = "tas" if "zone_2" in zone_id else "object"
         new_obj = TrackedObject(
             track_id=self._next_id,
             centroid=centroid,
+            anchor_centroid=centroid,
             bbox=bbox,
             zone_id=zone_id,
             contour_area=area,
@@ -60,6 +69,8 @@ class CentroidTracker:
             dwell_duration=0.0,
             is_stationary=False,
             is_triggered=False,
+            is_attended=False,
+            class_label=label,
             db_event_id=None,
         )
         self.objects[self._next_id] = new_obj
@@ -78,8 +89,11 @@ class CentroidTracker:
         """
         now: float = timestamp if timestamp is not None else time.time()
 
-        # If no detections provided, purge stale objects and return
+        # If no detections provided, advance dwell for objects within flicker tolerance and purge stale
         if len(detections) == 0:
+            for obj in self.objects.values():
+                if (now - obj.last_seen) <= self.flicker_tolerance_sec and obj.is_stationary:
+                    obj.dwell_duration = now - obj.stationary_start
             purged = self._purge_stale_objects(now)
             return list(self.objects.values()), purged
 
@@ -118,21 +132,27 @@ class CentroidTracker:
             obj = self.objects[obj_id]
             bbox, new_centroid, zone_id, area = detections[col]
 
-            # Calculate displacement
+            # Calculate displacement from last centroid and distance from anchor position
             displacement = float(
                 np.linalg.norm(
                     np.array(obj.centroid, dtype=np.float32) - np.array(new_centroid, dtype=np.float32)
                 )
             )
+            anchor_dist = float(
+                np.linalg.norm(
+                    np.array(obj.anchor_centroid, dtype=np.float32) - np.array(new_centroid, dtype=np.float32)
+                )
+            )
 
-            # Update stationary vs transient logic
-            if displacement <= self.movement_threshold_px:
+            # Stationary logic: robust against camera noise if staying within anchor radius
+            if displacement <= self.movement_threshold_px or anchor_dist <= self.anchor_radius_px:
                 obj.is_stationary = True
                 obj.dwell_duration = now - obj.stationary_start
             else:
-                # Object moved significantly -> reset stationary clock
+                # Object moved significantly outside anchor radius -> reset stationary clock
                 obj.is_stationary = False
                 obj.stationary_start = now
+                obj.anchor_centroid = new_centroid
                 obj.dwell_duration = 0.0
 
             obj.centroid = new_centroid
@@ -140,19 +160,68 @@ class CentroidTracker:
             obj.zone_id = zone_id
             obj.contour_area = area
             obj.last_seen = now
+            if "zone_2" in zone_id:
+                obj.class_label = "tas"
 
             assigned_rows.add(row)
             assigned_cols.add(col)
+
+        # Flicker buffer: keep stationary dwell timer advancing for objects missed this frame
+        for row, obj_id in enumerate(existing_ids):
+            if row not in assigned_rows:
+                unmatched_obj = self.objects[obj_id]
+                if (now - unmatched_obj.last_seen) <= self.flicker_tolerance_sec and unmatched_obj.is_stationary:
+                    unmatched_obj.dwell_duration = now - unmatched_obj.stationary_start
 
         # Register unassigned new detections
         for col, det in enumerate(detections):
             if col not in assigned_cols:
                 self._register(det[1], det[0], det[2], det[3], now)
 
+        # Evaluate owner proximity for bags in zone 2
+        self.evaluate_owner_proximity(now)
+
         # Anti-memory leak: purge tracks unobserved for > max_disappeared_sec
         purged = self._purge_stale_objects(now)
 
         return list(self.objects.values()), purged
+
+    def evaluate_owner_proximity(self, now: float, proximity_px: float = 120.0) -> None:
+        """Evaluate owner proximity for bags in zone 2.
+
+        If a person or other moving target is within proximity_px (<= 120 px) of the bag
+        OR is present inside zone 2, the bag is considered ATTENDED.
+        The dwell timer is paused / reset while attended.
+        """
+        all_objects = list(self.objects.values())
+        bag_objects = [obj for obj in all_objects if "zone_2" in obj.zone_id]
+
+        for bag in bag_objects:
+            owner_nearby = False
+            for other in all_objects:
+                if other.track_id == bag.track_id:
+                    continue
+
+                # Calculate Euclidean distance between bag center and other object center
+                dist = float(
+                    np.linalg.norm(
+                        np.array(bag.centroid, dtype=np.float32) - np.array(other.centroid, dtype=np.float32)
+                    )
+                )
+
+                # Attended if another object is within 120px OR present inside zone 2
+                if dist <= proximity_px or "zone_2" in other.zone_id:
+                    owner_nearby = True
+                    break
+
+            if owner_nearby:
+                bag.is_attended = True
+                # Reset/pause dwell time to 0 while owner is present
+                bag.stationary_start = now
+                bag.dwell_duration = 0.0
+                bag.is_triggered = False
+            else:
+                bag.is_attended = False
 
     def _purge_stale_objects(self, now: float) -> List[TrackedObject]:
         """Deregister objects that disappeared longer than max_disappeared_sec."""

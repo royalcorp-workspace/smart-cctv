@@ -29,6 +29,8 @@ Thumbs.db
 *.db-wal
 *.db-shm
 storage/*.db*
+storage/*.jpg
+storage/*.png
 cameras/**/snapshots/*
 !cameras/**/snapshots/.gitkeep
 reports/*
