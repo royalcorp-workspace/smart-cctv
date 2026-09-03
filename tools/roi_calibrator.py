@@ -54,6 +54,9 @@ class ROICalibrator:
         
         self._load_config_and_existing_zones()
         self.base_frame: np.ndarray = self._acquire_reference_frame()
+        self.base_h, self.base_w = self.base_frame.shape[:2]
+        self.current_win_w: int = self.base_w
+        self.current_win_h: int = self.base_h
 
     def _load_config_and_existing_zones(self) -> None:
         """Load camera configuration and existing polygon points if present."""
@@ -126,12 +129,17 @@ class ROICalibrator:
         return frame
 
     def _mouse_callback(self, event: int, x: int, y: int, flags: int, param: Optional[object]) -> None:
-        """Handle mouse clicks and cursor position updates."""
+        """Handle mouse clicks and cursor position updates with coordinate scaling."""
+        scale_x = self.base_w / self.current_win_w if self.current_win_w > 0 else 1.0
+        scale_y = self.base_h / self.current_win_h if self.current_win_h > 0 else 1.0
+        native_x = max(0, min(self.base_w - 1, int(round(x * scale_x))))
+        native_y = max(0, min(self.base_h - 1, int(round(y * scale_y))))
+
         if event == cv2.EVENT_MOUSEMOVE:
-            self.mouse_pos = (x, y)
+            self.mouse_pos = (native_x, native_y)
         elif event == cv2.EVENT_LBUTTONDOWN:
-            self.zones[self.active_zone_key].append([x, y])
-            print(f"[{self.active_zone_key}] Added point: ({x}, {y})")
+            self.zones[self.active_zone_key].append([native_x, native_y])
+            print(f"[{self.active_zone_key}] Added point: ({native_x}, {native_y})")
 
     def _draw_hud(self, canvas: np.ndarray) -> None:
         """Render HUD status and shortcuts overlay."""
@@ -207,7 +215,7 @@ class ROICalibrator:
 
     def run(self) -> None:
         """Main calibration display loop."""
-        cv2.namedWindow(self.window_name)
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window_name, self._mouse_callback)
 
         print("\n=======================================================")
@@ -222,6 +230,17 @@ class ROICalibrator:
             display_frame = self.base_frame.copy()
             self._draw_zones(display_frame)
             self._draw_hud(display_frame)
+
+            # Auto-resize canvas to match actual window dimensions (eliminates gray bars)
+            rect = cv2.getWindowImageRect(self.window_name)
+            if rect and rect[2] > 50 and rect[3] > 50:
+                self.current_win_w, self.current_win_h = rect[2], rect[3]
+                if display_frame.shape[1] != self.current_win_w or display_frame.shape[0] != self.current_win_h:
+                    display_frame = cv2.resize(
+                        display_frame,
+                        (self.current_win_w, self.current_win_h),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
 
             cv2.imshow(self.window_name, display_frame)
             key = cv2.waitKey(20) & 0xFF

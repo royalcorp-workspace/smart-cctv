@@ -281,6 +281,11 @@ def main() -> None:
         except Exception as e:
             print(f"[ERROR] Failed to start pipeline for {c_dir.name}: {e}")
 
+    # Initialize display windows with WINDOW_NORMAL for dynamic resizing
+    for pipe in pipelines:
+        win_name = f"Smart CCTV - {pipe.camera_id}"
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+
     print("\n[INFO] Running live display. Press 'q' or 'ESC' to terminate safely.\n")
 
     try:
@@ -288,7 +293,16 @@ def main() -> None:
             for pipe in pipelines:
                 frame = pipe.get_display_frame()
                 if frame is not None:
-                    cv2.imshow(f"Smart CCTV - {pipe.camera_id}", frame)
+                    win_name = f"Smart CCTV - {pipe.camera_id}"
+                    
+                    # Auto-resize frame to fit maximized or resized window without gray bars
+                    rect = cv2.getWindowImageRect(win_name)
+                    if rect and rect[2] > 50 and rect[3] > 50:
+                        win_w, win_h = rect[2], rect[3]
+                        if frame.shape[1] != win_w or frame.shape[0] != win_h:
+                            frame = cv2.resize(frame, (win_w, win_h), interpolation=cv2.INTER_LINEAR)
+
+                    cv2.imshow(win_name, frame)
 
             key = cv2.waitKey(15) & 0xFF
             if key in (ord("q"), 27):
