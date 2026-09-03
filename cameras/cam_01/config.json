@@ -1,0 +1,21 @@
+{
+  "camera_id": "cam_01",
+  "name": "Koridor & Area Transit Depan",
+  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@192.212.160.70:554/Streaming/Channels/102",
+  "target_resolution": [
+    1280,
+    720
+  ],
+  "zones": {
+    "zone_1_koridor": {
+      "name": "Koridor Utama",
+      "dwell_threshold_sec": 15,
+      "min_contour_area": 400
+    },
+    "zone_2_transit": {
+      "name": "Area Transit Depan",
+      "dwell_threshold_sec": 1800,
+      "min_contour_area": 2500
+    }
+  }
+}

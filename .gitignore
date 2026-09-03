@@ -1,0 +1,43 @@
+# Python Runtime & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Environment Secrets
+.env
+.env*.local
+!.env.example
+
+# IDE & OS Artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Storage & Media Artifacts
+*.db
+*.db-wal
+*.db-shm
+storage/*.db*
+cameras/**/snapshots/*
+!cameras/**/snapshots/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Temporary Test Media & Logs
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.log
+scratch/
