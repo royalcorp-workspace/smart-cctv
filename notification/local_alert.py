@@ -123,8 +123,13 @@ class VisualHUD:
         now = time.time()
         blink_state = (int(now * 2) % 2) == 0  # 500ms toggle
 
-        # Identify which zones currently contain triggered violations
-        violated_zones = {obj.zone_id for obj in tracked_objects if getattr(obj, "is_triggered", False)}
+        # Identify which zones currently contain triggered violations (strictly for unattended bags)
+        violated_zones = {
+            obj.zone_id
+            for obj in tracked_objects
+            if getattr(obj, "is_triggered", False)
+            and getattr(obj, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+        }
 
         # 1. Draw ROI Zones
         for zone_id, pts in zones.items():
@@ -149,41 +154,51 @@ class VisualHUD:
         pad_y = 2
 
         for obj in tracked_objects:
+            # EDGE-AWARE VISUAL FILTER: Render active objects and in-zone grace period objects (anti-flicker).
+            # Never render ghost boxes near perimeter or exiting boundaries.
+            if hasattr(obj, "should_render"):
+                if not obj.should_render:
+                    continue
+            elif not getattr(obj, "is_active_this_frame", False):
+                continue
+
+            # STRICT ROI FILTER: Never render objects outside active ROI zones
+            if not getattr(obj, "zone_id", None) or obj.zone_id not in zones:
+                continue
+
             x, y, bw, bh = obj.bbox
             track_id = obj.track_id
-            dwell = obj.dwell_duration
-            is_zone_2 = "zone_2" in getattr(obj, "zone_id", "")
-            is_attended = getattr(obj, "is_attended", False)
+            dwell = getattr(obj, "dwell_duration", 0.0)
             raw_label = getattr(obj, "class_label", "object")
-            label_name = "Tas" if (is_zone_2 or raw_label == "tas") else "Person"
+            is_bag = raw_label in ("tas", "backpack", "handbag", "suitcase")
+            is_attended = getattr(obj, "is_attended", False)
 
-            if is_zone_2:
-                if is_attended:
-                    box_color = COLOR_SAFE
-                    badge_text = f"ID {track_id} | Tas"
-                elif getattr(obj, "is_triggered", False) or dwell >= 60.0:
-                    # Blinking effect based on timestamp toggle (Merah)
-                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
-                    badge_text = "[ALERT] Tas Tertinggal"
-                elif getattr(obj, "is_stationary", False):
-                    if dwell <= 30.0:
-                        box_color = (0, 255, 255)  # 0 s.d. 30 detik: Kuning (Wajar)
-                    else:
-                        box_color = (0, 165, 255)  # 31 s.d. 59 detik: Oranye (Warning)
-                    badge_text = f"ID {track_id} | Tas"
-                else:
-                    box_color = COLOR_SAFE
-                    badge_text = f"ID {track_id} | Moving"
+            dwell_max = int(getattr(obj, "dwell_threshold", 60))
+
+            if not is_bag:
+                # PERSON ALWAYS NORMAL / GREEN (COLOR_SAFE) - Loitering alert disabled
+                box_color = COLOR_SAFE
+                badge_text = f"ID {track_id} | Person"
             else:
-                if getattr(obj, "is_triggered", False):
-                    box_color = COLOR_VIOLATION
-                    badge_text = "[ALERT] Violation"
+                # BAG OBJECT (ATTENDED / UNATTENDED / ALERT)
+                if is_attended:
+                    # Attended / Ada Orang (Hijau)
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Tas [AMAN / ATTENDED]"
+                elif getattr(obj, "is_triggered", False):
+                    # Alert (Merah / Oranye Berkedip)
+                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                    badge_text = f"[ALERT] ID {track_id} | Tas ({dwell:.0f}s)"
                 elif getattr(obj, "is_stationary", False):
-                    box_color = COLOR_WARNING
-                    badge_text = f"ID {track_id} | Person"
+                    # Unattended (Kuning / Oranye)
+                    if dwell <= 30.0:
+                        box_color = (0, 255, 255)  # 0 s.d. 30 detik: Kuning
+                    else:
+                        box_color = (0, 165, 255)  # 31 s.d. threshold: Oranye Warning
+                    badge_text = f"ID {track_id} | Tas ({dwell:.0f}s/{dwell_max}s)"
                 else:
                     box_color = COLOR_SAFE
-                    badge_text = f"ID {track_id} | Moving"
+                    badge_text = f"ID {track_id} | Tas"
 
             # Draw crisp thin bounding rectangle (thickness = 1) and small centroid
             cv2.rectangle(canvas, (x, y), (x + bw, y + bh), box_color, 1)

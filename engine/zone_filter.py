@@ -35,19 +35,62 @@ class ZoneFilter:
             cv2.fillPoly(mask, [self.polygon_contours[zone_id]], 255)
         return mask
 
-    def check_point_in_zone(self, point: Tuple[int, int], zone_id: str) -> bool:
-        """Check if a point (x, y) resides inside the specified polygon."""
+    def get_all_zones_mask(self, shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
+        """Generate combined binary mask for all active ROI polygon zones."""
+        target_shape = shape if shape is not None else self.frame_shape
+        if target_shape is None:
+            raise ValueError("Frame shape must be specified to generate zone mask.")
+
+        mask = np.zeros((target_shape[0], target_shape[1]), dtype=np.uint8)
+        all_polys = list(self.polygon_contours.values())
+        if all_polys:
+            cv2.fillPoly(mask, all_polys, 255)
+        return mask
+
+    def check_point_in_zone(self, point: Tuple[int, int], zone_id: str, margin_px: float = 0.0) -> bool:
+        """Check if a point (x, y) resides inside the specified polygon (or within margin_px tolerance)."""
         if zone_id not in self.polygon_contours:
             return False
-        res = cv2.pointPolygonTest(self.polygon_contours[zone_id], (float(point[0]), float(point[1])), False)
-        return res >= 0
+        dist = float(cv2.pointPolygonTest(self.polygon_contours[zone_id], (float(point[0]), float(point[1])), True))
+        return dist >= -margin_px
 
-    def find_zone_for_point(self, point: Tuple[int, int]) -> Optional[str]:
-        """Find the matching zone_id containing the point, if any."""
+    def get_distance_to_nearest_zone(self, point: Tuple[int, int]) -> float:
+        """Get signed distance in pixels to nearest zone boundary across all zones."""
+        if not self.polygon_contours:
+            return -999.0
+        max_dist = -999.0
+        for contour in self.polygon_contours.values():
+            dist = float(cv2.pointPolygonTest(contour, (float(point[0]), float(point[1])), True))
+            if dist > max_dist:
+                max_dist = dist
+        return max_dist
+
+    def get_point_zone_distance(self, point: Tuple[int, int], zone_id: str) -> float:
+        """Get signed distance in pixels from point to zone boundary (positive inside, negative outside)."""
+        if zone_id not in self.polygon_contours:
+            return -999.0
+        return float(cv2.pointPolygonTest(self.polygon_contours[zone_id], (float(point[0]), float(point[1])), True))
+
+    def find_zone_and_distance(
+        self, point: Tuple[int, int], margin_px: float = 0.0
+    ) -> Tuple[Optional[str], float]:
+        """Find the matching zone_id and signed distance to nearest edge (positive inside, negative outside)."""
+        best_zone: Optional[str] = None
+        max_dist: float = -999.0
+
         for zone_id, contour in self.polygon_contours.items():
-            if cv2.pointPolygonTest(contour, (float(point[0]), float(point[1])), False) >= 0:
-                return zone_id
-        return None
+            dist = float(cv2.pointPolygonTest(contour, (float(point[0]), float(point[1])), True))
+            if dist >= -margin_px:
+                if dist > max_dist:
+                    max_dist = dist
+                    best_zone = zone_id
+
+        return best_zone, max_dist
+
+    def find_zone_for_point(self, point: Tuple[int, int], margin_px: float = 0.0) -> Optional[str]:
+        """Find the matching zone_id containing the point, if any."""
+        zone, _ = self.find_zone_and_distance(point, margin_px=margin_px)
+        return zone
 
     def filter_contours(
         self,

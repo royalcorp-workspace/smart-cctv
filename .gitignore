@@ -16,6 +16,8 @@ ENV/
 .env
 .env*.local
 !.env.example
+configs/telegram.json
+!configs/telegram.json.example
 
 # IDE & OS Artifacts
 .vscode/
@@ -46,4 +48,10 @@ logs/*.log
 *.mkv
 *.mov
 *.log
+
+# AI Model Weights & Exports
+*.pt
+*.onnx
+*_openvino_model/
+runs/
 scratch/
