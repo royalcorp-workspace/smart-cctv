@@ -34,13 +34,14 @@ class ROICalibrator:
         camera_id: str,
         image_path: Optional[Path] = None,
         target_resolution: Optional[Tuple[int, int]] = None,
+        cam_dir: Optional[Path] = None,
     ) -> None:
         self.camera_id: str = camera_id
         self.image_path: Optional[Path] = image_path
         self.target_resolution: Optional[Tuple[int, int]] = target_resolution
         
         self.base_dir: Path = Path(__file__).resolve().parent.parent
-        self.cam_dir: Path = self.base_dir / "cameras" / camera_id
+        self.cam_dir: Path = Path(cam_dir) if cam_dir is not None else (self.base_dir / "cameras" / camera_id)
         self.config_path: Path = self.cam_dir / "config.json"
         self.roi_path: Path = self.cam_dir / "roi_zones.json"
 
@@ -52,14 +53,16 @@ class ROICalibrator:
         self.mouse_pos: Optional[Tuple[int, int]] = None
         self.window_name: str = f"ROI Calibrator - {self.camera_id}"
         
-        self._load_config_and_existing_zones()
+        self._load_camera_config()
         self.base_frame: np.ndarray = self._acquire_reference_frame()
         self.base_h, self.base_w = self.base_frame.shape[:2]
         self.current_win_w: int = self.base_w
         self.current_win_h: int = self.base_h
 
-    def _load_config_and_existing_zones(self) -> None:
-        """Load camera configuration and existing polygon points if present."""
+        self._load_existing_zones()
+
+    def _load_camera_config(self) -> None:
+        """Load camera configuration to determine target resolution and stream source."""
         if not self.cam_dir.exists():
             print(f"[ERROR] Camera directory does not exist: {self.cam_dir}")
             sys.exit(1)
@@ -74,16 +77,49 @@ class ROICalibrator:
             except Exception as e:
                 print(f"[WARN] Failed to load {self.config_path}: {e}")
 
-        if self.roi_path.exists():
-            try:
-                with open(self.roi_path, "r", encoding="utf-8") as f:
-                    loaded_zones = json.load(f)
-                    for k, v in loaded_zones.items():
-                        if k in self.zones and isinstance(v, list):
-                            self.zones[k] = v
-                print(f"[INFO] Loaded existing ROI coordinates from {self.roi_path}")
-            except Exception as e:
-                print(f"[WARN] Failed to parse existing {self.roi_path}: {e}")
+    def _load_existing_zones(self) -> None:
+        """Load existing polygon points and upscale/downscale to current base_frame resolution if needed."""
+        if not self.roi_path.exists():
+            return
+
+        try:
+            with open(self.roi_path, "r", encoding="utf-8") as f:
+                loaded_data = json.load(f)
+
+            if not isinstance(loaded_data, dict):
+                return
+
+            # Determine loaded resolution
+            if "base_resolution" in loaded_data and isinstance(loaded_data["base_resolution"], (list, tuple)):
+                loaded_base = (int(loaded_data["base_resolution"][0]), int(loaded_data["base_resolution"][1]))
+            else:
+                # Heuristic: check coordinate bounds
+                max_x = 0
+                max_y = 0
+                for k, v in loaded_data.items():
+                    if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
+                        for pt in v:
+                            if len(pt) >= 2:
+                                max_x = max(max_x, pt[0])
+                                max_y = max(max_y, pt[1])
+                loaded_base = (1920, 1080) if (max_x > 640 or max_y > 480) else (640, 480)
+
+            # Compute scaling factor if loaded base resolution differs from current calibrator frame
+            sx = self.base_w / float(loaded_base[0]) if loaded_base[0] > 0 else 1.0
+            sy = self.base_h / float(loaded_base[1]) if loaded_base[1] > 0 else 1.0
+
+            for k, v in loaded_data.items():
+                if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
+                    if abs(sx - 1.0) > 0.01 or abs(sy - 1.0) > 0.01:
+                        scaled_pts = [[int(round(pt[0] * sx)), int(round(pt[1] * sy))] for pt in v]
+                        self.zones[k] = scaled_pts
+                        print(f"[INFO] Auto-scaled existing zone '{k}' from {loaded_base[0]}x{loaded_base[1]} to {self.base_w}x{self.base_h}")
+                    else:
+                        self.zones[k] = v
+
+            print(f"[INFO] Loaded existing ROI coordinates from {self.roi_path}")
+        except Exception as e:
+            print(f"[WARN] Failed to parse existing {self.roi_path}: {e}")
 
     def _acquire_reference_frame(self) -> np.ndarray:
         """Fetch frame from image file or camera stream/webcam."""
@@ -209,10 +245,17 @@ class ROICalibrator:
         return canvas
 
     def save_zones(self) -> None:
-        """Write polygon coordinates to camera roi_zones.json."""
+        """Write polygon coordinates and base_resolution to camera roi_zones.json."""
+        out_data = {
+            "base_resolution": [self.base_w, self.base_h],
+        }
+        for k, v in self.zones.items():
+            if not k.startswith("_") and k != "base_resolution":
+                out_data[k] = v
+
         with open(self.roi_path, "w", encoding="utf-8") as f:
-            json.dump(self.zones, f, indent=2)
-        print(f"\n[SUCCESS] Saved ROI configurations to: {self.roi_path}")
+            json.dump(out_data, f, indent=2)
+        print(f"\n[SUCCESS] Saved ROI configurations (base: {self.base_w}x{self.base_h}) to: {self.roi_path}")
 
     def run(self) -> None:
         """Main calibration display loop."""

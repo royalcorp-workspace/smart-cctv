@@ -1,10 +1,10 @@
 {
   "camera_id": "cam_01",
   "name": "Koridor & Area Transit Depan",
-  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@${CAM01_IP}:${CAM01_PORT}/Streaming/Channels/102",
+  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@${CAM01_IP}:${CAM01_PORT}/Streaming/Channels/101",
   "target_resolution": [
-    640,
-    480
+    1920,
+    1080
   ],
   "detector": {
     "enabled_classes": [
@@ -20,20 +20,49 @@
     ],
     "confidence_threshold": 0.50
   },
+  "face_detector": {
+    "enabled": true,
+    "model_path": "models/face_detection_yunet_2023mar.onnx",
+    "score_threshold": 0.48,
+    "nms_threshold": 0.30,
+    "detect_interval_frames": 3,
+    "face_roi_crop": [100, 40, 1250, 520],
+    "alternate_inference": true
+  },
+  "face_recognizer": {
+    "enabled": true,
+    "model_path": "models/face_recognition_sface_2021dec.onnx",
+    "known_faces_dir": "data/known_faces",
+    "cosine_threshold": 0.50
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "8925615980:AAHxnbn-zhP9jkLgjgvmpDJb1Iv2HdVEZRc",
+    "chat_id": "6475972611"
+  },
   "zones": {
     "zone_1_koridor": {
-      "name": "Koridor Utama",
-      "dwell_threshold_sec": 15,
+      "name": "Koridor Utama (Walkway)",
+      "detect_unattended": false,
+      "dwell_threshold_sec": 3600,
+      "dwell_time_threshold": 3600.0,
+      "unattended_threshold": 3600.0,
       "min_contour_area": 300
     },
     "zone_1__koridor": {
-      "name": "Koridor Utama",
-      "dwell_threshold_sec": 15,
+      "name": "Koridor Utama (Walkway)",
+      "detect_unattended": false,
+      "dwell_threshold_sec": 3600,
+      "dwell_time_threshold": 3600.0,
+      "unattended_threshold": 3600.0,
       "min_contour_area": 300
     },
     "zone_2_transit": {
-      "name": "Area Transit Depan",
-      "dwell_threshold_sec": 60,
+      "name": "Area Transit Depan (Penitipan)",
+      "detect_unattended": true,
+      "dwell_threshold_sec": 3600,
+      "dwell_time_threshold": 3600.0,
+      "unattended_threshold": 3600.0,
       "min_contour_area": 250,
       "target_classes": [
         "backpack",
@@ -42,8 +71,11 @@
       ]
     },
     "zone_2__transit": {
-      "name": "Area Transit Depan",
-      "dwell_threshold_sec": 60,
+      "name": "Area Transit Depan (Penitipan)",
+      "detect_unattended": true,
+      "dwell_threshold_sec": 3600,
+      "dwell_time_threshold": 3600.0,
+      "unattended_threshold": 3600.0,
       "min_contour_area": 250,
       "target_classes": [
         "backpack",

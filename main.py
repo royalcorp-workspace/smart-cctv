@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -17,6 +17,8 @@ from engine.dual_subtractor import DualSubtractor
 from engine.logger import logger
 from engine.retention import cleanup_old_records
 from engine.rtsp_stream import ThreadedCapture
+from engine.face_detector import YuNetFaceDetector
+from engine.face_recognizer import FaceRecognizer
 from engine.tracker import CentroidTracker, TrackedObject
 from engine.yolo_detector import YOLOOpenVINODetector
 from engine.zone_filter import ZoneFilter
@@ -37,11 +39,14 @@ class CameraPipeline:
 
         self._load_configurations()
 
-        # Target resolution
+        # Target resolution (Display / Capture frame)
         self.target_resolution: Optional[Tuple[int, int]] = None
         cfg_res = self.config.get("target_resolution")
         if cfg_res and len(cfg_res) == 2:
             self.target_resolution = (int(cfg_res[0]), int(cfg_res[1]))
+
+        # Decoupled AI inference resolution (fixed 640x480 for lightweight CPU performance)
+        self.infer_resolution: Tuple[int, int] = (640, 480)
 
         # Initialize Subcomponents
         self.capture = ThreadedCapture(source=self.config.get("source", 0))
@@ -56,6 +61,9 @@ class CameraPipeline:
             confidence_threshold=conf_thresh,
             imgsz=640,
         )
+        # YOLO 2-frame inference stride state (cuts object detector CPU load in half)
+        self._yolo_frame_index: int = 0
+        self._cached_yolo_results: List[Any] = []
 
         self.subtractor = DualSubtractor(
             slow_history=5000,
@@ -66,7 +74,8 @@ class CameraPipeline:
         self.zone_filter = ZoneFilter(
             zones=self.roi_zones,
             zone_configs=self.config.get("zones", {}),
-            frame_shape=self.target_resolution[::-1] if self.target_resolution else (720, 1280),
+            frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
+            base_resolution=self.roi_base_resolution,
         )
         self.tracker = CentroidTracker(
             max_distance_px=50.0,
@@ -90,6 +99,79 @@ class CameraPipeline:
         self._display_lock = threading.Lock()
         self._latest_display_frame: Optional[np.ndarray] = None
         
+        # Universal Face Detector (OpenCV YuNet across all areas)
+        face_cfg = self.config.get("face_detector", {})
+        self.face_detection_enabled: bool = bool(face_cfg.get("enabled", True))
+        self.face_detector: Optional[YuNetFaceDetector] = None
+        self._face_detect_interval: int = int(face_cfg.get("detect_interval_frames", 3))
+        self._cached_faces: List[Tuple[Tuple[int, int, int, int], float, str]] = []
+        self._face_frame_index: int = 0
+
+        # Focused Desk Sub-Frame Crop ROI on 1080p canvas with dynamic fallback
+        face_crop_cfg = face_cfg.get("face_roi_crop", [100, 40, 1250, 520])
+        if isinstance(face_crop_cfg, (list, tuple)) and len(face_crop_cfg) == 4:
+            self.face_roi_crop: Tuple[int, int, int, int] = (
+                int(face_crop_cfg[0]),
+                int(face_crop_cfg[1]),
+                int(face_crop_cfg[2]),
+                int(face_crop_cfg[3]),
+            )
+        else:
+            self.face_roi_crop = (100, 40, 1250, 520)
+
+        # Recognition caching for stationary faces (eliminates redundant SFace calls & preserves 8-10 FPS)
+        self._face_recog_cache: Dict[int, Dict[str, Any]] = {}
+
+        if self.face_detection_enabled:
+            try:
+                face_model = face_cfg.get("model_path", None)
+                score_th = float(face_cfg.get("score_threshold", 0.48))
+                nms_th = float(face_cfg.get("nms_threshold", 0.30))
+                alternate_infer = bool(face_cfg.get("alternate_inference", True))
+                self.face_detector = YuNetFaceDetector(
+                    model_path=face_model,
+                    score_threshold=score_th,
+                    nms_threshold=nms_th,
+                    input_size=self.infer_resolution,
+                    auto_download=True,
+                    max_missed_frames=6,
+                    alternate_inference=alternate_infer,
+                )
+                logger.info(
+                    f"[{self.camera_id}] YuNet Face Detector initialized "
+                    f"(interval={self._face_detect_interval} frames, alternate={alternate_infer}, input_size={self.infer_resolution})."
+                )
+            except Exception as e:
+                logger.warning(f"[{self.camera_id}] Failed to initialize YuNet Face Detector: {e}. Running without face detection.")
+                self.face_detector = None
+                self.face_detection_enabled = False
+
+        # Universal Face Recognizer (OpenCV SFace with Local Photo Database)
+        face_rec_cfg = self.config.get("face_recognizer", {})
+        self.face_recognition_enabled: bool = bool(face_rec_cfg.get("enabled", True))
+        self.face_recognizer: Optional[FaceRecognizer] = None
+
+        if self.face_recognition_enabled and self.face_detector is not None:
+            try:
+                rec_model = face_rec_cfg.get("model_path", None)
+                rec_dir = face_rec_cfg.get("known_faces_dir", None)
+                cos_th = float(face_rec_cfg.get("cosine_threshold", 0.50))
+                self.face_recognizer = FaceRecognizer(
+                    model_path=rec_model,
+                    known_faces_dir=rec_dir,
+                    cosine_threshold=cos_th,
+                    auto_download=True,
+                    detector=self.face_detector,
+                )
+                logger.info(
+                    f"[{self.camera_id}] SFace Face Recognizer initialized "
+                    f"({len(self.face_recognizer.known_embeddings)} identities indexed, threshold={cos_th})."
+                )
+            except Exception as e:
+                logger.warning(f"[{self.camera_id}] Failed to initialize Face Recognizer: {e}. Running without recognition.")
+                self.face_recognizer = None
+                self.face_recognition_enabled = False
+
         # FPS Calculation
         self._frame_count: int = 0
         self._fps_start_time: float = time.time()
@@ -106,9 +188,32 @@ class CameraPipeline:
         self.camera_id: str = self.config.get("camera_id", self.camera_dir.name)
 
         self.roi_zones: Dict[str, List[List[int]]] = {}
+        self.roi_base_resolution: Tuple[int, int] = (1920, 1080)
         if self.roi_path.exists():
             with open(self.roi_path, "r", encoding="utf-8") as f:
-                self.roi_zones = json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "base_resolution" in data and isinstance(data["base_resolution"], (list, tuple)):
+                        self.roi_base_resolution = (int(data["base_resolution"][0]), int(data["base_resolution"][1]))
+                    else:
+                        # Auto-detect: if any coordinate x > 640 or y > 480 -> 1080p, else 640p
+                        max_x = 0
+                        max_y = 0
+                        for k, v in data.items():
+                            if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
+                                for pt in v:
+                                    if len(pt) >= 2:
+                                        max_x = max(max_x, pt[0])
+                                        max_y = max(max_y, pt[1])
+                        if max_x > 640 or max_y > 480:
+                            self.roi_base_resolution = (1920, 1080)
+                        else:
+                            self.roi_base_resolution = (640, 480)
+
+                    self.roi_zones = {
+                        k: v for k, v in data.items()
+                        if isinstance(v, list) and not k.startswith("_") and k != "base_resolution"
+                    }
 
     def start(self) -> "CameraPipeline":
         """Start capture and processing pipeline in background thread."""
@@ -141,8 +246,8 @@ class CameraPipeline:
             return True
 
         for (px, py, pw, ph) in person_boxes:
-            # Check 1: Bag centroid inside person bounding box
-            if px <= bcx <= (px + pw) and py <= bcy <= (py + ph):
+            # Check 1: Bag centroid inside person bounding box (with 5px margin)
+            if (px - 5) <= bcx <= (px + pw + 5) and (py - 5) <= bcy <= (py + ph + 5):
                 return True
 
             # Check 2: Intersection over Foreground (bag area) > 0.3
@@ -176,8 +281,8 @@ class CameraPipeline:
                             self._resolve_event_async(eid)
 
                     # Render offline canvas using target resolution dimensions
-                    target_w = self.target_resolution[0] if self.target_resolution else 640
-                    target_h = self.target_resolution[1] if self.target_resolution else 480
+                    target_w = self.target_resolution[0] if self.target_resolution else 1920
+                    target_h = self.target_resolution[1] if self.target_resolution else 1080
                     placeholder = np.zeros((target_h, target_w, 3), dtype=np.uint8)
                     VisualHUD.render(
                         canvas=placeholder,
@@ -186,6 +291,7 @@ class CameraPipeline:
                         camera_id=self.camera_id,
                         fps=self.current_fps,
                         is_connected=False,
+                        faces=[],
                     )
                     with self._display_lock:
                         self._latest_display_frame = placeholder
@@ -197,37 +303,51 @@ class CameraPipeline:
 
             last_valid_frame_time = now
 
-            # Target resolution normalization
+            # Target resolution normalization (Display frame)
             if self.target_resolution is not None:
                 tw, th = self.target_resolution
                 if frame.shape[1] != tw or frame.shape[0] != th:
                     frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
 
-            # Keep clean raw copy for snapshot storage
+            # Decoupled resolution architecture:
+            # 1. High-resolution clean copy for display and snapshots (Full HD 1080p)
+            display_frame = frame.copy()
             raw_clean_frame = frame.copy()
 
-            # 1. YOLO11 Nano Object Detection (Person & Optional Bag proposal refinement)
-            yolo_results = self.detector.detect(frame)
+            # 2. Scaled lightweight inference frame (640x480) for AI models (YOLO11n, MOG2, YuNet)
+            infer_frame = cv2.resize(frame, self.infer_resolution, interpolation=cv2.INTER_LINEAR)
+
+            # 1. YOLO11 Nano Object Detection on 640x480 inference frame with 2-frame stride (50% CPU savings)
+            if (self._yolo_frame_index % 2) == 0:
+                self._cached_yolo_results = self.detector.detect(infer_frame)
+            self._yolo_frame_index += 1
+            yolo_results = self._cached_yolo_results
             person_boxes = [bbox for bbox, _, _, _, cid, _ in yolo_results if cid == 0]
+            # Also include any active person tracks to bridge single-frame detection drops
+            for trk in self.tracker.objects.values():
+                if trk.class_label == "person" and getattr(trk, "is_active_this_frame", False):
+                    if trk.bbox not in person_boxes:
+                        person_boxes.append(trk.bbox)
 
-            # 2. DualSubtractor for stationary object extraction across all active ROI zones
-            _, _, static_mask = self.subtractor.apply(frame)
-            if getattr(self, "_all_zones_mask", None) is None or self._all_zones_mask.shape != frame.shape[:2]:
-                self._all_zones_mask = self.zone_filter.get_all_zones_mask(shape=frame.shape[:2])
+            # 2. DualSubtractor for stationary object extraction on 640x480 inference frame
+            _, _, static_mask = self.subtractor.apply(infer_frame)
+            if getattr(self, "_unattended_zones_mask", None) is None or self._unattended_zones_mask.shape != infer_frame.shape[:2]:
+                self._unattended_zones_mask = self.zone_filter.get_unattended_zones_mask(shape=infer_frame.shape[:2])
 
-            # Spatial masking by union of all active ROI zones
-            static_mask_zoned = cv2.bitwise_and(static_mask, static_mask, mask=self._all_zones_mask)
+            # Spatial masking strictly by unattended zones (walkway / corridor is 100% blacked out)
+            static_mask_zoned = cv2.bitwise_and(static_mask, static_mask, mask=self._unattended_zones_mask)
 
             # Masking area person pada subtractor:
-            # Paint solid black (0) over person bounding boxes with +10px padding
-            # to eliminate person clothing, torso, and feet from static mask
-            fh, fw = frame.shape[:2]
+            # Paint solid black (0) over person bounding boxes with expanded +15px padding
+            # to eliminate person clothing, torso, shadow, and feet from static mask
+            fh, fw = infer_frame.shape[:2]
             for (px, py, pw, ph) in person_boxes:
-                px1 = max(0, px - 10)
-                py1 = max(0, py - 10)
-                px2 = min(fw, px + pw + 10)
-                py2 = min(fh, py + ph + 10)
+                px1 = max(0, px - 15)
+                py1 = max(0, py - 15)
+                px2 = min(fw, px + pw + 15)
+                py2 = min(fh, py + ph + 15)
                 cv2.rectangle(static_mask_zoned, (px1, py1), (px2, py2), 0, -1)
+                cv2.rectangle(static_mask, (px1, py1), (px2, py2), 0, -1)
 
             # Universal contour merging: MORPH_CLOSE (11x11) + light dilation to bridge split straps, shadows, fragmented blobs
             static_merged = cv2.morphologyEx(static_mask_zoned, cv2.MORPH_CLOSE, self._kernel_close_large)
@@ -250,7 +370,7 @@ class CameraPipeline:
                     continue
 
                 # Ghost Artifact Elimination (uncovered flat floor verification)
-                crop = frame[by:by+bh, bx:bx+bw]
+                crop = infer_frame[by:by+bh, bx:bx+bw]
                 if crop.size > 0:
                     crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                     crop_var = float(np.var(crop_gray))
@@ -301,6 +421,16 @@ class CameraPipeline:
                         ref_point, margin_px=8.0
                     )
                     if matched_zone is not None:
+                        # Zone Role Separation: Only allow unattended bag monitoring in unattended zones!
+                        z_cfg = self.config.get("zones", {}).get(matched_zone, {})
+                        if not z_cfg and matched_zone.replace("__", "_") in self.config.get("zones", {}):
+                            z_cfg = self.config.get("zones", {})[matched_zone.replace("__", "_")]
+                        is_unattended = z_cfg.get("detect_unattended", None)
+                        if is_unattended is None:
+                            is_unattended = ("transit" in matched_zone.lower()) and ("koridor" not in matched_zone.lower())
+                        if not is_unattended:
+                            continue
+
                         area = float(bbox[2] * bbox[3])
                         # Deduplicate with DualSubtractor detection (within 50 px) in the same zone
                         is_dup = False
@@ -332,9 +462,16 @@ class CameraPipeline:
                         z_info = zones_cfg.get(track.zone_id, {})
                         if not z_info and track.zone_id.replace("__", "_") in zones_cfg:
                             z_info = zones_cfg[track.zone_id.replace("__", "_")]
-                        dwell_max = int(z_info.get("dwell_threshold_sec", 60))
+                        is_unattended_z = z_info.get("detect_unattended", None)
+                        if is_unattended_z is None:
+                            is_unattended_z = ("transit" in track.zone_id.lower()) and ("koridor" not in track.zone_id.lower())
+                        if not is_unattended_z:
+                            continue
+                        dwell_max = float(z_info.get("dwell_threshold_sec", z_info.get("dwell_time_threshold", z_info.get("unattended_threshold", 3600.0))))
+                        max_str = f"{max(1, int(round(dwell_max / 60.0)))}m"
+                        cur_str = f"{track.dwell_duration / 60.0:.1f}m"
                         status_str = "ATTENDED" if getattr(track, "is_attended", False) else "UNATTENDED"
-                        log_msg = f"[TRACKER] ID: {track.track_id} | Dwell: {track.dwell_duration:.1f}s / {dwell_max}s | Status: {status_str}"
+                        log_msg = f"[TRACKER] ID: {track.track_id} | Dwell: {cur_str} / {max_str} | Status: {status_str}"
                         print(log_msg)
                         logger.info(log_msg)
                 self._last_dwell_log_time = now
@@ -345,32 +482,40 @@ class CameraPipeline:
                 if getattr(track, "class_label", "") == "person":
                     if track.is_triggered:
                         track.is_triggered = False
+                        track.alert_sent = False
                         track.dwell_duration = 0.0
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
                             self._resolve_event_async(eid)
                     continue
 
-                # 2. EXIT ZONE RESET: If track is not in a valid monitored zone, immediately disarm and clear
+                # 2. EXIT ZONE / NON-UNATTENDED ZONE RESET:
+                # If track is not in a valid unattended monitoring zone (e.g. corridor or outside), immediately disarm and clear
                 zone_info = zones_cfg.get(track.zone_id, {})
                 if not zone_info and track.zone_id.replace("__", "_") in zones_cfg:
                     zone_info = zones_cfg[track.zone_id.replace("__", "_")]
 
-                if not zone_info or not track.zone_id or "unassigned" in track.zone_id or "outside" in track.zone_id:
+                is_unattended_zone = zone_info.get("detect_unattended", None)
+                if is_unattended_zone is None:
+                    is_unattended_zone = ("transit" in track.zone_id.lower()) and ("koridor" not in track.zone_id.lower())
+
+                if not is_unattended_zone or not track.zone_id or "unassigned" in track.zone_id or "outside" in track.zone_id:
                     if track.is_triggered:
                         track.is_triggered = False
+                        track.alert_sent = False
                         track.dwell_duration = 0.0
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
                             self._resolve_event_async(eid)
                     continue
 
-                track.dwell_threshold = float(zone_info.get("dwell_threshold_sec", 60.0))
+                track.dwell_threshold = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
 
                 # 3. OWNER PROXIMITY CHECK: If owner is nearby (is_attended = True), disarm trigger
                 if getattr(track, "is_attended", False):
                     if track.is_triggered:
                         track.is_triggered = False
+                        track.alert_sent = False
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
                             self._resolve_event_async(eid)
@@ -378,7 +523,7 @@ class CameraPipeline:
 
                 # 4. VIOLATION ONLY FOR UNATTENDED BAGS:
                 if track.is_stationary:
-                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", 60.0))
+                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
 
                     if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                         track.is_triggered = True
@@ -394,7 +539,9 @@ class CameraPipeline:
                         self.io_executor.submit(cv2.imwrite, str(storage_path), raw_clean_frame)
                         self.io_executor.submit(cv2.imwrite, str(reports_path), raw_clean_frame)
                         
-                        alert_msg = f"[ALERT] Unattended Bag detected in {track.zone_id} for over {int(dwell_thresh)} seconds!"
+                        zone_name = zone_info.get("name", track.zone_id)
+                        dwell_minutes = track.dwell_duration / 60.0
+                        alert_msg = f"[CLEAR AREA VIOLATION] Objek terlarang terdeteksi di area steril ({zone_name}), durasi: {dwell_minutes:.1f} menit"
                         print(f"\n{alert_msg}\n")
                         logger.warning(alert_msg)
 
@@ -405,7 +552,7 @@ class CameraPipeline:
 
                         # Immediate synchronous DB event registration
                         try:
-                            event_type = "UNATTENDED_BAG"
+                            event_type = "CLEAR_AREA_VIOLATION"
                             event_id = log_event(
                                 camera_id=self.camera_id,
                                 zone_id=track.zone_id,
@@ -419,23 +566,31 @@ class CameraPipeline:
                             track.db_event_id = event_id
                             self.active_db_events[track.track_id] = event_id
                             logger.warning(
-                                f"[{self.camera_id}] Unattended bag violation registered in '{track.zone_id}' "
-                                f"by Track ID {track.track_id} (Dwell: {track.dwell_duration:.1f}s). Event ID: {event_id}"
+                                f"[{self.camera_id}] Pelanggaran Clear Area terdaftar di '{zone_name}' "
+                                f"oleh Track ID {track.track_id} (Dwell: {dwell_minutes:.1f}m). Event ID: {event_id}"
                             )
                         except Exception as e:
                             logger.error(f"[{self.camera_id}] DB event log failed: {e}")
 
-                        # Non-blocking Telegram photo alert dispatch (Zero FPS drop)
-                        formatted_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        self.telegram_notifier.dispatch_alert(
-                            camera_id=self.camera_id,
-                            zone_id=track.zone_id,
-                            track_id=track.track_id,
-                            dwell_duration=track.dwell_duration,
-                            timestamp_str=formatted_time,
-                            frame=raw_clean_frame,
-                            bbox=track.bbox,
-                        )
+                        # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
+                        if not getattr(track, "alert_sent", False):
+                            track.alert_sent = True
+                            formatted_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            zone_name = zone_info.get("name", track.zone_id)
+                            try:
+                                self.telegram_notifier.dispatch_alert(
+                                    camera_id=self.camera_id,
+                                    zone_id=track.zone_id,
+                                    track_id=track.track_id,
+                                    dwell_duration=track.dwell_duration,
+                                    timestamp_str=formatted_time,
+                                    frame=raw_clean_frame,
+                                    bbox=track.bbox,
+                                    zone_name=zone_name,
+                                    zones=self.roi_zones,
+                                )
+                            except Exception as e:
+                                logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
                     elif track.is_triggered:
                         # Continue requesting alarm pulses within cooldown
                         self.audio_worker.request_alarm()
@@ -454,14 +609,105 @@ class CameraPipeline:
                 self._frame_count = 0
                 self._fps_start_time = now
 
-            # 7. Render Decoupled Visual Overlay
+            # Universal Face Detection (OpenCV YuNet) and Recognition (OpenCV SFace)
+            if self.face_detection_enabled and self.face_detector is not None:
+                if (self._face_frame_index % self._face_detect_interval) == 0:
+                    try:
+                        detected_faces = self.face_detector.detect_faces(
+                            frame=infer_frame,
+                            display_frame=display_frame,
+                            crop_roi=self.face_roi_crop,
+                        )
+                        recognized_faces = []
+                        active_fids = set()
+                        now_recog = time.time()
+
+                        for item in detected_faces:
+                            bbox = item[0]
+                            score = item[1]
+                            raw_face_640 = item[2] if len(item) >= 3 else None
+                            raw_face_1080 = item[3] if len(item) >= 4 else None
+                            face_id = item[4] if len(item) >= 5 else None
+
+                            if face_id is not None:
+                                active_fids.add(face_id)
+
+                            face_label = "Unknown"
+                            if self.face_recognition_enabled and self.face_recognizer is not None:
+                                # Determine 1080p face dimensions for minimum size gating (min 28x28 px)
+                                if raw_face_1080 is not None:
+                                    face_w_1080 = float(raw_face_1080[2])
+                                    face_h_1080 = float(raw_face_1080[3])
+                                else:
+                                    face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
+                                    face_h_1080 = float(bbox[3]) * (1080.0 / 480.0)
+
+                                if face_w_1080 < 28.0 or face_h_1080 < 28.0:
+                                    # Distant micro-face (< 28x28 px): Immediately classify as Unknown without SFace inference
+                                    face_label = "Unknown"
+                                    if face_id is not None:
+                                        self._face_recog_cache[face_id] = {
+                                            "label": "Unknown",
+                                            "time": now_recog,
+                                            "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
+                                        }
+                                else:
+                                    # Prominent face (>= 28x28 px): Check stationary cache
+                                    cached = self._face_recog_cache.get(face_id, {})
+                                    cached_label = cached.get("label")
+                                    last_time = cached.get("time", 0.0)
+                                    last_pos = cached.get("pos", (0, 0))
+
+                                    cur_pos = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
+                                    dist_moved = ((cur_pos[0] - last_pos[0]) ** 2 + (cur_pos[1] - last_pos[1]) ** 2) ** 0.5
+                                    elapsed = now_recog - last_time
+
+                                    # Reuse cache if stationary (< 15 px movement) within validity window (2.5s for known, 1.0s for unknown)
+                                    cache_ttl = 2.5 if (cached_label and cached_label != "Unknown") else 1.0
+                                    if cached_label and dist_moved < 15.0 and elapsed < cache_ttl:
+                                        face_label = cached_label
+                                    else:
+                                        # Recognize using 1080p display_frame with raw_face_1080 if available
+                                        if raw_face_1080 is not None and display_frame is not None:
+                                            _, _, face_label = self.face_recognizer.recognize(
+                                                frame=display_frame, face_data=raw_face_1080, min_size=28
+                                            )
+                                        else:
+                                            face_input = raw_face_640 if raw_face_640 is not None else bbox
+                                            _, _, face_label = self.face_recognizer.recognize(
+                                                frame=infer_frame, face_data=face_input, min_size=10
+                                            )
+
+                                        if face_id is not None:
+                                            self._face_recog_cache[face_id] = {
+                                                "label": face_label,
+                                                "time": now_recog,
+                                                "pos": cur_pos,
+                                            }
+
+                            recognized_faces.append((bbox, score, face_label))
+
+                        # Purge stale face recognition caches
+                        if active_fids:
+                            self._face_recog_cache = {
+                                fid: v for fid, v in self._face_recog_cache.items() if fid in active_fids
+                            }
+
+                        self._cached_faces = recognized_faces
+                    except Exception as e:
+                        logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
+                self._face_frame_index += 1
+
+            # 7. Render Decoupled Visual Overlay onto Full HD display_frame
             display_frame = VisualHUD.render(
-                canvas=frame,
+                canvas=display_frame,
                 zones=self.roi_zones,
                 tracked_objects=active_tracks,
                 camera_id=self.camera_id,
                 fps=self.current_fps,
                 is_connected=self.capture.is_connected,
+                faces=self._cached_faces,
+                zone_base_resolution=self.roi_base_resolution,
             )
 
             with self._display_lock:

@@ -21,6 +21,7 @@ class TrackedObject:
     dwell_duration: float = 0.0
     is_stationary: bool = False
     is_triggered: bool = False
+    alert_sent: bool = False
     is_attended: bool = False
     is_active_this_frame: bool = True
     class_label: str = "object"
@@ -33,7 +34,7 @@ class TrackedObject:
     frame_count: int = 1
     attended_start: Optional[float] = None
     attended_duration: float = 0.0
-    dwell_threshold: float = 60.0
+    dwell_threshold: float = 3600.0
 
     @property
     def is_static_artifact(self) -> bool:
@@ -118,6 +119,7 @@ class CentroidTracker:
             dwell_duration=0.0,
             is_stationary=False,
             is_triggered=False,
+            alert_sent=False,
             is_attended=False,
             is_active_this_frame=True,
             class_label=label,
@@ -247,12 +249,14 @@ class CentroidTracker:
                     obj.anchor_centroid = smoothed_centroid
                     obj.dwell_duration = 0.0
                     obj.is_triggered = False
+                    obj.alert_sent = False
             else:
                 # Person never triggers dwell violation
                 obj.is_stationary = False
                 obj.stationary_start = now
                 obj.dwell_duration = 0.0
                 obj.is_triggered = False
+                obj.alert_sent = False
 
             if zone_id and zone_id != obj.zone_id:
                 obj.zone_id = zone_id
@@ -341,6 +345,7 @@ class CentroidTracker:
                         matched_existing.anchor_centroid = matched_existing.centroid
                         matched_existing.dwell_duration = 0.0
                         matched_existing.is_triggered = False
+                        matched_existing.alert_sent = False
             else:
                 # Only register a new ID if completely outside 50 px of ANY known object
                 self._register(det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
@@ -442,6 +447,7 @@ class CentroidTracker:
                     bag.dwell_duration = 0.0
                     bag.stationary_start = now
                     bag.is_triggered = False
+                    bag.alert_sent = False
                 else:
                     # Passerby (< 4.0s): HOLD/PAUSE dwell timer at current accumulated duration
                     bag.stationary_start = now - bag.dwell_duration

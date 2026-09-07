@@ -21,6 +21,7 @@ CYCLE_TOTAL_SEC: float = ALARM_DURATION_SEC + COOLDOWN_SILENT_SEC
 COLOR_SAFE: Tuple[int, int, int] = (0, 255, 0)         # Green
 COLOR_WARNING: Tuple[int, int, int] = (0, 215, 255)    # Amber / Yellow
 COLOR_VIOLATION: Tuple[int, int, int] = (0, 0, 255)    # Red
+COLOR_FACE_OUTSIDE: Tuple[int, int, int] = (255, 200, 0)  # Cyan / Sky Blue (BGR: 255, 200, 0)
 COLOR_HUD_BG: Tuple[int, int, int] = (20, 20, 20)      # Dark gray HUD
 COLOR_TEXT_MAIN: Tuple[int, int, int] = (240, 240, 240)
 
@@ -117,11 +118,56 @@ class VisualHUD:
         camera_id: str,
         fps: float,
         is_connected: bool,
+        faces: Optional[List[Tuple[Tuple[int, int, int, int], float]]] = None,
+        outside_faces: Optional[List[Tuple[Tuple[int, int, int, int], float]]] = None,
+        zone_base_resolution: Optional[Tuple[int, int]] = None,
     ) -> np.ndarray:
         """Render complete CCTV visual indicators onto canvas."""
         h, w = canvas.shape[:2]
         now = time.time()
         blink_state = (int(now * 2) % 2) == 0  # 500ms toggle
+
+        active_faces = faces if faces is not None else (outside_faces or [])
+
+        # Dynamic Resolution Decoupling Scaling Ratios for Inference Objects (base 640x480)
+        scale_x = w / 640.0
+        scale_y = h / 480.0
+        scale_factor = min(scale_x, scale_y)
+
+        # Determine Zone Polygon Coordinate Base Resolution
+        if zone_base_resolution is not None:
+            zone_base_w, zone_base_h = zone_base_resolution
+        elif "base_resolution" in zones and isinstance(zones["base_resolution"], (list, tuple)):
+            zone_base_w, zone_base_h = zones["base_resolution"]
+        else:
+            # Auto-detect from coordinates: if any x > 640 or y > 480 -> 1080p, else 640p
+            max_zx = 0
+            max_zy = 0
+            for k, v in zones.items():
+                if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
+                    for pt in v:
+                        if len(pt) >= 2:
+                            max_zx = max(max_zx, pt[0])
+                            max_zy = max(max_zy, pt[1])
+            if max_zx > 640 or max_zy > 480:
+                zone_base_w, zone_base_h = (1920, 1080)
+            else:
+                zone_base_w, zone_base_h = (640, 480)
+
+        zone_scale_x = w / float(zone_base_w) if zone_base_w > 0 else 1.0
+        zone_scale_y = h / float(zone_base_h) if zone_base_h > 0 else 1.0
+
+        # Scaled typography and stroke properties for crisp monitor rendering
+        zone_thickness_safe = max(1, int(round(1.5 * scale_factor)))
+        zone_thickness_violation = max(2, int(round(2.5 * scale_factor)))
+        box_thickness_normal = 1
+        box_thickness_alert = 2
+        centroid_radius = max(2, int(round(3.0 * scale_factor)))
+        
+        bag_font_scale = 0.43
+        bag_font_thick = 1
+        pad_x = 4
+        pad_y = 2
 
         # Identify which zones currently contain triggered violations (strictly for unattended bags)
         violated_zones = {
@@ -131,28 +177,26 @@ class VisualHUD:
             and getattr(obj, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
         }
 
-        # 1. Draw ROI Zones
+        # 1. Draw ROI Zones (Dynamically scaled from zone_base_resolution to canvas)
         for zone_id, pts in zones.items():
+            if not isinstance(pts, list) or zone_id.startswith("_") or zone_id == "base_resolution":
+                continue
             if len(pts) < 3:
                 continue
-            np_pts = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+            scaled_pts = [[int(round(pt[0] * zone_scale_x)), int(round(pt[1] * zone_scale_y))] for pt in pts]
+            np_pts = np.array(scaled_pts, dtype=np.int32).reshape((-1, 1, 2))
             is_violated = zone_id in violated_zones
 
             if is_violated:
                 zone_color = COLOR_VIOLATION if blink_state else COLOR_WARNING
-                thickness = 2
+                thickness = zone_thickness_violation
             else:
                 zone_color = COLOR_SAFE
-                thickness = 1
+                thickness = zone_thickness_safe
 
             cv2.polylines(canvas, [np_pts], isClosed=True, color=zone_color, thickness=thickness, lineType=cv2.LINE_AA)
 
-        # 2. Draw Bounding Boxes and Status Badges (Refined for 640x480)
-        font_scale = 0.40
-        font_thick = 1
-        pad_x = 3
-        pad_y = 2
-
+        # 2. Draw Bounding Boxes and Status Badges
         for obj in tracked_objects:
             # EDGE-AWARE VISUAL FILTER: Render active objects and in-zone grace period objects (anti-flicker).
             # Never render ghost boxes near perimeter or exiting boundaries.
@@ -171,46 +215,68 @@ class VisualHUD:
             dwell = getattr(obj, "dwell_duration", 0.0)
             raw_label = getattr(obj, "class_label", "object")
             is_bag = raw_label in ("tas", "backpack", "handbag", "suitcase")
-            is_attended = getattr(obj, "is_attended", False)
 
-            dwell_max = int(getattr(obj, "dwell_threshold", 60))
-
+            # VISUAL CLUTTER REDUCTION: Hide person bounding boxes & badges from screen.
+            # Person detection, tracking, and owner proximity logic continue uninterrupted in background.
             if not is_bag:
-                # PERSON ALWAYS NORMAL / GREEN (COLOR_SAFE) - Loitering alert disabled
+                continue
+
+            # Scale bag coordinates from 640x480 space to canvas
+            sx = int(round(x * scale_x))
+            sy = int(round(y * scale_y))
+            sbw = int(round(bw * scale_x))
+            sbh = int(round(bh * scale_y))
+            scx = int(round(obj.centroid[0] * scale_x))
+            scy = int(round(obj.centroid[1] * scale_y))
+
+            is_attended = getattr(obj, "is_attended", False)
+            dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
+            max_mins = max(1, int(round(dwell_max / 60.0)))
+
+            # User-friendly minute-based dwell time format (strictly no raw seconds)
+            dwell_str = f"{dwell / 60.0:.1f}m/{max_mins}m"
+
+            # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT)
+            is_alert = (getattr(obj, "is_triggered", False) or dwell >= dwell_max)
+            if is_attended:
                 box_color = COLOR_SAFE
-                badge_text = f"ID {track_id} | Person"
-            else:
-                # BAG OBJECT (ATTENDED / UNATTENDED / ALERT)
-                if is_attended:
-                    # Attended / Ada Orang (Hijau)
-                    box_color = COLOR_SAFE
-                    badge_text = f"ID {track_id} | Tas [AMAN / ATTENDED]"
-                elif getattr(obj, "is_triggered", False):
-                    # Alert (Merah / Oranye Berkedip)
-                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
-                    badge_text = f"[ALERT] ID {track_id} | Tas ({dwell:.0f}s)"
-                elif getattr(obj, "is_stationary", False):
-                    # Unattended (Kuning / Oranye)
-                    if dwell <= 30.0:
-                        box_color = (0, 255, 255)  # 0 s.d. 30 detik: Kuning
-                    else:
-                        box_color = (0, 165, 255)  # 31 s.d. threshold: Oranye Warning
-                    badge_text = f"ID {track_id} | Tas ({dwell:.0f}s/{dwell_max}s)"
+                badge_text = f"ID {track_id} | Objek [AMAN]"
+            elif is_alert:
+                box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m)"
+            elif getattr(obj, "is_stationary", False):
+                if dwell <= (dwell_max * 0.5):
+                    box_color = (0, 255, 255)  # Kuning
                 else:
-                    box_color = COLOR_SAFE
-                    badge_text = f"ID {track_id} | Tas"
+                    box_color = (0, 165, 255)  # Oranye Warning
+                badge_text = f"ID {track_id} | Objek ({dwell_str})"
+            else:
+                box_color = COLOR_SAFE
+                badge_text = f"ID {track_id} | Objek"
 
-            # Draw crisp thin bounding rectangle (thickness = 1) and small centroid
-            cv2.rectangle(canvas, (x, y), (x + bw, y + bh), box_color, 1)
-            cv2.circle(canvas, obj.centroid, 2, box_color, -1)
+            # Draw crisp thin bounding rectangle and centroid (1px normal, max 2px alert)
+            cur_box_thick = box_thickness_alert if is_alert else box_thickness_normal
+            cv2.rectangle(canvas, (sx, sy), (sx + sbw, sy + sbh), box_color, cur_box_thick, lineType=cv2.LINE_AA)
+            cv2.circle(canvas, (scx, scy), centroid_radius, box_color, -1, lineType=cv2.LINE_AA)
 
-            # Compact badge background with minimal padding
-            (text_w, text_h), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
-            badge_y1 = max(0, y - text_h - (pad_y * 2) - 1)
-            badge_y2 = y
-            badge_x2 = min(w, x + text_w + (pad_x * 2))
+            # Compact badge background tightly touching top edge of bounding box
+            (text_w, text_h), baseline = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, bag_font_scale, bag_font_thick)
+            badge_h = text_h + (pad_y * 2) + 1
+            badge_w = text_w + (pad_x * 2)
+            if sy - badge_h >= 0:
+                badge_y1 = sy - badge_h
+                badge_y2 = sy
+            else:
+                badge_y1 = sy
+                badge_y2 = min(h, sy + badge_h)
+            badge_x1 = max(0, min(sx, w - badge_w))
+            badge_x2 = min(w, badge_x1 + badge_w)
 
-            cv2.rectangle(canvas, (x, badge_y1), (badge_x2, badge_y2), box_color, -1)
+            # Semi-transparent badge background (65% tint, 35% frame)
+            sub_badge = canvas[badge_y1:badge_y2, badge_x1:badge_x2]
+            if sub_badge.size > 0:
+                color_rect = np.full_like(sub_badge, box_color, dtype=np.uint8)
+                cv2.addWeighted(color_rect, 0.65, sub_badge, 0.35, 0, sub_badge)
             
             # High-contrast text color: white on red, black on green/yellow/orange
             is_dark_bg = box_color == (0, 0, 255)
@@ -219,47 +285,123 @@ class VisualHUD:
             cv2.putText(
                 canvas,
                 badge_text,
-                (x + pad_x, badge_y2 - pad_y - 1),
+                (badge_x1 + pad_x, badge_y2 - pad_y - 1),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
+                bag_font_scale,
                 text_color,
-                font_thick,
+                bag_font_thick,
                 cv2.LINE_AA,
             )
+
+        # 2a. Draw Faces (Cyan BGR: 255, 200, 0) across all areas
+        if active_faces:
+            face_font_scale = 0.42
+            face_font_thick = 1
+            face_pad_x = 4
+            face_pad_y = 2
+            face_box_thick = 1
+
+            for item in active_faces:
+                if len(item) >= 3:
+                    (fx, fy, fw_f, fh_f), f_score, face_label = item[0], item[1], item[2]
+                    if isinstance(face_label, str) and face_label:
+                        f_badge = face_label
+                    else:
+                        f_badge = f"Face {f_score:.2f}"
+                elif len(item) == 2:
+                    (fx, fy, fw_f, fh_f), f_score_or_label = item[0], item[1]
+                    if isinstance(f_score_or_label, str):
+                        f_badge = f_score_or_label
+                    else:
+                        f_badge = f"Face {f_score_or_label:.2f}"
+                else:
+                    continue
+
+                sfx = int(round(fx * scale_x))
+                sfy = int(round(fy * scale_y))
+                sfw = int(round(fw_f * scale_x))
+                sfh = int(round(fh_f * scale_y))
+
+                # Crisp 1px bounding box
+                cv2.rectangle(canvas, (sfx, sfy), (sfx + sfw, sfy + sfh), COLOR_FACE_OUTSIDE, face_box_thick, lineType=cv2.LINE_AA)
+                (f_tw, f_th), _ = cv2.getTextSize(f_badge, cv2.FONT_HERSHEY_SIMPLEX, face_font_scale, face_font_thick)
+                f_badge_h = f_th + (face_pad_y * 2) + 1
+                f_badge_w = f_tw + (face_pad_x * 2)
+                if sfy - f_badge_h >= 0:
+                    f_by1 = sfy - f_badge_h
+                    f_by2 = sfy
+                else:
+                    f_by1 = sfy
+                    f_by2 = min(h, sfy + f_badge_h)
+                f_bx1 = max(0, min(sfx, w - f_badge_w))
+                f_bx2 = min(w, f_bx1 + f_badge_w)
+
+                # Semi-transparent badge background (65% tint, 35% frame)
+                sub_f = canvas[f_by1:f_by2, f_bx1:f_bx2]
+                if sub_f.size > 0:
+                    color_rect = np.full_like(sub_f, COLOR_FACE_OUTSIDE, dtype=np.uint8)
+                    cv2.addWeighted(color_rect, 0.65, sub_f, 0.35, 0, sub_f)
+
+                cv2.putText(
+                    canvas,
+                    f_badge,
+                    (f_bx1 + face_pad_x, f_by2 - face_pad_y - 1),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    face_font_scale,
+                    (0, 0, 0),
+                    face_font_thick,
+                    cv2.LINE_AA,
+                )
 
         # 3. Top-Right Status Card (Leaves left & center open for native Hikvision camera OSD)
         conn_text = "ONLINE" if is_connected else "RECONNECTING"
         conn_color = (0, 255, 0) if is_connected else (0, 0, 255)
         text_color_main = (255, 255, 255)
+        bag_count = len([
+            o for o in tracked_objects
+            if getattr(o, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+            and getattr(o, "zone_id", None) in zones
+        ])
+        face_count = len(active_faces)
 
         line_1 = f"CAM: {camera_id} | {w}x{h} | FPS: {fps:.1f}"
-        line_2 = f"TARGETS: {len(tracked_objects)} | RTSP: {conn_text}"
+        line_2 = f"CLEAR AREA: {bag_count} | FACES: {face_count} | RTSP: {conn_text}"
 
-        font_scale_hud = 0.38
-        font_thick_hud = 1
+        font_scale_hud = 0.38 * scale_factor
+        font_thick_hud = max(1, int(round(1.2 * scale_factor)))
 
-        size_1 = cv2.getTextSize(line_1, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)[0]
-        size_2 = cv2.getTextSize(line_2, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)[0]
+        size_1, _ = cv2.getTextSize(line_1, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)
+        size_2, _ = cv2.getTextSize(line_2, cv2.FONT_HERSHEY_SIMPLEX, font_scale_hud, font_thick_hud)
 
-        card_w = max(size_1[0], size_2[0]) + 16
-        card_h = 36
-        card_x1 = max(0, w - card_w - 8)
-        card_y1 = 6
+        pad_card_x = int(round(12.0 * scale_factor))
+        pad_card_y = int(round(8.0 * scale_factor))
+        line_spacing = int(round(6.0 * scale_factor))
+
+        text_max_w = max(size_1[0], size_2[0])
+        card_w = text_max_w + (pad_card_x * 2)
+        card_h = size_1[1] + size_2[1] + (pad_card_y * 2) + line_spacing
+
+        margin_right = int(round(10.0 * scale_factor))
+        margin_top = int(round(8.0 * scale_factor))
+        card_x1 = max(0, w - card_w - margin_right)
+        card_y1 = margin_top
         card_x2 = min(w, card_x1 + card_w)
         card_y2 = card_y1 + card_h
 
-        # Semi-transparent dark card background only at top-right corner
+        # Semi-transparent dark card background only at top-right corner (zero-allocation in-place darkening)
         sub_img = canvas[card_y1:card_y2, card_x1:card_x2]
-        dark_rect = np.zeros_like(sub_img, dtype=np.uint8)
-        dark_rect[:] = (15, 15, 15)
-        canvas[card_y1:card_y2, card_x1:card_x2] = cv2.addWeighted(sub_img, 0.30, dark_rect, 0.70, 0)
-        cv2.rectangle(canvas, (card_x1, card_y1), (card_x2, card_y2), (60, 60, 60), 1)
+        if sub_img.size > 0:
+            cv2.convertScaleAbs(sub_img, sub_img, alpha=0.30, beta=10)
+            cv2.rectangle(canvas, (card_x1, card_y1), (card_x2, card_y2), (60, 60, 60), max(1, int(round(1.0 * scale_factor))))
 
         # Draw 2 lines of status info
+        line1_y = card_y1 + pad_card_y + size_1[1]
+        line2_y = line1_y + line_spacing + size_2[1]
+
         cv2.putText(
             canvas,
             line_1,
-            (card_x1 + 8, card_y1 + 14),
+            (card_x1 + pad_card_x, line1_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale_hud,
             text_color_main,
@@ -269,7 +411,7 @@ class VisualHUD:
         cv2.putText(
             canvas,
             line_2,
-            (card_x1 + 8, card_y1 + 29),
+            (card_x1 + pad_card_x, line2_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale_hud,
             conn_color,
