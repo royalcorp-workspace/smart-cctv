@@ -87,13 +87,14 @@ class YOLOOpenVINODetector:
         Returns list of tuples:
             ( (x, y, w, h), (cx, cy), (ref_x, ref_y), confidence, class_id, class_name )
         """
-        # Run base inference with low threshold (0.25) so distant small objects are not pruned early
+        # Run base inference with low threshold (0.25) and class-agnostic NMS
         results = self.model(
             frame,
             device=self.device,
             imgsz=self.imgsz,
             conf=0.25,
             classes=list(self.TARGET_CLASSES.keys()),
+            agnostic_nms=True,
             verbose=False,
         )
 
@@ -140,5 +141,19 @@ class YOLOOpenVINODetector:
                 ref_point = (cx, cy)
 
             detections.append(((x1, y1, w, h), (cx, cy), ref_point, cconf, cid, cname))
+
+        # Enforce Class-Agnostic NMS to eliminate overlapping duplicate boxes (e.g. backpack vs handbag)
+        if len(detections) > 1:
+            boxes_xywh = [[d[0][0], d[0][1], d[0][2], d[0][3]] for d in detections]
+            scores = [float(d[3]) for d in detections]
+            indices = cv2.dnn.NMSBoxes(
+                bboxes=boxes_xywh,
+                scores=scores,
+                score_threshold=0.20,
+                nms_threshold=0.45,
+            )
+            if len(indices) > 0:
+                indices_flat = indices.flatten()
+                detections = [detections[i] for i in indices_flat]
 
         return detections

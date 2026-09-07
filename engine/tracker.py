@@ -66,10 +66,10 @@ class TrackedObject:
         if self.is_active_this_frame:
             return True
 
-        # Hold stationary objects and bags for at least 30 frames
+        # Hold stationary objects and bags for at least 150 frames (~8-10 seconds at 15-18 FPS)
         is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
         if self.is_stationary or is_bag:
-            return self.missed_frames <= 30
+            return self.missed_frames <= 150
 
         return self.edge_distance >= 8.0 and self.missed_frames <= 10
 
@@ -83,8 +83,8 @@ class CentroidTracker:
         movement_threshold_px: float = 15.0,
         anchor_radius_px: float = 15.0,
         flicker_tolerance_sec: float = 2.0,
-        max_disappeared_sec: float = 4.5,
-        max_age_frames: int = 45,
+        max_disappeared_sec: float = 12.0,
+        max_age_frames: int = 150,
         ema_alpha: float = 0.3,
     ) -> None:
         self.max_distance_px: float = max_distance_px
@@ -113,6 +113,7 @@ class CentroidTracker:
         if label is None:
             label = "tas" if zone_id else "person"
 
+        is_bag_obj = label in ("tas", "backpack", "handbag", "suitcase")
         new_obj = TrackedObject(
             track_id=self._next_id,
             centroid=centroid,
@@ -124,7 +125,7 @@ class CentroidTracker:
             last_seen=timestamp,
             stationary_start=timestamp,
             dwell_duration=0.0,
-            is_stationary=False,
+            is_stationary=is_bag_obj,
             is_triggered=False,
             alert_sent=False,
             is_attended=False,
@@ -367,11 +368,19 @@ class CentroidTracker:
 
     def _purge_stale_objects(self, now: float) -> List[TrackedObject]:
         """Deregister objects that disappeared longer than max_disappeared_sec and max_age_frames."""
-        stale_ids = [
-            obj_id
-            for obj_id, obj in self.objects.items()
-            if (now - obj.last_seen) > self.max_disappeared_sec and obj.missed_frames > self.max_age_frames
-        ]
+        stale_ids = []
+        for obj_id, obj in self.objects.items():
+            is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            if obj.is_stationary or is_bag:
+                max_frames = max(150, self.max_age_frames)
+                max_sec = max(12.0, self.max_disappeared_sec)
+            else:
+                max_frames = self.max_age_frames
+                max_sec = self.max_disappeared_sec
+
+            if (now - obj.last_seen) > max_sec and obj.missed_frames > max_frames:
+                stale_ids.append(obj_id)
+
         purged_objects: List[TrackedObject] = []
         for obj_id in stale_ids:
             purged_objects.append(self.objects[obj_id])

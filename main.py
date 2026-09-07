@@ -92,8 +92,8 @@ class CameraPipeline:
             movement_threshold_px=15.0,
             anchor_radius_px=15.0,
             flicker_tolerance_sec=2.0,
-            max_disappeared_sec=4.5,
-            max_age_frames=45,
+            max_disappeared_sec=12.0,
+            max_age_frames=150,
             ema_alpha=0.3,
         )
         self._kernel_close_large = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
