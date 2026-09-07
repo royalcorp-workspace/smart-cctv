@@ -15,8 +15,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import cv2
 import numpy as np
 import requests
+from dotenv import load_dotenv
 
+from engine.config_loader import ensure_env_loaded, load_camera_config
 from engine.logger import logger
+
+# Ensure environment variables are loaded
+ensure_env_loaded()
 
 
 class TelegramNotifier:
@@ -74,7 +79,7 @@ class TelegramNotifier:
             except Exception as e:
                 logger.error(f"[TelegramNotifier] Failed to load config from {self.config_path}: {e}")
 
-        # Scan cameras/*/config.json for camera-specific telegram configuration (only in default runtime mode)
+        # Scan cameras/*/config.json for camera-specific telegram configuration (expanded via config_loader)
         default_config = Path(__file__).resolve().parent.parent / "configs" / "telegram.json"
         if self.config_path == default_config:
             try:
@@ -84,14 +89,14 @@ class TelegramNotifier:
                         if cam_dir.is_dir():
                             cam_cfg_path = cam_dir / "config.json"
                             if cam_cfg_path.exists():
-                                with open(cam_cfg_path, "r", encoding="utf-8") as f:
-                                    cam_data = json.load(f)
+                                cam_data = load_camera_config(cam_cfg_path)
                                 cam_tg = cam_data.get("telegram", {})
                                 if isinstance(cam_tg, dict):
-                                    if not self.bot_token and cam_tg.get("bot_token"):
-                                        self.bot_token = str(cam_tg["bot_token"]).strip()
+                                    cam_token = str(cam_tg.get("bot_token", "")).strip()
+                                    if not self.bot_token and cam_token and not cam_token.startswith("${"):
+                                        self.bot_token = cam_token
                                     cam_chat_id = str(cam_tg.get("chat_id", "")).strip()
-                                    if cam_chat_id:
+                                    if cam_chat_id and not cam_chat_id.startswith("${"):
                                         cam_id = cam_data.get("camera_id", cam_dir.name)
                                         cur_list = self.camera_routing.setdefault(cam_id, [])
                                         if cam_chat_id not in cur_list:
@@ -101,11 +106,31 @@ class TelegramNotifier:
             except Exception as e:
                 logger.debug(f"[TelegramNotifier] Camera config scan note: {e}")
 
-        # Environment variable overrides if present
+        # Environment variable overrides (Highest priority)
         env_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if env_token:
+        if env_token and env_token.strip() and not env_token.startswith("${"):
             self.bot_token = env_token.strip()
-            self.enabled = True
+
+        env_admin = os.getenv("TELEGRAM_GLOBAL_ADMIN_CHAT_ID")
+        if env_admin and env_admin.strip() and not env_admin.startswith("${"):
+            admin_id = env_admin.strip()
+            if admin_id not in self.global_admins:
+                self.global_admins.append(admin_id)
+
+        env_cam01 = os.getenv("TELEGRAM_CAM01_CHAT_ID")
+        if env_cam01 and env_cam01.strip() and not env_cam01.startswith("${"):
+            cam01_id = env_cam01.strip()
+            cur_list = self.camera_routing.setdefault("cam_01", [])
+            if cam01_id not in cur_list:
+                cur_list.append(cam01_id)
+
+        env_enabled = os.getenv("TELEGRAM_ENABLED")
+        if env_enabled is not None:
+            self.enabled = env_enabled.strip().lower() in ("true", "1", "yes")
+
+        # Sanitize bot_token if placeholder remained unexpanded
+        if self.bot_token.startswith("${"):
+            self.bot_token = ""
 
     def register_camera_telegram(self, camera_id: str, telegram_cfg: Dict[str, Any]) -> None:
         """Dynamically register or update camera-specific Telegram configuration."""

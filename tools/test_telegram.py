@@ -10,24 +10,63 @@ Usage:
 import argparse
 import datetime
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional
+from dotenv import load_dotenv
 
 import cv2
 import numpy as np
 import requests
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "telegram.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.config_loader import ensure_env_loaded
+
+CONFIG_PATH = PROJECT_ROOT / "configs" / "telegram.json"
 
 
 def load_config() -> dict:
-    """Load configuration from configs/telegram.json."""
-    if not CONFIG_PATH.exists():
-        print(f"[ERROR] Configuration file not found at: {CONFIG_PATH}")
-        sys.exit(1)
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load configuration from .env or configs/telegram.json."""
+    ensure_env_loaded()
+
+    cfg = {
+        "enabled": True,
+        "bot_token": "",
+        "recipients": {
+            "global_admins": [],
+            "cameras": {"cam_01": []}
+        }
+    }
+
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            print(f"[WARN] Failed to read {CONFIG_PATH}: {e}")
+
+    # Environment overrides
+    env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if env_token and not env_token.startswith("${"):
+        cfg["bot_token"] = env_token
+
+    env_admin = os.getenv("TELEGRAM_GLOBAL_ADMIN_CHAT_ID", "").strip()
+    if env_admin and not env_admin.startswith("${"):
+        cfg.setdefault("recipients", {}).setdefault("global_admins", [])
+        if env_admin not in cfg["recipients"]["global_admins"]:
+            cfg["recipients"]["global_admins"].append(env_admin)
+
+    env_cam01 = os.getenv("TELEGRAM_CAM01_CHAT_ID", "").strip()
+    if env_cam01 and not env_cam01.startswith("${"):
+        cfg.setdefault("recipients", {}).setdefault("cameras", {}).setdefault("cam_01", [])
+        if env_cam01 not in cfg["recipients"]["cameras"]["cam_01"]:
+            cfg["recipients"]["cameras"]["cam_01"].append(env_cam01)
+
+    return cfg
 
 
 def save_config(cfg: dict) -> None:

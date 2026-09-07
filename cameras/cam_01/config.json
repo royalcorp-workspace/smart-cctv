@@ -37,8 +37,8 @@
   },
   "telegram": {
     "enabled": true,
-    "bot_token": "8925615980:AAHxnbn-zhP9jkLgjgvmpDJb1Iv2HdVEZRc",
-    "chat_id": "6475972611"
+    "bot_token": "${TELEGRAM_BOT_TOKEN}",
+    "chat_id": "${TELEGRAM_CAM01_CHAT_ID}"
   },
   "zones": {
     "zone_1_koridor": {

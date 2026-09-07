@@ -1,13 +1,20 @@
 """Verification and connection testing script for Smart CCTV Telegram Bot."""
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.config_loader import ensure_env_loaded, load_camera_config
+
 CAM_CONFIG_PATH = PROJECT_ROOT / "cameras" / "cam_01" / "config.json"
 GLOBAL_TELEGRAM_PATH = PROJECT_ROOT / "configs" / "telegram.json"
 
@@ -15,43 +22,60 @@ TEST_MESSAGE = "Smart CCTV: Koneksi Bot Telegram Berhasil Dikonfigurasi."
 
 
 def load_credentials() -> tuple[str, str, bool]:
-    """Load Telegram bot credentials and chat ID from camera config or global config."""
-    bot_token = ""
-    chat_id = ""
-    enabled = False
+    """Load Telegram bot credentials and chat ID from .env, camera config, or global config."""
+    ensure_env_loaded()
 
-    # 1. Primary: cameras/cam_01/config.json
-    if CAM_CONFIG_PATH.exists():
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = (
+        os.getenv("TELEGRAM_CAM01_CHAT_ID", "").strip()
+        or os.getenv("TELEGRAM_GLOBAL_ADMIN_CHAT_ID", "").strip()
+    )
+    enabled = os.getenv("TELEGRAM_ENABLED", "").strip().lower() in ("true", "1", "yes")
+
+    # 1. Primary fallback: cameras/cam_01/config.json with variable expansion
+    if (not bot_token or not chat_id) and CAM_CONFIG_PATH.exists():
         try:
-            with open(CAM_CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = load_camera_config(CAM_CONFIG_PATH)
             tg_cfg = data.get("telegram", {})
             if isinstance(tg_cfg, dict):
-                bot_token = str(tg_cfg.get("bot_token", "")).strip()
-                chat_id = str(tg_cfg.get("chat_id", "")).strip()
-                enabled = bool(tg_cfg.get("enabled", False))
+                cam_token = str(tg_cfg.get("bot_token", "")).strip()
+                if not bot_token and cam_token and not cam_token.startswith("${"):
+                    bot_token = cam_token
+                cam_chat = str(tg_cfg.get("chat_id", "")).strip()
+                if not chat_id and cam_chat and not cam_chat.startswith("${"):
+                    chat_id = cam_chat
+                if not enabled and tg_cfg.get("enabled"):
+                    enabled = bool(tg_cfg.get("enabled", False))
         except Exception as e:
             print(f"[WARN] Gagal membaca {CAM_CONFIG_PATH}: {e}")
 
-    # 2. Fallback: configs/telegram.json
+    # 2. Secondary fallback: configs/telegram.json
     if (not bot_token or not chat_id) and GLOBAL_TELEGRAM_PATH.exists():
         try:
             with open(GLOBAL_TELEGRAM_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not bot_token:
-                bot_token = str(data.get("bot_token", "")).strip()
+                f_token = str(data.get("bot_token", "")).strip()
+                if not f_token.startswith("${"):
+                    bot_token = f_token
             if not chat_id:
                 recipients = data.get("recipients", {})
                 admins = recipients.get("global_admins", [])
                 cam_recipients = recipients.get("cameras", {}).get("cam_01", [])
-                if cam_recipients:
+                if cam_recipients and not str(cam_recipients[0]).startswith("${"):
                     chat_id = str(cam_recipients[0]).strip()
-                elif admins:
+                elif admins and not str(admins[0]).startswith("${"):
                     chat_id = str(admins[0]).strip()
             if not enabled:
                 enabled = bool(data.get("enabled", False))
         except Exception as e:
             print(f"[WARN] Gagal membaca {GLOBAL_TELEGRAM_PATH}: {e}")
+
+    # Filter out unresolved placeholders
+    if bot_token.startswith("${"):
+        bot_token = ""
+    if chat_id.startswith("${"):
+        chat_id = ""
 
     return bot_token, chat_id, enabled
 

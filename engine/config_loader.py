@@ -1,31 +1,49 @@
 """Configuration loader with environment variable expansion and URL encoding."""
 
 import json
+import logging
 import os
 import re
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
+logger = logging.getLogger("smart_cctv")
+
 # Load .env from root workspace
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH)
-else:
-    load_dotenv()
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+_ENV_PATH = _ROOT_DIR / ".env"
+
+
+def ensure_env_loaded(env_path: Optional[Path] = None) -> bool:
+    """Ensure environment variables are loaded from .env file."""
+    target = env_path or _ENV_PATH
+    if target.exists():
+        load_dotenv(dotenv_path=target, override=True)
+        return True
+    load_dotenv(override=False)
+    return False
+
+
+# Initial load at import time
+ensure_env_loaded()
 
 
 def _expand_raw_env(s: str) -> str:
-    """Expand ${VAR_NAME}, $VAR_NAME, and %VAR_NAME% into raw string values."""
+    """Expand ${VAR_NAME}, $VAR_NAME, and %VAR_NAME% into raw string values.
+    
+    If the environment variable is not defined, returns an empty string to avoid
+    propagating unresolved placeholder strings into downstream network calls.
+    """
     res = re.sub(
         r"\$\{([A-Za-z0-9_]+)\}",
-        lambda m: os.environ.get(m.group(1), m.group(0)),
+        lambda m: os.environ.get(m.group(1), ""),
         s,
     )
     res = re.sub(
         r"(?<!\\)\$([A-Za-z0-9_]+)",
-        lambda m: os.environ.get(m.group(1), m.group(0)),
+        lambda m: os.environ.get(m.group(1), ""),
         res,
     )
     res = os.path.expandvars(res)
@@ -81,6 +99,7 @@ def expand_env_vars(obj: Any) -> Any:
 
 def load_camera_config(config_path: Path) -> Dict[str, Any]:
     """Load JSON config file and expand environment variables with URL encoding."""
+    ensure_env_loaded()
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return expand_env_vars(data)
