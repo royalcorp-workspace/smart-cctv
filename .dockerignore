@@ -1,0 +1,42 @@
+# Git & Version Control
+.git/
+.gitignore
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache & compiled bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Temporary media & snapshot evidence (mounted dynamically via volumes)
+storage/*.jpg
+storage/*.png
+storage/*.jpeg
+storage/*.tmp
+logs/*.log
+scratch/
+
+# Windows scripts (Linux containers use docker entrypoints)
+*.bat
+
+# IDE and Editor Files
+.vscode/
+.idea/
+.agents/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
