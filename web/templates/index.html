@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart CCTV 2.0 &bull; Enterprise Monitoring Dashboard</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css" />
+</head>
+<body>
+
+  <!-- TOP NAVIGATION BAR -->
+  <header class="navbar">
+    <div class="navbar-left">
+      <div class="brand">
+        <span class="brand-title">SMART CCTV 2.0</span>
+        <span class="brand-badge">Enterprise v2.0</span>
+      </div>
+
+      <div class="camera-select-container">
+        <label for="cameraSelect" class="sr-only">Pilih Kamera</label>
+        <div class="select-wrapper">
+          <svg class="select-camera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 7l-7 5 7 5V7z"></path>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          </svg>
+          <select id="cameraSelect" class="camera-select" onchange="onCameraChange()">
+            <option value="cam_01">cam_01 (Koridor & Transit)</option>
+          </select>
+          <svg class="select-chevron" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="navbar-right">
+      <!-- DIGITAL CLOCK (WIB) -->
+      <div class="clock-display" id="systemClock">--:--:-- WIB</div>
+
+      <!-- THEME TOGGLE BUTTON -->
+      <button id="themeToggle" class="btn-icon" onclick="toggleTheme()" title="Ganti Tema (Gelap / Terang)" aria-label="Ganti Tema">
+        <!-- Sun Icon (Shown in Dark Mode) -->
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+        <!-- Moon Icon (Shown in Light Mode) -->
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
+
+      <!-- FULLSCREEN BUTTON -->
+      <button class="btn-control" onclick="toggleFullscreen()" title="Layar Penuh Viewport">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+        </svg>
+        <span>Layar Penuh</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN VIEWPORT & TELEMETRY GRID -->
+  <main class="dashboard-main">
+    <!-- LEFT: VIDEO STREAM VIEWPORT (16:9) -->
+    <section class="video-container-section">
+      <div class="video-card" id="videoContainer">
+        <div class="video-overlay-header">
+          <div class="live-indicator">
+            <span class="live-dot"></span>
+            <span class="live-text">LIVE</span>
+          </div>
+          <span class="camera-badge" id="badgeCamId">cam_01</span>
+        </div>
+
+        <img id="streamFeed" src="/video_feed/cam_01" alt="CCTV Stream Feed" onerror="onStreamError()" onload="onStreamLoad()" />
+      </div>
+
+      <!-- VIDEO METADATA BAR -->
+      <div class="meta-strip">
+        <div class="meta-item">
+          <span class="meta-label">Kamera Aktif:</span>
+          <span class="meta-value" id="metaCamName">Koridor & Area Transit Depan</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Resolusi Feed:</span>
+          <span class="meta-value">1920 &times; 1080 (Crisp 1080p)</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Batas Dwell Steril:</span>
+          <span class="meta-value">60 Menit (3600 Detik)</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: VERTICAL TELEMETRY SIDE PANEL -->
+    <aside class="telemetry-panel">
+      <!-- CARD 1: SYSTEM & STREAM STATUS -->
+      <div class="panel-card">
+        <div class="panel-card-header">
+          <div class="panel-card-title">
+            <span class="indicator-icon">●</span> Status Stream & RTSP
+          </div>
+          <span class="status-badge connected" id="pillStatus">Connected</span>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-box">
+            <span class="kpi-label">PIPELINE FPS</span>
+            <span class="kpi-value" id="statFps">--</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">OBJEK TERLACAK</span>
+            <span class="kpi-value" id="statTracks">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 2: CLEAR AREA VIOLATIONS -->
+      <div class="panel-card">
+        <div class="panel-card-header">
+          <div class="panel-card-title">
+            <span class="indicator-icon">⚠</span> Pelanggaran Clear Area
+          </div>
+          <span class="status-badge connected" id="pillViolations">Aman</span>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-box">
+            <span class="kpi-label">PELANGGARAN AKTIF (>60M)</span>
+            <span class="kpi-value alert-text" id="statViolations">0</span>
+          </div>
+          <div class="kpi-box">
+            <span class="kpi-label">ALERT TELEGRAM</span>
+            <span class="kpi-value success-text" id="statTelegram">Siap</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 3: IDENTIFIED FACES (SFACE) -->
+      <div class="panel-card panel-card-faces">
+        <div class="panel-card-header">
+          <div class="panel-card-title">
+            <span class="indicator-icon">👤</span> Personil & Biometrik Wajah
+          </div>
+          <span class="count-badge" id="faceCount">0 Terdeteksi</span>
+        </div>
+        <div class="faces-scroll" id="facesList">
+          <div class="empty-state">Belum ada wajah terdeteksi pada feed saat ini</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="dashboard-footer">
+    <div class="footer-left">
+      <span>Smart CCTV 2.0 Enterprise</span>
+      <span class="footer-sep">&bull;</span>
+      <span>Intel OpenVINO Accelerated</span>
+      <span class="footer-sep">&bull;</span>
+      <span>OpenCV SFace 2021</span>
+    </div>
+    <div class="footer-right" id="footerStatus">Sinkronisasi buffer lokal aktif</div>
+  </footer>
+
+  <!-- EXTERNAL JAVASCRIPT LOGIC -->
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

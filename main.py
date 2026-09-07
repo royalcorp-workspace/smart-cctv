@@ -1,8 +1,10 @@
 """Smart CCTV 2.0 - Multi-Camera Pipeline Orchestrator."""
 
+import argparse
 import concurrent.futures
 import datetime
 import json
+import os
 import sys
 import threading
 import time
@@ -25,6 +27,8 @@ from engine.zone_filter import ZoneFilter
 from notification.local_alert import GlobalAudioWorker, VisualHUD
 from notification.telegram_alert import TelegramNotifier
 from storage.db import init_db, log_event, resolve_event
+from web.buffer import MultiCameraBuffer
+from web.server import DashboardServer
 
 
 class CameraPipeline:
@@ -38,6 +42,12 @@ class CameraPipeline:
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_configurations()
+
+        # Register in shared multi-camera buffer for Web Dashboard
+        MultiCameraBuffer.get_instance().register_camera(
+            self.camera_id,
+            self.config.get("name", self.camera_id),
+        )
 
         # Target resolution (Display / Capture frame)
         self.target_resolution: Optional[Tuple[int, int]] = None
@@ -295,6 +305,23 @@ class CameraPipeline:
                     )
                     with self._display_lock:
                         self._latest_display_frame = placeholder
+
+                    # Push offline placeholder frame to MultiCameraBuffer
+                    MultiCameraBuffer.get_instance().update_frame(
+                        camera_id=self.camera_id,
+                        frame=placeholder,
+                        telemetry={
+                            "fps": 0.0,
+                            "online": False,
+                            "is_connected": False,
+                            "rtsp_status": "Reconnecting" if (now - last_valid_frame_time > 2.5) else "Connecting",
+                            "violations": 0,
+                            "clear_area_count": 0,
+                            "active_tracks": 0,
+                            "identified_faces": [],
+                        },
+                        camera_name=self.config.get("name", self.camera_id),
+                    )
                     time.sleep(0.05)
                 else:
                     # Transient inter-frame delay on low FPS cameras
@@ -477,6 +504,7 @@ class CameraPipeline:
                 self._last_dwell_log_time = now
 
             # 3. Handle Violation Triggers & Exit Zone Auto-Reset
+            pending_telegram_alerts = []
             for track in active_tracks:
                 # 1. PERSON LOITERING DISABLED: Person never triggers violations or dwell alarms
                 if getattr(track, "class_label", "") == "person":
@@ -536,8 +564,6 @@ class CameraPipeline:
                         bag_filename = f"ALERT_ABANDONED_BAG_cam01_{timestamp_str}.jpg"
                         storage_path = Path(__file__).resolve().parent / "storage" / bag_filename
                         reports_path = Path(__file__).resolve().parent / "reports" / bag_filename
-                        self.io_executor.submit(cv2.imwrite, str(storage_path), raw_clean_frame)
-                        self.io_executor.submit(cv2.imwrite, str(reports_path), raw_clean_frame)
                         
                         zone_name = zone_info.get("name", track.zone_id)
                         dwell_minutes = track.dwell_duration / 60.0
@@ -548,7 +574,6 @@ class CameraPipeline:
                         # Camera workspace snapshot path
                         filename = f"{timestamp_str}_{track.zone_id}_{track.track_id}.jpg"
                         filepath = self.snapshots_dir / filename
-                        self.io_executor.submit(cv2.imwrite, str(filepath), raw_clean_frame)
 
                         # Immediate synchronous DB event registration
                         try:
@@ -572,25 +597,20 @@ class CameraPipeline:
                         except Exception as e:
                             logger.error(f"[{self.camera_id}] DB event log failed: {e}")
 
-                        # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
+                        # Stage alert for Telegram notification and snapshot saving after VisualHUD renders display_frame
                         if not getattr(track, "alert_sent", False):
                             track.alert_sent = True
-                            formatted_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            zone_name = zone_info.get("name", track.zone_id)
-                            try:
-                                self.telegram_notifier.dispatch_alert(
-                                    camera_id=self.camera_id,
-                                    zone_id=track.zone_id,
-                                    track_id=track.track_id,
-                                    dwell_duration=track.dwell_duration,
-                                    timestamp_str=formatted_time,
-                                    frame=raw_clean_frame,
-                                    bbox=track.bbox,
-                                    zone_name=zone_name,
-                                    zones=self.roi_zones,
-                                )
-                            except Exception as e:
-                                logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
+                            pending_telegram_alerts.append({
+                                "track": track,
+                                "zone_id": track.zone_id,
+                                "zone_name": zone_name,
+                                "dwell_duration": track.dwell_duration,
+                                "timestamp_str": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "bbox": list(track.bbox),
+                                "storage_path": storage_path,
+                                "reports_path": reports_path,
+                                "filepath": filepath,
+                            })
                     elif track.is_triggered:
                         # Continue requesting alarm pulses within cooldown
                         self.audio_worker.request_alarm()
@@ -710,8 +730,85 @@ class CameraPipeline:
                 zone_base_resolution=self.roi_base_resolution,
             )
 
+            # Process pending alerts with synchronized VisualHUD annotated display_frame
+            if pending_telegram_alerts:
+                annotated_snapshot = display_frame.copy()
+                for alert in pending_telegram_alerts:
+                    # Save snapshot evidence with annotated HUD
+                    self.io_executor.submit(cv2.imwrite, str(alert["storage_path"]), annotated_snapshot)
+                    self.io_executor.submit(cv2.imwrite, str(alert["reports_path"]), annotated_snapshot)
+                    self.io_executor.submit(cv2.imwrite, str(alert["filepath"]), annotated_snapshot)
+
+                    # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
+                    try:
+                        self.telegram_notifier.dispatch_alert(
+                            camera_id=self.camera_id,
+                            zone_id=alert["zone_id"],
+                            track_id=alert["track"].track_id,
+                            dwell_duration=alert["dwell_duration"],
+                            timestamp_str=alert["timestamp_str"],
+                            frame=raw_clean_frame,
+                            overview_frame=annotated_snapshot,
+                            bbox=alert["bbox"],
+                            zone_name=alert["zone_name"],
+                            zones=self.roi_zones,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
+
             with self._display_lock:
                 self._latest_display_frame = display_frame
+
+            # 8. Push rendered frame and telemetry to MultiCameraBuffer for Web Dashboard
+            violations_count = sum(
+                1 for obj in active_tracks
+                if getattr(obj, "is_triggered", False)
+                or (getattr(obj, "dwell_duration", 0.0) >= getattr(obj, "dwell_threshold", 3600.0) and getattr(obj, "is_stationary", False))
+            )
+            face_telemetry = []
+            for f in (self._cached_faces or []):
+                if isinstance(f, dict):
+                    face_telemetry.append({
+                        "name": f.get("name", "Unknown"),
+                        "confidence": float(f.get("confidence", 0.0)),
+                        "zone": f.get("zone", self.camera_id),
+                    })
+                elif isinstance(f, (list, tuple)) and len(f) >= 3:
+                    # Format: (bbox, score, face_label)
+                    _, f_score, f_label = f[0], f[1], f[2]
+                    face_telemetry.append({
+                        "name": str(f_label) if f_label else "Unknown",
+                        "confidence": float(f_score) if isinstance(f_score, (int, float)) else 0.0,
+                        "zone": self.camera_id,
+                    })
+                elif isinstance(f, (list, tuple)) and len(f) == 2:
+                    _, f_score_or_label = f[0], f[1]
+                    name = str(f_score_or_label) if isinstance(f_score_or_label, str) else "Unknown"
+                    conf = float(f_score_or_label) if isinstance(f_score_or_label, (int, float)) else 0.0
+                    face_telemetry.append({
+                        "name": name,
+                        "confidence": conf,
+                        "zone": self.camera_id,
+                    })
+            telemetry = {
+                "fps": float(self.current_fps),
+                "online": bool(self.capture.is_connected),
+                "is_connected": bool(self.capture.is_connected),
+                "rtsp_status": "Connected" if self.capture.is_connected else "Reconnecting",
+                "violations": violations_count,
+                "clear_area_count": violations_count,
+                "active_tracks": len(active_tracks),
+                "identified_faces": face_telemetry,
+            }
+            try:
+                MultiCameraBuffer.get_instance().update_frame(
+                    camera_id=self.camera_id,
+                    frame=display_frame,
+                    telemetry=telemetry,
+                    camera_name=self.config.get("name", self.camera_id),
+                )
+            except Exception as e:
+                logger.error(f"[{self.camera_id}] Buffer update error: {e}")
 
     def get_display_frame(self) -> Optional[np.ndarray]:
         """Fetch latest rendered display frame safely."""
@@ -746,7 +843,14 @@ def discover_cameras(base_dir: Path) -> List[Path]:
 
 
 def main() -> None:
-    """Bootstrap multi-camera pipelines and run primary window event loop."""
+    """Bootstrap multi-camera pipelines, FastAPI web dashboard, and event loop."""
+    parser = argparse.ArgumentParser(description="Smart CCTV 2.0 - Core Orchestrator")
+    parser.add_argument("--headless", action="store_true", help="Force headless mode without cv2 GUI display windows")
+    parser.add_argument("--gui", action="store_true", help="Force GUI desktop display windows (cv2.imshow)")
+    parser.add_argument("--port", type=int, default=None, help="Web dashboard port override (default: 8000)")
+    parser.add_argument("--host", type=str, default=None, help="Web dashboard host override (default: 127.0.0.1)")
+    args = parser.parse_args()
+
     logger.info("==================================================")
     logger.info("       Smart CCTV 2.0 - Core Orchestrator         ")
     logger.info("==================================================")
@@ -767,6 +871,41 @@ def main() -> None:
 
     logger.info(f"Discovered {len(camera_dirs)} camera workspace(s): {[c.name for c in camera_dirs]}")
 
+    # Determine Web Dashboard & GUI Configuration
+    dashboard_enabled = True
+    dashboard_host = args.host or os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1")
+    dashboard_port = args.port or int(os.getenv("WEB_DASHBOARD_PORT", "8000"))
+
+    # Read config.json defaults first (headless by default: enable_gui = false)
+    cfg_enable_gui = False
+    first_cfg_path = camera_dirs[0] / "config.json"
+    if first_cfg_path.exists():
+        try:
+            first_cfg = load_camera_config(first_cfg_path)
+            web_cfg = first_cfg.get("web_dashboard", {})
+            if isinstance(web_cfg, dict):
+                if "enabled" in web_cfg:
+                    dashboard_enabled = bool(web_cfg["enabled"])
+                if args.host is None and "host" in web_cfg:
+                    dashboard_host = str(web_cfg["host"])
+                if args.port is None and "port" in web_cfg:
+                    dashboard_port = int(web_cfg["port"])
+                if "enable_gui" in web_cfg:
+                    cfg_enable_gui = bool(web_cfg["enable_gui"])
+        except Exception as e:
+            logger.debug(f"Note loading web_dashboard config: {e}")
+
+    # Prioritize:
+    # 1. CLI flag --headless -> False
+    # 2. CLI flag --gui -> True
+    # 3. config.json "enable_gui" value (default: False)
+    if args.headless:
+        enable_gui = False
+    elif args.gui:
+        enable_gui = True
+    else:
+        enable_gui = cfg_enable_gui
+
     # Instantiate and start all camera pipelines
     pipelines: List[CameraPipeline] = []
     for c_dir in camera_dirs:
@@ -778,44 +917,59 @@ def main() -> None:
         except Exception as e:
             logger.error(f"Failed to start pipeline for {c_dir.name}: {e}")
 
-    # Initialize display windows with WINDOW_NORMAL for dynamic resizing
-    for pipe in pipelines:
-        win_name = f"Smart CCTV - {pipe.camera_id}"
-        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    # Start FastAPI Web Dashboard in background daemon thread
+    if dashboard_enabled:
+        DashboardServer.start(host=dashboard_host, port=dashboard_port)
+        logger.info(f"Web Dashboard live at: http://{dashboard_host}:{dashboard_port}")
 
-    logger.info("Running live display. Press 'q' or 'ESC' on display window to terminate.")
-
-    try:
-        while True:
-            for pipe in pipelines:
-                frame = pipe.get_display_frame()
-                if frame is not None:
-                    win_name = f"Smart CCTV - {pipe.camera_id}"
-                    
-                    try:
-                        # Auto-resize frame to fit maximized or resized window without gray bars
-                        rect = cv2.getWindowImageRect(win_name)
-                        if rect and rect[2] > 50 and rect[3] > 50:
-                            win_w, win_h = rect[2], rect[3]
-                            if frame.shape[1] != win_w or frame.shape[0] != win_h:
-                                frame = cv2.resize(frame, (win_w, win_h), interpolation=cv2.INTER_LINEAR)
-
-                        cv2.imshow(win_name, frame)
-                    except cv2.error:
-                        # Window closed by user
-                        break
-
-            key = cv2.waitKey(15) & 0xFF
-            if key in (ord("q"), 27):
-                logger.info("Termination key received. Shutting down camera pipelines...")
-                break
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested via KeyboardInterrupt.")
-    finally:
+    # Run GUI loop or Headless loop
+    if enable_gui:
         for pipe in pipelines:
-            pipe.stop()
-        cv2.destroyAllWindows()
-        logger.info("All camera pipelines terminated gracefully.")
+            win_name = f"Smart CCTV - {pipe.camera_id}"
+            cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+
+        logger.info("Running live display with GUI windows. Press 'q' or 'ESC' on display window to terminate.")
+        try:
+            while True:
+                for pipe in pipelines:
+                    frame = pipe.get_display_frame()
+                    if frame is not None:
+                        win_name = f"Smart CCTV - {pipe.camera_id}"
+                        try:
+                            rect = cv2.getWindowImageRect(win_name)
+                            if rect and rect[2] > 50 and rect[3] > 50:
+                                win_w, win_h = rect[2], rect[3]
+                                if frame.shape[1] != win_w or frame.shape[0] != win_h:
+                                    frame = cv2.resize(frame, (win_w, win_h), interpolation=cv2.INTER_LINEAR)
+                            cv2.imshow(win_name, frame)
+                        except cv2.error:
+                            break
+
+                key = cv2.waitKey(15) & 0xFF
+                if key in (ord("q"), 27):
+                    logger.info("Termination key received. Shutting down camera pipelines...")
+                    break
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested via KeyboardInterrupt.")
+        finally:
+            for pipe in pipelines:
+                pipe.stop()
+            DashboardServer.stop()
+            cv2.destroyAllWindows()
+            logger.info("All camera pipelines terminated gracefully.")
+    else:
+        logger.info("Running in HEADLESS mode (cv2.imshow GUI windows disabled).")
+        logger.info("Web Dashboard active for remote monitoring. Press Ctrl+C to terminate.")
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested via KeyboardInterrupt.")
+        finally:
+            for pipe in pipelines:
+                pipe.stop()
+            DashboardServer.stop()
+            logger.info("All camera pipelines terminated gracefully.")
 
 
 if __name__ == "__main__":

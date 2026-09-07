@@ -192,10 +192,14 @@ class TelegramNotifier:
         fh, fw = frame.shape[:2]
         bx, by, bw, bh = bbox
 
-        # Auto-scale bbox if bbox is in 640x480 inference space and frame is not 640x480
-        if (fw, fh) != (640, 480) and (bx + bw <= 640 and by + bh <= 480):
-            scale_x = fw / 640.0
-            scale_y = fh / 480.0
+        # Auto-scale bbox if bbox is in 640x480 inference space and frame is larger (e.g. 1080p)
+        if (fw, fh) != (640, 480):
+            if bx < 640 and by < 480 and bw <= 640 and bh <= 480:
+                scale_x = fw / 640.0
+                scale_y = fh / 480.0
+            else:
+                scale_x = 1.0
+                scale_y = 1.0
         else:
             scale_x = 1.0
             scale_y = 1.0
@@ -320,6 +324,7 @@ class TelegramNotifier:
         camera_id = job["camera_id"]
         zone_id = job["zone_id"]
         zone_name = job.get("zone_name", zone_id)
+        display_zone = zone_name if zone_name else zone_id
         track_id = job["track_id"]
         dwell = job["dwell_duration"]
         timestamp_str = job["timestamp_str"]
@@ -330,83 +335,86 @@ class TelegramNotifier:
         recipients = job["recipients"]
 
         # 1. Prepare Overview Image
+        # When overview_frame is provided (pre-rendered by VisualHUD in main pipeline),
+        # use it directly without re-drawing zones or bounding boxes to ensure 100% sync with live stream.
         if overview_frame is not None and overview_frame.size > 0:
             annotated = overview_frame.copy()
         else:
+            # Fallback: clean frame with accurate base_resolution scaling
             annotated = clean_frame.copy()
+            h, w = annotated.shape[:2]
+            scale_x = w / 640.0
+            scale_y = h / 480.0
+            scale_factor = min(scale_x, scale_y)
 
-        h, w = annotated.shape[:2]
-        scale_x = w / 640.0
-        scale_y = h / 480.0
-        scale_factor = min(scale_x, scale_y)
+            if zones and isinstance(zones, dict):
+                base_w, base_h = 1920, 1080
+                if "base_resolution" in zones and isinstance(zones["base_resolution"], (list, tuple)):
+                    base_w, base_h = int(zones["base_resolution"][0]), int(zones["base_resolution"][1])
+                z_scale_x = w / float(base_w)
+                z_scale_y = h / float(base_h)
 
-        # Draw zone polylines if zones provided and overview was not pre-rendered
-        if zones and isinstance(zones, dict) and overview_frame is None:
-            for zid, pts in zones.items():
-                if not isinstance(pts, list) or zid.startswith("_") or zid == "base_resolution":
-                    continue
-                if len(pts) < 3:
-                    continue
-                max_zx = max(pt[0] for pt in pts if len(pt) >= 2) if pts else 0
-                max_zy = max(pt[1] for pt in pts if len(pt) >= 2) if pts else 0
-                z_scale_x = (w / 1920.0) if max_zx > 640 else (w / 640.0)
-                z_scale_y = (h / 1080.0) if max_zy > 480 else (h / 480.0)
-                s_pts = np.array([[int(round(pt[0] * z_scale_x)), int(round(pt[1] * z_scale_y))] for pt in pts], dtype=np.int32).reshape((-1, 1, 2))
-                zone_color = (0, 0, 255) if (zid == zone_id or zid.replace("__", "_") == zone_id.replace("__", "_")) else (0, 255, 0)
-                cv2.polylines(annotated, [s_pts], isClosed=True, color=zone_color, thickness=2, lineType=cv2.LINE_AA)
+                for zid, pts in zones.items():
+                    if not isinstance(pts, list) or zid.startswith("_") or zid == "base_resolution":
+                        continue
+                    if len(pts) < 3:
+                        continue
+                    s_pts = np.array(
+                        [[int(round(pt[0] * z_scale_x)), int(round(pt[1] * z_scale_y))] for pt in pts if len(pt) >= 2],
+                        dtype=np.int32
+                    ).reshape((-1, 1, 2))
+                    zone_color = (0, 0, 255) if (zid == zone_id or zid.replace("__", "_") == zone_id.replace("__", "_")) else (0, 255, 0)
+                    cv2.polylines(annotated, [s_pts], isClosed=True, color=zone_color, thickness=2, lineType=cv2.LINE_AA)
 
-        if bbox is not None and overview_frame is None:
-            bx, by, bw, bh = bbox
-            if (w, h) != (640, 480):
-                bx = int(round(bx * scale_x))
-                by = int(round(by * scale_y))
-                bw = int(round(bw * scale_x))
-                bh = int(round(bh * scale_y))
+            if bbox is not None:
+                bx, by, bw, bh = bbox
+                if (w, h) != (640, 480):
+                    bx = int(round(bx * scale_x))
+                    by = int(round(by * scale_y))
+                    bw = int(round(bw * scale_x))
+                    bh = int(round(bh * scale_y))
 
-            box_thickness = max(2, int(round(2.0 * scale_factor)))
-            font_scale = 0.45 * scale_factor
-            font_thick = max(1, int(round(1.2 * scale_factor)))
-            pad_x = int(round(4.0 * scale_factor))
-            pad_y = int(round(3.0 * scale_factor))
+                box_thickness = max(2, int(round(2.0 * scale_factor)))
+                font_scale = 0.45 * scale_factor
+                font_thick = max(1, int(round(1.2 * scale_factor)))
+                pad_x = int(round(4.0 * scale_factor))
+                pad_y = int(round(3.0 * scale_factor))
 
-            # Crisp red bounding box
-            cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 0, 255), box_thickness, lineType=cv2.LINE_AA)
-            
-            # Alert header badge
-            badge_text = f"[ALERT] PELANGGARAN CLEAR AREA (ID #{track_id})"
-            (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
-            badge_y1 = max(0, by - th - (pad_y * 2) - 2)
-            badge_y2 = by
-            badge_x2 = min(w, bx + tw + (pad_x * 2) + 2)
+                cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 0, 255), box_thickness, lineType=cv2.LINE_AA)
+                badge_text = f"[ALERT] PELANGGARAN CLEAR AREA (ID #{track_id})"
+                (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+                badge_y1 = max(0, by - th - (pad_y * 2) - 2)
+                badge_y2 = by
+                badge_x2 = min(w, bx + tw + (pad_x * 2) + 2)
 
-            cv2.rectangle(annotated, (bx, badge_y1), (badge_x2, badge_y2), (0, 0, 255), -1)
+                cv2.rectangle(annotated, (bx, badge_y1), (badge_x2, badge_y2), (0, 0, 255), -1)
+                cv2.putText(
+                    annotated,
+                    badge_text,
+                    (bx + pad_x, badge_y2 - pad_y - 1),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    (255, 255, 255),
+                    font_thick,
+                    cv2.LINE_AA,
+                )
+
+            # Bottom watermark banner on fallback overview
+            display_zone = zone_name if zone_name else zone_id
+            watermark = f"SMART CCTV | CAM: {camera_id.upper()} | ZONA: {display_zone} | {timestamp_str}"
+            wm_font_scale = 0.40 * scale_factor
+            wm_font_thick = max(1, int(round(1.0 * scale_factor)))
+            wm_margin = int(round(10.0 * scale_factor))
             cv2.putText(
                 annotated,
-                badge_text,
-                (bx + pad_x, badge_y2 - pad_y - 1),
+                watermark,
+                (wm_margin, h - wm_margin),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                (255, 255, 255),
-                font_thick,
+                wm_font_scale,
+                (0, 255, 255),
+                wm_font_thick,
                 cv2.LINE_AA,
             )
-
-        # Bottom watermark banner on overview
-        display_zone = zone_name if zone_name else zone_id
-        watermark = f"SMART CCTV | CAM: {camera_id.upper()} | ZONA: {display_zone} | {timestamp_str}"
-        wm_font_scale = 0.40 * scale_factor
-        wm_font_thick = max(1, int(round(1.0 * scale_factor)))
-        wm_margin = int(round(10.0 * scale_factor))
-        cv2.putText(
-            annotated,
-            watermark,
-            (wm_margin, h - wm_margin),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            wm_font_scale,
-            (0, 255, 255),
-            wm_font_thick,
-            cv2.LINE_AA,
-        )
 
         # 2. Extract Contextual Close-up Zoom Crop from clean frame (un-occluded, 35% padding)
         zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.35)

@@ -40,6 +40,12 @@
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
     "chat_id": "${TELEGRAM_CAM01_CHAT_ID}"
   },
+  "web_dashboard": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8000,
+    "enable_gui": false
+  },
   "zones": {
     "zone_1_koridor": {
       "name": "Koridor Utama (Walkway)",
