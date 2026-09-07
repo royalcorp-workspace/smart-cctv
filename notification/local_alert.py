@@ -317,10 +317,18 @@ class VisualHUD:
                 else:
                     continue
 
-                sfx = int(round(fx * scale_x))
-                sfy = int(round(fy * scale_y))
-                sfw = int(round(fw_f * scale_x))
-                sfh = int(round(fh_f * scale_y))
+                if fx > 640 or fy > 360:
+                    sfx = int(round(fx))
+                    sfy = int(round(fy))
+                    sfw = int(round(fw_f))
+                    sfh = int(round(fh_f))
+                else:
+                    face_scale_x = w / 640.0
+                    face_scale_y = h / 360.0
+                    sfx = int(round(fx * face_scale_x))
+                    sfy = int(round(fy * face_scale_y))
+                    sfw = int(round(fw_f * face_scale_x))
+                    sfh = int(round(fh_f * face_scale_y))
 
                 # Crisp 1px bounding box
                 cv2.rectangle(canvas, (sfx, sfy), (sfx + sfw, sfy + sfh), COLOR_FACE_OUTSIDE, face_box_thick, lineType=cv2.LINE_AA)

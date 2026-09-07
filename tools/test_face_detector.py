@@ -29,12 +29,12 @@ def run_tests() -> bool:
     print("=" * 65)
 
     # 1. Test Model Download & Instantiation
-    print("\n[STEP 1] Testing Model Initialization & Stable Threshold (0.48)...")
+    print("\n[STEP 1] Testing Model Initialization & High-Precision Threshold (0.62)...")
     start_init = time.time()
     detector = YuNetFaceDetector(
-        score_threshold=0.48,
+        score_threshold=0.62,
         nms_threshold=0.30,
-        input_size=(640, 480),
+        input_size=(640, 360),
         auto_download=True,
     )
     init_time = (time.time() - start_init) * 1000.0
@@ -44,14 +44,14 @@ def run_tests() -> bool:
     file_size_kb = model_file.stat().st_size / 1024.0
     print(f"  -> Model Path   : {model_file}")
     print(f"  -> File Size    : {file_size_kb:.1f} KB (Expected ~227-235 KB)")
-    print(f"  -> Score Thresh : {detector.score_threshold} (Stable threshold 0.48)")
+    print(f"  -> Score Thresh : {detector.score_threshold} (High-precision threshold 0.62)")
     print(f"  -> Load Time    : {init_time:.1f} ms")
     assert file_size_kb > 200, "Model file size too small, download may be truncated!"
     print("  [PASS] Model initialized and verified successfully.")
 
-    # 2. Test Universal Face Inclusion Across All Areas (No Spatial Exclusion)
-    print("\n[STEP 2] Testing Universal Face Detection (All Zones & Outside Areas Included)...")
-    test_detector = YuNetFaceDetector(score_threshold=0.48, auto_download=False)
+    # 2. Test Universal Face Inclusion Across All Areas & Size/Aspect Filtering
+    print("\n[STEP 2] Testing Universal Face Detection & Filtering (Min 32px & Aspect 0.6-1.4)...")
+    test_detector = YuNetFaceDetector(score_threshold=0.62, auto_download=False)
 
     # Simulate faces detected at various locations
     face_in_koridor = ((200, 200, 40, 40), 0.88)
@@ -71,7 +71,7 @@ def run_tests() -> bool:
 
     # 3. Test Temporal Smoothing & 5-Frame Retention Buffer
     print("\n[STEP 3] Testing Temporal Smoothing Buffer & 5-Frame Retention...")
-    buffer_detector = YuNetFaceDetector(score_threshold=0.48, auto_download=False)
+    buffer_detector = YuNetFaceDetector(score_threshold=0.62, auto_download=False)
     # Manually register a face in buffer
     buffer_detector._face_buffer[1] = {
         "bbox": (550, 50, 40, 40),

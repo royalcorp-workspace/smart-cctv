@@ -135,21 +135,26 @@ class CameraPipeline:
         if self.face_detection_enabled:
             try:
                 face_model = face_cfg.get("model_path", None)
-                score_th = float(face_cfg.get("score_threshold", 0.48))
+                score_th = float(face_cfg.get("score_threshold", 0.62))
                 nms_th = float(face_cfg.get("nms_threshold", 0.30))
                 alternate_infer = bool(face_cfg.get("alternate_inference", True))
+                min_face_sz = int(face_cfg.get("min_face_size", 32))
+                aspect_range = face_cfg.get("aspect_ratio_range", [0.6, 1.4])
                 self.face_detector = YuNetFaceDetector(
                     model_path=face_model,
                     score_threshold=score_th,
                     nms_threshold=nms_th,
-                    input_size=self.infer_resolution,
+                    input_size=(640, 360),
                     auto_download=True,
                     max_missed_frames=6,
                     alternate_inference=alternate_infer,
+                    min_face_size=min_face_sz,
+                    aspect_ratio_range=aspect_range,
                 )
                 logger.info(
                     f"[{self.camera_id}] YuNet Face Detector initialized "
-                    f"(interval={self._face_detect_interval} frames, alternate={alternate_infer}, input_size={self.infer_resolution})."
+                    f"(interval={self._face_detect_interval} frames, alternate={alternate_infer}, input_size=(640, 360), "
+                    f"score_thresh={score_th}, min_size={min_face_sz}px)."
                 )
             except Exception as e:
                 logger.warning(f"[{self.camera_id}] Failed to initialize YuNet Face Detector: {e}. Running without face detection.")
@@ -654,16 +659,16 @@ class CameraPipeline:
 
                             face_label = "Unknown"
                             if self.face_recognition_enabled and self.face_recognizer is not None:
-                                # Determine 1080p face dimensions for minimum size gating (min 28x28 px)
+                                # Determine 1080p face dimensions for minimum size gating (min 32x32 px)
                                 if raw_face_1080 is not None:
                                     face_w_1080 = float(raw_face_1080[2])
                                     face_h_1080 = float(raw_face_1080[3])
                                 else:
                                     face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
-                                    face_h_1080 = float(bbox[3]) * (1080.0 / 480.0)
+                                    face_h_1080 = float(bbox[3]) * (1080.0 / 360.0)
 
-                                if face_w_1080 < 28.0 or face_h_1080 < 28.0:
-                                    # Distant micro-face (< 28x28 px): Immediately classify as Unknown without SFace inference
+                                if face_w_1080 < 32.0 or face_h_1080 < 32.0:
+                                    # Distant micro-face (< 32x32 px): Immediately classify as Unknown without SFace inference
                                     face_label = "Unknown"
                                     if face_id is not None:
                                         self._face_recog_cache[face_id] = {
@@ -672,7 +677,7 @@ class CameraPipeline:
                                             "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
                                         }
                                 else:
-                                    # Prominent face (>= 28x28 px): Check stationary cache
+                                    # Prominent face (>= 32x32 px): Check stationary cache
                                     cached = self._face_recog_cache.get(face_id, {})
                                     cached_label = cached.get("label")
                                     last_time = cached.get("time", 0.0)
@@ -690,7 +695,7 @@ class CameraPipeline:
                                         # Recognize using 1080p display_frame with raw_face_1080 if available
                                         if raw_face_1080 is not None and display_frame is not None:
                                             _, _, face_label = self.face_recognizer.recognize(
-                                                frame=display_frame, face_data=raw_face_1080, min_size=28
+                                                frame=display_frame, face_data=raw_face_1080, min_size=32
                                             )
                                         else:
                                             face_input = raw_face_640 if raw_face_640 is not None else bbox

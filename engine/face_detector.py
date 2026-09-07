@@ -42,20 +42,25 @@ class YuNetFaceDetector:
     def __init__(
         self,
         model_path: Optional[str] = None,
-        score_threshold: float = 0.48,
+        score_threshold: float = 0.62,
         nms_threshold: float = 0.30,
         top_k: int = 5000,
-        input_size: Tuple[int, int] = (640, 480),
+        input_size: Tuple[int, int] = (640, 360),
         auto_download: bool = True,
         max_missed_frames: int = 6,
         ema_alpha: float = 0.45,
         alternate_inference: bool = True,
         resize_interpolation: int = cv2.INTER_LINEAR,
+        min_face_size: int = 32,
+        aspect_ratio_range: Tuple[float, float] = (0.6, 1.4),
     ) -> None:
         self.score_threshold = float(score_threshold)
         self.nms_threshold = float(nms_threshold)
         self.top_k = int(top_k)
         self._current_input_size: Tuple[int, int] = input_size
+        self.min_face_size: int = int(min_face_size)
+        self.min_aspect_ratio: float = float(aspect_ratio_range[0])
+        self.max_aspect_ratio: float = float(aspect_ratio_range[1])
 
         # Temporal Smoothing & Retention Buffer
         self._face_buffer: Dict[int, Dict[str, Any]] = {}
@@ -152,6 +157,15 @@ class YuNetFaceDetector:
             self._current_input_size = size
             self.detector.setInputSize(size)
 
+    def is_valid_face(self, w_1080: float, h_1080: float) -> bool:
+        """Validate face size (min 32px on 1080p canvas) and aspect ratio (0.6 <= w/h <= 1.4)."""
+        if w_1080 < self.min_face_size or h_1080 < self.min_face_size:
+            return False
+        aspect = float(w_1080) / max(1.0, float(h_1080))
+        if aspect < self.min_aspect_ratio or aspect > self.max_aspect_ratio:
+            return False
+        return True
+
     def detect(self, frame: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], float, np.ndarray]]:
         """Run raw face detection on given BGR frame.
 
@@ -233,8 +247,9 @@ class YuNetFaceDetector:
         scale_crop_to_disp_x = float(crop_w) / float(target_crop_w)
         scale_crop_to_disp_y = float(crop_h) / float(target_crop_h)
 
+        # Scale to canonical 640x360 space (native 16:9)
         scale_disp_to_640_x = 640.0 / float(disp_w)
-        scale_disp_to_640_y = 480.0 / float(disp_h)
+        scale_disp_to_640_y = 360.0 / float(disp_h)
 
         results: List[Dict[str, Any]] = []
         for (lx, ly, lw, lh), score, raw_crop_face in crop_raw_faces:
@@ -249,6 +264,10 @@ class YuNetFaceDetector:
             gw = max(1, min(gw, disp_w - gx))
             gh = max(1, min(gh, disp_h - gy))
 
+            # Filter min face size (>= 32px on 1080p) and aspect ratio (0.6 <= w/h <= 1.4)
+            if not self.is_valid_face(gw, gh):
+                continue
+
             raw_face_1080 = raw_crop_face.copy().astype(np.float32)
             raw_face_1080[0] = gx
             raw_face_1080[1] = gy
@@ -259,7 +278,7 @@ class YuNetFaceDetector:
                     raw_face_1080[k] = raw_crop_face[k] * scale_crop_to_disp_x + x1
                     raw_face_1080[k + 1] = raw_crop_face[k + 1] * scale_crop_to_disp_y + y1
 
-            # 2. Map to canonical 640x480 space (for HUD & tracking)
+            # 2. Map to canonical 640x360 space (for HUD & tracking)
             bx_640 = int(round(gx * scale_disp_to_640_x))
             by_640 = int(round(gy * scale_disp_to_640_y))
             bw_640 = int(round(gw * scale_disp_to_640_x))
@@ -335,10 +354,18 @@ class YuNetFaceDetector:
 
         # 2. Run Full-Frame Face Detection (Transit / Koridor / Outside Walkway)
         if run_full:
-            all_full_faces = self.detect(frame)
-            disp_h, disp_w = display_frame.shape[:2] if display_frame is not None else (480, 640)
+            disp_h, disp_w = display_frame.shape[:2] if display_frame is not None else (360, 640)
+            # Use native 16:9 input (640x360) for YuNet full-frame inference
+            if display_frame is not None:
+                full_input = cv2.resize(display_frame, (640, 360), interpolation=self.resize_interpolation)
+            elif frame.shape[:2] != (360, 640):
+                full_input = cv2.resize(frame, (640, 360), interpolation=self.resize_interpolation)
+            else:
+                full_input = frame
+
+            all_full_faces = self.detect(full_input)
             scale_640_to_disp_x = float(disp_w) / 640.0
-            scale_640_to_disp_y = float(disp_h) / 480.0
+            scale_640_to_disp_y = float(disp_h) / 360.0
 
             # Collect known crop boxes (from current detections + buffered crop faces)
             known_crop_boxes = [cd["bbox_640"] for cd in crop_detections]
@@ -352,6 +379,12 @@ class YuNetFaceDetector:
                 else:
                     (fx, fy, fw, fh), score = item[0], item[1]
                     raw_face = None
+
+                # Compute 1080p dimensions for sanity filtering
+                gw = int(round(fw * scale_640_to_disp_x))
+                gh = int(round(fh * scale_640_to_disp_y))
+                if not self.is_valid_face(gw, gh):
+                    continue
 
                 fcx = fx + (fw // 2)
                 fcy = fy + (fh // 2)
@@ -377,8 +410,8 @@ class YuNetFaceDetector:
                     raw_face_1080 = raw_face.copy().astype(np.float32)
                     raw_face_1080[0] = int(round(raw_face[0] * scale_640_to_disp_x))
                     raw_face_1080[1] = int(round(raw_face[1] * scale_640_to_disp_y))
-                    raw_face_1080[2] = int(round(raw_face[2] * scale_640_to_disp_x))
-                    raw_face_1080[3] = int(round(raw_face[3] * scale_640_to_disp_y))
+                    raw_face_1080[2] = gw
+                    raw_face_1080[3] = gh
                     if len(raw_face_1080) >= 14:
                         for k in range(4, 14, 2):
                             raw_face_1080[k] = raw_face[k] * scale_640_to_disp_x
