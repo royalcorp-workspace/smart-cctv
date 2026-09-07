@@ -23,16 +23,16 @@ class YOLOOpenVINODetector:
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
         0: 0.38,   # person: calibrated to filter static door frame artifacts while detecting walking persons
-        24: 0.28,  # backpack: calibrated for overhead CCTV camera angle
-        26: 0.28,  # handbag: calibrated for overhead CCTV camera angle
-        28: 0.28,  # suitcase: calibrated for overhead CCTV camera angle
+        24: 0.25,  # backpack: calibrated for floor/lying bags
+        26: 0.25,  # handbag: calibrated for floor/lying bags
+        28: 0.25,  # suitcase: calibrated for floor/lying bags
     }
 
     def __init__(
         self,
         model_name: str = "yolo11n",
         device: str = "cpu",
-        confidence_threshold: float = 0.40,
+        confidence_threshold: float = 0.25,
         imgsz: int = 640,
         models_dir: Optional[Path] = None,
     ) -> None:
@@ -40,6 +40,10 @@ class YOLOOpenVINODetector:
         self.conf: float = confidence_threshold
         self.imgsz: int = imgsz
         self.model_name: str = model_name
+
+        # Align bag thresholds with confidence_threshold
+        for bag_cid in (24, 26, 28):
+            self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid] = min(self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid], self.conf)
 
         if models_dir is None:
             models_dir = Path(__file__).resolve().parent.parent
@@ -55,8 +59,8 @@ class YOLOOpenVINODetector:
         _ = self.detect(dummy)
         logger.info(
             f"YOLOOpenVINODetector ({self.model_name}) initialized successfully on device='{device}' "
-            f"(imgsz={imgsz}, base_conf=0.25, person_conf={self.CLASS_CONFIDENCE_THRESHOLDS.get(0, 0.38):.2f}, "
-            f"bag_conf={self.CLASS_CONFIDENCE_THRESHOLDS.get(24, 0.28):.2f})"
+            f"(imgsz={imgsz}, base_conf={self.conf:.2f}, person_conf={self.CLASS_CONFIDENCE_THRESHOLDS.get(0, 0.38):.2f}, "
+            f"bag_conf={self.CLASS_CONFIDENCE_THRESHOLDS.get(24, 0.25):.2f})"
         )
 
     def _load_or_export_model(self) -> YOLO:

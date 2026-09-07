@@ -55,16 +55,23 @@ class TrackedObject:
         1. If identified as static background artifact -> do not render.
         2. Active in this frame -> always render.
         3. Missed in this frame:
-           - Inside zone (edge_distance >= 8.0 px): allow visual grace period up to 6 frames (~0.6s)
-             to eliminate flickering/drop tracks in corridor.
-           - Near or outside boundary (edge_distance < 8.0 px): immediately hide (0 frames grace period)
-             to eliminate ghost boxes when exiting.
+           - For stationary objects or baggage (tas, backpack, handbag, suitcase):
+             hold visual render for at least 30 frames (track buffer / coasting)
+             so if detection drops for 1-2 frames, the box does not immediately disappear.
+           - For moving persons inside zone (edge_distance >= 8.0 px): allow grace period up to 10 frames.
+           - Near or outside boundary (edge_distance < 8.0 px): immediately hide (0 frames grace period).
         """
         if self.is_static_artifact:
             return False
         if self.is_active_this_frame:
             return True
-        return self.edge_distance >= 8.0 and self.missed_frames <= 6
+
+        # Hold stationary objects and bags for at least 30 frames
+        is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
+        if self.is_stationary or is_bag:
+            return self.missed_frames <= 30
+
+        return self.edge_distance >= 8.0 and self.missed_frames <= 10
 
 
 class CentroidTracker:
