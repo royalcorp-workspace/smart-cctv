@@ -286,7 +286,7 @@ class VisualHUD:
             elif is_warning:
                 box_color = (0, 165, 255)  # Amber / Orange
                 badge_text = f"ID {track_id} | Objek [WARNING 50%] ({dwell_str}){owner_suffix}"
-            elif getattr(obj, "is_stationary", False):
+            elif getattr(obj, "is_stationary", False) or is_bag:
                 if dwell <= (dwell_max * 0.5):
                     box_color = (0, 255, 255)  # Kuning
                 else:
@@ -411,6 +411,7 @@ class VisualHUD:
             o for o in tracked_objects
             if getattr(o, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
             and getattr(o, "zone_id", None) in zones
+            and (not hasattr(o, "should_render") or o.should_render)
         ])
         face_count = len(active_faces)
 

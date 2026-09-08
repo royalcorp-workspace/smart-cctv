@@ -121,12 +121,8 @@ class TrackedObject:
         # Hold stationary objects and bags
         # Stationary Bag Latching: keep confirmed stationary bag rendering up to 600 frames (~45s)
         is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
-        if is_bag and self.is_stationary:
+        if is_bag or self.is_stationary:
             return self.missed_frames <= 600
-
-        if self.is_stationary or is_bag:
-            max_render_missed = 300 if self.is_occluded else 150
-            return self.missed_frames <= max_render_missed
 
         return self.edge_distance >= 8.0 and self.missed_frames <= 10
 
@@ -174,7 +170,8 @@ class CentroidTracker:
     ) -> Optional[SpatialMemoryEntry]:
         """Search spatial memory cache for a matching previously observed stationary bag."""
         det_label = label if label is not None else ("tas" if zone_id else "person")
-        if det_label not in ("tas", "backpack", "handbag", "suitcase"):
+        BAG_CLASSES = ("tas", "backpack", "handbag", "suitcase")
+        if det_label not in BAG_CLASSES:
             return None
 
         best_entry: Optional[SpatialMemoryEntry] = None
@@ -184,17 +181,26 @@ class CentroidTracker:
             if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec:
                 continue
 
+            # Allow cross-class matching among any bag family (e.g. backpack <-> handbag <-> tas)
+            if entry.class_label not in BAG_CLASSES:
+                continue
+
             # Check Euclidean distance to anchor and last observed centroid
             d_anchor = float(np.linalg.norm(np.array(entry.anchor_centroid, dtype=np.float32) - np.array(centroid, dtype=np.float32)))
             d_last = float(np.linalg.norm(np.array(entry.last_centroid, dtype=np.float32) - np.array(centroid, dtype=np.float32)))
             closest_d = min(d_anchor, d_last)
 
-            # Check Spatial Bounding Box IoU
-            box_iou = compute_bbox_iou(bbox, entry.last_bbox)
+            # Check Spatial Bounding Box IoU against last_bbox and anchor_bbox
+            iou_last = compute_bbox_iou(bbox, entry.last_bbox)
+            iou_anchor = compute_bbox_iou(bbox, getattr(entry, "anchor_bbox", entry.last_bbox))
+            box_iou = max(iou_last, iou_anchor)
 
-            if closest_d <= min_dist or box_iou >= 0.20:
-                min_dist = closest_d
-                best_entry = entry
+            if closest_d <= min_dist or box_iou >= 0.15:
+                if closest_d < min_dist:
+                    min_dist = closest_d
+                    best_entry = entry
+                elif best_entry is None:
+                    best_entry = entry
 
         return best_entry
 
@@ -331,6 +337,8 @@ class CentroidTracker:
         if len(detections) == 0:
             for obj in self.objects.values():
                 obj.missed_frames += 1
+                if obj.is_stationary:
+                    obj.stationary_start = now - obj.dwell_duration
             purged = self._purge_stale_objects(now)
             return list(self.objects.values()), purged
 
@@ -372,10 +380,6 @@ class CentroidTracker:
             if row in assigned_rows or col in assigned_cols:
                 continue
 
-            # Nearest-centroid matching: Euclidean distance threshold <= 50 px
-            if dist_matrix[row, col] > self.max_distance_px:
-                continue
-
             obj_id = existing_ids[row]
             obj = self.objects[obj_id]
             det = detections[col]
@@ -388,6 +392,17 @@ class CentroidTracker:
                 continue
 
             bbox, new_centroid, zone_id, area = det[0], det[1], det[2], det[3]
+
+            # Nearest-matching: distance threshold <= 60 px, anchor distance <= 60 px, or IoU >= 0.20
+            if is_obj_bag and is_det_bag:
+                box_iou = compute_bbox_iou(obj.bbox, bbox)
+                anchor_iou = compute_bbox_iou(getattr(obj, "anchor_bbox", obj.bbox), bbox)
+                d_anchor = float(np.linalg.norm(np.array(obj.anchor_centroid, dtype=np.float32) - np.array(new_centroid, dtype=np.float32)))
+                if min(dist_matrix[row, col], d_anchor) > self.max_distance_px and max(box_iou, anchor_iou) < 0.20:
+                    continue
+            else:
+                if dist_matrix[row, col] > self.max_distance_px:
+                    continue
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
 
@@ -511,7 +526,7 @@ class CentroidTracker:
                 unmatched_obj.missed_frames += 1
 
                 is_bag = unmatched_obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-                if is_bag and unmatched_obj.is_stationary:
+                if is_bag or unmatched_obj.is_stationary:
                     bx, by, bw, bh = unmatched_obj.bbox
                     bcx, bcy = unmatched_obj.centroid
                     bag_area = float(bw * bh)
@@ -581,11 +596,17 @@ class CentroidTracker:
                 d_cent = float(np.linalg.norm(np.array(ex_obj.centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 d_anch = float(np.linalg.norm(np.array(ex_obj.anchor_centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 best_d = min(d_cent, d_anch)
-                box_iou = compute_bbox_iou(getattr(ex_obj, "anchor_bbox", ex_obj.bbox), det_bbox)
+                box_iou = max(
+                    compute_bbox_iou(ex_obj.bbox, det_bbox),
+                    compute_bbox_iou(getattr(ex_obj, "anchor_bbox", ex_obj.bbox), det_bbox),
+                )
 
-                if best_d <= min_existing_dist or (is_det_bag and box_iou >= 0.20):
-                    min_existing_dist = best_d
-                    matched_existing = ex_obj
+                if best_d <= min_existing_dist or (is_det_bag and box_iou >= 0.15):
+                    if best_d < min_existing_dist:
+                        min_existing_dist = best_d
+                        matched_existing = ex_obj
+                    elif matched_existing is None:
+                        matched_existing = ex_obj
 
             if matched_existing is not None:
                 # REUSE EXISTING ACTIVE TRACK ID!
@@ -702,14 +723,10 @@ class CentroidTracker:
         stale_ids = []
         for obj_id, obj in self.objects.items():
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if is_bag and obj.is_stationary:
+            if is_bag or obj.is_stationary:
                 # Stationary Bag Latching: hold confirmed stationary bag for up to 600 frames (~45s)
-                max_frames = max(getattr(self, "stationary_max_age_frames", 600), self.max_age_frames)
-                max_sec = max(getattr(self, "stationary_max_disappeared_sec", 45.0), self.max_disappeared_sec)
-            elif obj.is_stationary or is_bag:
-                extra_frames = 150 if getattr(obj, "is_occluded", False) else 0
-                max_frames = max(150 + extra_frames, self.max_age_frames)
-                max_sec = max(12.0, self.max_disappeared_sec)
+                max_frames = getattr(self, "stationary_max_age_frames", 600)
+                max_sec = getattr(self, "stationary_max_disappeared_sec", 45.0)
             else:
                 max_frames = self.max_age_frames
                 max_sec = self.max_disappeared_sec
@@ -721,7 +738,17 @@ class CentroidTracker:
         for obj_id in stale_ids:
             obj = self.objects[obj_id]
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if is_bag and (obj.is_stationary or obj.dwell_duration > 0.0):
+            elapsed_sec = now - obj.last_seen
+            max_limit_frames = getattr(self, "stationary_max_age_frames", 600) if (is_bag or obj.is_stationary) else self.max_age_frames
+            max_limit_sec = getattr(self, "stationary_max_disappeared_sec", 45.0) if (is_bag or obj.is_stationary) else self.max_disappeared_sec
+
+            # Diagnostic log: print exact reasons
+            logger.warning(
+                f"[TRACKER-PURGE] Purging track ID {obj.track_id} (label='{obj.class_label}', is_stationary={obj.is_stationary}, "
+                f"missed_frames={obj.missed_frames}/{max_limit_frames}, elapsed={elapsed_sec:.2f}s/{max_limit_sec:.2f}s, dwell={obj.dwell_duration:.1f}s)"
+            )
+
+            if is_bag or obj.is_stationary or obj.dwell_duration > 0.0:
                 # Archive stationary bag to Spatial Memory cache
                 self.spatial_memory[obj_id] = SpatialMemoryEntry(
                     track_id=obj.track_id,
@@ -741,6 +768,9 @@ class CentroidTracker:
                     dwell_threshold=obj.dwell_threshold,
                     last_owner_info=getattr(obj, "last_owner_info", None),
                     anchor_bbox=getattr(obj, "anchor_bbox", obj.bbox),
+                )
+                logger.info(
+                    f"[TRACKER] Track ID {obj.track_id} archived to Spatial Memory (dwell={obj.dwell_duration:.1f}s, ttl={self.spatial_memory_ttl_sec:.1f}s)"
                 )
             purged_objects.append(obj)
             del self.objects[obj_id]

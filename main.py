@@ -1054,11 +1054,20 @@ class CameraPipeline:
                 self._latest_display_frame = display_frame
 
             # 8. Push rendered frame and telemetry to MultiCameraBuffer for Web Dashboard
+            rendering_bags = [
+                obj for obj in active_tracks
+                if getattr(obj, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+                and (not hasattr(obj, "should_render") or obj.should_render)
+            ]
             violations_count = sum(
-                1 for obj in active_tracks
+                1 for obj in rendering_bags
                 if getattr(obj, "is_triggered", False)
                 or (getattr(obj, "dwell_duration", 0.0) >= getattr(obj, "dwell_threshold", 3600.0) and getattr(obj, "is_stationary", False))
             )
+            rendering_tracks = [
+                obj for obj in active_tracks
+                if not hasattr(obj, "should_render") or obj.should_render
+            ]
             face_telemetry = []
             for f in (self._cached_faces or []):
                 if isinstance(f, dict):
@@ -1090,8 +1099,8 @@ class CameraPipeline:
                 "is_connected": bool(self.capture.is_connected),
                 "rtsp_status": "Connected" if self.capture.is_connected else "Reconnecting",
                 "violations": violations_count,
-                "clear_area_count": violations_count,
-                "active_tracks": len(active_tracks),
+                "clear_area_count": len(rendering_bags),
+                "active_tracks": len(rendering_tracks),
                 "identified_faces": face_telemetry,
             }
             try:
