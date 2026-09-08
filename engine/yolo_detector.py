@@ -23,16 +23,17 @@ class YOLOOpenVINODetector:
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
         0: 0.38,   # person: calibrated to filter static door frame artifacts while detecting walking persons
-        24: 0.25,  # backpack: calibrated for floor/lying bags
-        26: 0.25,  # handbag: calibrated for floor/lying bags
-        28: 0.25,  # suitcase: calibrated for floor/lying bags
+        24: 0.20,  # backpack: calibrated for floor/lying bags
+        26: 0.20,  # handbag: calibrated for floor/lying bags
+        28: 0.20,  # suitcase: calibrated for floor/lying bags
     }
 
     def __init__(
         self,
         model_name: str = "yolo11n",
         device: str = "cpu",
-        confidence_threshold: float = 0.25,
+        confidence_threshold: float = 0.20,
+        bag_confidence_threshold: Optional[float] = None,
         imgsz: int = 640,
         models_dir: Optional[Path] = None,
     ) -> None:
@@ -41,9 +42,10 @@ class YOLOOpenVINODetector:
         self.imgsz: int = imgsz
         self.model_name: str = model_name
 
+        bag_target_conf = bag_confidence_threshold if bag_confidence_threshold is not None else min(0.20, self.conf)
         # Align bag thresholds with confidence_threshold
         for bag_cid in (24, 26, 28):
-            self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid] = min(self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid], self.conf)
+            self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid] = bag_target_conf
 
         if models_dir is None:
             models_dir = Path(__file__).resolve().parent.parent

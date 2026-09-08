@@ -63,12 +63,14 @@ class CameraPipeline:
         
         # YOLO11 Nano with Intel OpenVINO CPU Acceleration
         detector_cfg = self.config.get("detector", {})
-        conf_thresh = float(detector_cfg.get("confidence_threshold", 0.40))
+        conf_thresh = float(detector_cfg.get("confidence_threshold", detector_cfg.get("base_conf", 0.20)))
+        bag_conf = float(detector_cfg.get("bag_conf", conf_thresh))
         model_name = detector_cfg.get("model_name", "yolo11n")
         self.detector = YOLOOpenVINODetector(
             model_name=model_name,
             device="cpu",
             confidence_threshold=conf_thresh,
+            bag_confidence_threshold=bag_conf,
             imgsz=640,
         )
         # YOLO 2-frame inference stride state (cuts object detector CPU load in half)
@@ -90,7 +92,7 @@ class CameraPipeline:
         self.tracker = CentroidTracker(
             max_distance_px=50.0,
             movement_threshold_px=15.0,
-            anchor_radius_px=15.0,
+            anchor_radius_px=40.0,
             flicker_tolerance_sec=2.0,
             max_disappeared_sec=12.0,
             max_age_frames=150,
@@ -643,10 +645,16 @@ class CameraPipeline:
                             if trk.track_id not in self._prev_stationary_bag_ids:
                                 trigger_burst = True
 
-            # Condition 3: Previously stationary bag starts moving or is picked up/removed
+            # Condition 3: Previously stationary bag starts moving (> 40 px from anchor) or is picked up/removed
             for prev_sid in self._prev_stationary_bag_ids:
                 if prev_sid not in current_stationary_bag_ids:
-                    trigger_burst = True
+                    if prev_sid in self.tracker.objects:
+                        trk = self.tracker.objects[prev_sid]
+                        anchor_d = float(np.linalg.norm(np.array(trk.centroid, dtype=np.float32) - np.array(trk.anchor_centroid, dtype=np.float32)))
+                        if anchor_d > 40.0:
+                            trigger_burst = True
+                    else:
+                        trigger_burst = True
 
             self._prev_stationary_bag_ids = current_stationary_bag_ids
 

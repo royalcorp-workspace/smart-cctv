@@ -46,6 +46,7 @@ class SpatialMemoryEntry:
     confidence: float = 0.0
     dwell_threshold: float = 3600.0
     last_owner_info: Optional[Dict[str, Any]] = None
+    anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 @dataclass
@@ -83,6 +84,7 @@ class TrackedObject:
     is_warning: bool = False
     is_pre_alarm: bool = False
     pre_alarm_alerted: bool = False
+    anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
 
     @property
     def is_static_artifact(self) -> bool:
@@ -131,7 +133,7 @@ class CentroidTracker:
         self,
         max_distance_px: float = 50.0,
         movement_threshold_px: float = 15.0,
-        anchor_radius_px: float = 15.0,
+        anchor_radius_px: float = 40.0,
         flicker_tolerance_sec: float = 2.0,
         max_disappeared_sec: float = 12.0,
         max_age_frames: int = 150,
@@ -201,10 +203,14 @@ class CentroidTracker:
     ) -> TrackedObject:
         """Revive a TrackedObject from SpatialMemoryEntry preserving Track ID and accumulated dwell time."""
         effective_label = label or entry.class_label
+        saved_anchor_bbox = getattr(entry, "anchor_bbox", bbox)
+        if saved_anchor_bbox == (0, 0, 0, 0):
+            saved_anchor_bbox = bbox
         recovered_obj = TrackedObject(
             track_id=entry.track_id,
             centroid=centroid,
             anchor_centroid=entry.anchor_centroid,
+            anchor_bbox=saved_anchor_bbox,
             bbox=bbox,
             zone_id=zone_id or entry.zone_id,
             contour_area=area if area > 0 else entry.contour_area,
@@ -266,6 +272,7 @@ class CentroidTracker:
             track_id=self._next_id,
             centroid=centroid,
             anchor_centroid=centroid,
+            anchor_bbox=bbox,
             bbox=bbox,
             zone_id=zone_id,
             contour_area=area,
@@ -397,11 +404,14 @@ class CentroidTracker:
             obj.confidence = conf
             obj.frame_count += 1
 
-            # 2. Universal Stationary Logic (displacement from anchor_point <= 15 px)
+            # 2. Universal Stationary Logic (displacement from anchor_point <= 40 px OR anchor_bbox IoU >= 0.50)
             is_bag_obj = (det_label or obj.class_label) in ("tas", "backpack", "handbag", "suitcase")
             if is_bag_obj:
-                if anchor_dist <= self.anchor_radius_px:
-                    # Fluctuation / jitter <= 15 px is DIAM (stationary) -> continuously accumulate dwell time
+                anchor_box = getattr(obj, "anchor_bbox", obj.bbox)
+                anchor_iou = compute_bbox_iou(anchor_box, bbox)
+                is_within_anchor = (anchor_dist <= self.anchor_radius_px) or (anchor_iou >= 0.50)
+                if is_within_anchor:
+                    # Fluctuation / jitter within 40px or IoU >= 0.50 is DIAM (stationary) -> continuously accumulate dwell time
                     if not obj.is_stationary:
                         obj.is_stationary = True
                         if obj.dwell_duration > 0.0:
@@ -416,10 +426,11 @@ class CentroidTracker:
                     obj.is_warning = (obj.dwell_duration >= obj.dwell_threshold * 0.50)
                     obj.is_pre_alarm = (obj.dwell_duration >= obj.dwell_threshold * 0.85)
                 else:
-                    # Objek berpindah posisi nyata (> 15 px) -> reset dwell timer
+                    # Objek berpindah posisi nyata (> 40 px and IoU < 0.50) -> reset dwell timer
                     obj.is_stationary = False
                     obj.stationary_start = now
                     obj.anchor_centroid = smoothed_centroid
+                    obj.anchor_bbox = bbox
                     obj.dwell_duration = 0.0
                     obj.is_triggered = False
                     obj.alert_sent = False
@@ -553,7 +564,10 @@ class CentroidTracker:
                 is_bag_obj = matched_existing.class_label in ("tas", "backpack", "handbag", "suitcase")
                 if is_bag_obj:
                     anchor_d = float(np.linalg.norm(np.array(matched_existing.anchor_centroid, dtype=np.float32) - np.array(matched_existing.centroid, dtype=np.float32)))
-                    if anchor_d <= self.anchor_radius_px:
+                    anchor_box = getattr(matched_existing, "anchor_bbox", matched_existing.bbox)
+                    anchor_iou = compute_bbox_iou(anchor_box, det_bbox)
+                    is_within_anchor = (anchor_d <= self.anchor_radius_px) or (anchor_iou >= 0.50)
+                    if is_within_anchor:
                         if not matched_existing.is_stationary:
                             matched_existing.is_stationary = True
                             if matched_existing.dwell_duration > 0.0:
@@ -568,6 +582,7 @@ class CentroidTracker:
                         matched_existing.is_stationary = False
                         matched_existing.stationary_start = now
                         matched_existing.anchor_centroid = matched_existing.centroid
+                        matched_existing.anchor_bbox = det_bbox
                         matched_existing.dwell_duration = 0.0
                         matched_existing.is_triggered = False
                         matched_existing.alert_sent = False
@@ -633,6 +648,7 @@ class CentroidTracker:
                     confidence=obj.confidence,
                     dwell_threshold=obj.dwell_threshold,
                     last_owner_info=getattr(obj, "last_owner_info", None),
+                    anchor_bbox=getattr(obj, "anchor_bbox", obj.bbox),
                 )
             purged_objects.append(obj)
             del self.objects[obj_id]

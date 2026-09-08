@@ -135,22 +135,26 @@ def test_anti_spam_cooldown_and_resets() -> bool:
     assert dispatches == 1, "Anti-spam failed: alert was dispatched again without movement or reset!"
     print(" - Anti-spam check: Subsequent frames do NOT trigger duplicate alerts (dispatches = 1).")
 
-    # 3. Test significant movement (> 15 px smoothed displacement from anchor)
+    # 3. Test anchor jitter guard (dist <= 40 px) and significant movement (> 40 px displacement)
     # Move centroid from (225, 225) to (260, 260) over consecutive frames
     moved_bbox = (230, 230, 50, 50)
     moved_centroid = (260, 260)
     
-    # Frame 1 of move
+    # Frame 1 of move: smoothed displacement is ~15.6 px <= 40 px (jitter tolerance holds dwell!)
     active, _ = tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 3601.0)
     bag = tracker.objects[1]
-    assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s on movement, got {bag.dwell_duration}"
-    assert bag.alert_sent is False, "Expected alert_sent reset to False on significant movement"
-    assert bag.is_triggered is False, "Expected is_triggered reset to False on significant movement"
-    print(" - Significant movement reset check: Dwell reset to 0.0s and alert_sent reset to False.")
+    assert bag.dwell_duration >= 3600.0, f"Expected jitter guard to preserve dwell within 40px, got {bag.dwell_duration}"
+    print(" - Jitter tolerance check: Dwell NOT reset for displacement <= 40 px.")
 
-    # 4. Settle EMA at new position and simulate stationary dwell until 3600s
+    # Consecutive frames 2..5: smoothed displacement exceeds 40 px from anchor (225, 225)
     for i in range(2, 6):
         tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 3600.0 + i)
+
+    bag = tracker.objects[1]
+    assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s when displacement > 40 px, got {bag.dwell_duration}"
+    assert bag.alert_sent is False, "Expected alert_sent reset to False on significant movement"
+    assert bag.is_triggered is False, "Expected is_triggered reset to False on significant movement"
+    print(" - Significant movement reset check: Dwell reset to 0.0s and alert_sent reset to False when displacement > 40 px.")
 
     # Fast-forward to 3600s dwell at new position
     tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 7205.0)
