@@ -97,8 +97,10 @@ class CameraPipeline:
             max_disappeared_sec=12.0,
             max_age_frames=150,
             ema_alpha=0.3,
-            spatial_memory_ttl_sec=60.0,
+            spatial_memory_ttl_sec=180.0,
             spatial_match_distance_px=45.0,
+            stationary_max_age_frames=600,
+            stationary_max_disappeared_sec=45.0,
         )
         self._kernel_close_large = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         self._kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))

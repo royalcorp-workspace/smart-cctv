@@ -116,9 +116,12 @@ class TrackedObject:
         if self.is_active_this_frame:
             return True
 
-        # Hold stationary objects and bags for at least 150 frames (~8-10 seconds at 15-18 FPS)
-        # If occluded, extend render hold up to 300 frames (~15-20s)
+        # Hold stationary objects and bags
+        # Stationary Bag Latching: keep confirmed stationary bag rendering up to 600 frames (~45s)
         is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
+        if is_bag and self.is_stationary:
+            return self.missed_frames <= 600
+
         if self.is_stationary or is_bag:
             max_render_missed = 300 if self.is_occluded else 150
             return self.missed_frames <= max_render_missed
@@ -138,8 +141,10 @@ class CentroidTracker:
         max_disappeared_sec: float = 12.0,
         max_age_frames: int = 150,
         ema_alpha: float = 0.3,
-        spatial_memory_ttl_sec: float = 60.0,
+        spatial_memory_ttl_sec: float = 180.0,
         spatial_match_distance_px: float = 45.0,
+        stationary_max_age_frames: int = 600,
+        stationary_max_disappeared_sec: float = 45.0,
     ) -> None:
         self.max_distance_px: float = max_distance_px
         self.movement_threshold_px: float = movement_threshold_px
@@ -150,6 +155,8 @@ class CentroidTracker:
         self.ema_alpha: float = ema_alpha
         self.spatial_memory_ttl_sec: float = spatial_memory_ttl_sec
         self.spatial_match_distance_px: float = spatial_match_distance_px
+        self.stationary_max_age_frames: int = stationary_max_age_frames
+        self.stationary_max_disappeared_sec: float = stationary_max_disappeared_sec
 
         self._next_id: int = 1
         self.objects: Dict[int, TrackedObject] = {}
@@ -614,7 +621,11 @@ class CentroidTracker:
         stale_ids = []
         for obj_id, obj in self.objects.items():
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if obj.is_stationary or is_bag:
+            if is_bag and obj.is_stationary:
+                # Stationary Bag Latching: hold confirmed stationary bag for up to 600 frames (~45s)
+                max_frames = max(getattr(self, "stationary_max_age_frames", 600), self.max_age_frames)
+                max_sec = max(getattr(self, "stationary_max_disappeared_sec", 45.0), self.max_disappeared_sec)
+            elif obj.is_stationary or is_bag:
                 extra_frames = 150 if getattr(obj, "is_occluded", False) else 0
                 max_frames = max(150 + extra_frames, self.max_age_frames)
                 max_sec = max(12.0, self.max_disappeared_sec)

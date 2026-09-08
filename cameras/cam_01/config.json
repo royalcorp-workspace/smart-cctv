@@ -20,7 +20,7 @@
     ],
     "confidence_threshold": 0.20,
     "base_conf": 0.20,
-    "bag_conf": 0.20
+    "bag_conf": 0.18
   },
   "face_detector": {
     "enabled": true,

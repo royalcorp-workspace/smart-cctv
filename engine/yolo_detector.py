@@ -23,9 +23,9 @@ class YOLOOpenVINODetector:
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
         0: 0.38,   # person: calibrated to filter static door frame artifacts while detecting walking persons
-        24: 0.20,  # backpack: calibrated for floor/lying bags
-        26: 0.20,  # handbag: calibrated for floor/lying bags
-        28: 0.20,  # suitcase: calibrated for floor/lying bags
+        24: 0.18,  # backpack: calibrated for floor/lying bags
+        26: 0.18,  # handbag: calibrated for floor/lying bags
+        28: 0.18,  # suitcase: calibrated for floor/lying bags
     }
 
     def __init__(
@@ -42,7 +42,7 @@ class YOLOOpenVINODetector:
         self.imgsz: int = imgsz
         self.model_name: str = model_name
 
-        bag_target_conf = bag_confidence_threshold if bag_confidence_threshold is not None else min(0.20, self.conf)
+        bag_target_conf = bag_confidence_threshold if bag_confidence_threshold is not None else min(0.18, self.conf)
         # Align bag thresholds with confidence_threshold
         for bag_cid in (24, 26, 28):
             self.CLASS_CONFIDENCE_THRESHOLDS[bag_cid] = bag_target_conf

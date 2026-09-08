@@ -328,9 +328,11 @@ def test_occlusion_and_spatial_memory() -> bool:
     print("\n[TEST 6] Testing Occlusion Handling & Spatial Memory Cache...")
     tracker = CentroidTracker(
         max_distance_px=50.0,
-        anchor_radius_px=15.0,
-        spatial_memory_ttl_sec=60.0,
+        anchor_radius_px=40.0,
+        spatial_memory_ttl_sec=180.0,
         spatial_match_distance_px=45.0,
+        stationary_max_age_frames=600,
+        stationary_max_disappeared_sec=45.0,
     )
 
     t0 = 1000.0
@@ -376,20 +378,26 @@ def test_occlusion_and_spatial_memory() -> bool:
     print(f" - Bag re-observation check: ID={reappeared_bag.track_id} preserved, Dwell resumed smoothly at {reappeared_bag.dwell_duration:.1f}s.")
 
     # 4. Extended Occlusion / Buffer Exceeded Test:
-    # Bag disappears for 165 frames (~16.5 seconds), exceeding max_age_frames (150 frames)
+    # 4a. Stationary latching holds bag in active tracking for 180 frames (~18s)
     held_dwell = reappeared_bag.dwell_duration
     t_purge_start = t0 + 50.0
-    for f in range(165):
+    for f in range(180):
+        tracker.update([], timestamp=t_purge_start + f * 0.1)
+    assert 1 in tracker.objects, "Bag MUST remain latched in active tracker during 600-frame latching window"
+    assert tracker.objects[1].should_render is True, "should_render must stay True"
+
+    # 4b. Bag disappears exceeding 600 frames (> 45s) -> archived to spatial memory
+    for f in range(180, 620):
         tracker.update([], timestamp=t_purge_start + f * 0.1)
 
-    assert 1 not in tracker.objects, "Bag should be purged from active objects after 165 frames"
+    assert 1 not in tracker.objects, "Bag should be purged from active objects after 620 frames (> 45s)"
     assert 1 in tracker.spatial_memory, "Bag MUST be cached in Spatial Memory upon purge!"
     assert abs(tracker.spatial_memory[1].accumulated_dwell - held_dwell) < 0.5
     print(f" - Spatial Memory Archive check: ID=1 moved to spatial_memory with preserved dwell={tracker.spatial_memory[1].accumulated_dwell:.1f}s.")
 
     # 5. Re-identification from Spatial Memory:
-    # Bag reappears at t = 1080.0s (14s after purge, within TTL 60s)
-    active, _ = tracker.update([(bag_bbox, (330, 330), zone_id, area, "tas", 25.0, 0.9)], timestamp=t0 + 80.0)
+    # Bag reappears at t = 1130.0s (within TTL 180s)
+    active, _ = tracker.update([(bag_bbox, (330, 330), zone_id, area, "tas", 25.0, 0.9)], timestamp=t0 + 130.0)
     assert len(active) == 1
     recovered_bag = active[0]
     assert recovered_bag.track_id == 1, f"Track ID must be RECOVERED as 1, but got {recovered_bag.track_id}"
@@ -400,10 +408,10 @@ def test_occlusion_and_spatial_memory() -> bool:
     # 6. TTL Expire Check:
     t_ttl = 3000.0
     tracker.update([((100, 100, 50, 50), (125, 125), zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=t_ttl)
-    for f in range(165):
+    for f in range(620):
         tracker.update([], timestamp=t_ttl + f * 0.1)
-    tracker.update([], timestamp=t_ttl + 100.0)
-    assert len(tracker.spatial_memory) == 0, "Expired entries must be purged after TTL 60s"
+    tracker.update([], timestamp=t_ttl + 300.0)
+    assert len(tracker.spatial_memory) == 0, "Expired entries must be purged after TTL 180s"
     print(" - TTL Cache Expiry check: Expired entries cleanly purged after TTL window.")
 
     print(" -> PASS: Spatial Memory & Occlusion Handling verified (Track ID & Dwell preserved).")
