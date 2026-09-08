@@ -135,29 +135,36 @@ def test_anti_spam_cooldown_and_resets() -> bool:
     assert dispatches == 1, "Anti-spam failed: alert was dispatched again without movement or reset!"
     print(" - Anti-spam check: Subsequent frames do NOT trigger duplicate alerts (dispatches = 1).")
 
-    # 3. Test anchor jitter guard (dist <= 40 px) and significant movement (> 40 px displacement)
-    # Move centroid from (225, 225) to (260, 260) over consecutive frames
-    moved_bbox = (230, 230, 50, 50)
-    moved_centroid = (260, 260)
+    # 3. Test anchor jitter guard & Sticky Stationary (requires >= 30 consecutive frames > 50 px to reset)
+    # Move centroid from (225, 225) to (265, 265) over consecutive frames
+    moved_bbox = (240, 240, 50, 50)
+    moved_centroid = (265, 265)
     
-    # Frame 1 of move: smoothed displacement is ~15.6 px <= 40 px (jitter tolerance holds dwell!)
+    # Frame 1 of move: smoothed displacement is ~17.0 px <= 40 px (jitter tolerance holds dwell!)
     active, _ = tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 3601.0)
     bag = tracker.objects[1]
     assert bag.dwell_duration >= 3600.0, f"Expected jitter guard to preserve dwell within 40px, got {bag.dwell_duration}"
     print(" - Jitter tolerance check: Dwell NOT reset for displacement <= 40 px.")
 
-    # Consecutive frames 2..5: smoothed displacement exceeds 40 px from anchor (225, 225)
-    for i in range(2, 6):
+    # Frames 2..20: displaced > 50px but < 30 confirmation frames -> Sticky stationary holds!
+    for i in range(2, 21):
+        tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 3600.0 + i)
+    bag = tracker.objects[1]
+    assert bag.dwell_duration >= 3600.0, "Sticky stationary must prevent dwell reset before 30 confirmation frames!"
+    print(" - Sticky stationary check: Dwell NOT reset before 30 consecutive confirmation frames.")
+
+    # Frames 21..36: reaches >= 30 consecutive frames with displacement > 50 px -> genuine move confirmed!
+    for i in range(21, 37):
         tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 3600.0 + i)
 
     bag = tracker.objects[1]
-    assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s when displacement > 40 px, got {bag.dwell_duration}"
+    assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s after >=30 confirmation frames, got {bag.dwell_duration}"
     assert bag.alert_sent is False, "Expected alert_sent reset to False on significant movement"
     assert bag.is_triggered is False, "Expected is_triggered reset to False on significant movement"
-    print(" - Significant movement reset check: Dwell reset to 0.0s and alert_sent reset to False when displacement > 40 px.")
+    print(" - Significant movement reset check: Dwell reset to 0.0s and alert_sent reset after 30 confirmation frames.")
 
     # Fast-forward to 3600s dwell at new position
-    tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 7205.0)
+    tracker.update([(moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=start_time + 7240.0)
     bag = tracker.objects[1]
     assert bag.dwell_duration >= 3600.0
     bag.alert_sent = True
@@ -165,21 +172,21 @@ def test_anti_spam_cooldown_and_resets() -> bool:
 
     # 5. Test owner attendance reset (>= 4.0s sustained)
     # Person stands beside the bag:
-    person_bbox = (230, 150, 50, 130)
-    person_centroid = (255, 215)
+    person_bbox = (240, 160, 50, 130)
+    person_centroid = (265, 225)
 
-    # Frame 1 of attendance at t=7206.0s (less than 4.0s sustained)
+    # Frame 1 of attendance at t=7241.0s (less than 4.0s sustained)
     dets_with_person = [
         (moved_bbox, moved_centroid, zone_id, 2500.0, "tas", 20.0, 0.9),
         (person_bbox, person_centroid, zone_id, 6500.0, "person", 20.0, 0.9),
     ]
-    tracker.update(dets_with_person, timestamp=start_time + 7206.0)
+    tracker.update(dets_with_person, timestamp=start_time + 7241.0)
     assert bag.is_attended is True
     # At < 4.0s, dwell is paused, not yet zeroed
     assert bag.dwell_duration >= 3600.0
 
-    # Frame at t=7211.0s (5.0s of sustained attendance >= 4.0s)
-    tracker.update(dets_with_person, timestamp=start_time + 7211.0)
+    # Frame at t=7246.0s (5.0s of sustained attendance >= 4.0s)
+    tracker.update(dets_with_person, timestamp=start_time + 7246.0)
     assert bag.is_attended is True
     assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s after sustained attendance, got {bag.dwell_duration}"
     assert bag.alert_sent is False, "Expected alert_sent reset to False after sustained attendance"

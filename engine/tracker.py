@@ -85,6 +85,8 @@ class TrackedObject:
     is_pre_alarm: bool = False
     pre_alarm_alerted: bool = False
     anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    moved_confirmation_frames: int = 0
+    last_moved_time: float = 0.0
 
     @property
     def is_static_artifact(self) -> bool:
@@ -134,7 +136,7 @@ class CentroidTracker:
 
     def __init__(
         self,
-        max_distance_px: float = 50.0,
+        max_distance_px: float = 60.0,
         movement_threshold_px: float = 15.0,
         anchor_radius_px: float = 40.0,
         flicker_tolerance_sec: float = 2.0,
@@ -142,7 +144,7 @@ class CentroidTracker:
         max_age_frames: int = 150,
         ema_alpha: float = 0.3,
         spatial_memory_ttl_sec: float = 180.0,
-        spatial_match_distance_px: float = 45.0,
+        spatial_match_distance_px: float = 60.0,
         stationary_max_age_frames: int = 600,
         stationary_max_disappeared_sec: float = 45.0,
     ) -> None:
@@ -176,7 +178,7 @@ class CentroidTracker:
             return None
 
         best_entry: Optional[SpatialMemoryEntry] = None
-        min_dist = self.spatial_match_distance_px
+        min_dist = max(60.0, self.spatial_match_distance_px)
 
         for entry in self.spatial_memory.values():
             if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec:
@@ -190,7 +192,7 @@ class CentroidTracker:
             # Check Spatial Bounding Box IoU
             box_iou = compute_bbox_iou(bbox, entry.last_bbox)
 
-            if closest_d <= min_dist or box_iou >= 0.25:
+            if closest_d <= min_dist or box_iou >= 0.20:
                 min_dist = closest_d
                 best_entry = entry
 
@@ -247,6 +249,8 @@ class CentroidTracker:
             is_warning=(entry.accumulated_dwell >= entry.dwell_threshold * 0.50),
             is_pre_alarm=(entry.accumulated_dwell >= entry.dwell_threshold * 0.85),
             pre_alarm_alerted=False,
+            moved_confirmation_frames=0,
+            last_moved_time=0.0,
         )
         self.objects[entry.track_id] = recovered_obj
         if entry.track_id in self.spatial_memory:
@@ -300,6 +304,8 @@ class CentroidTracker:
             initial_centroid=centroid,
             max_displacement_from_start=0.0,
             frame_count=1,
+            moved_confirmation_frames=0,
+            last_moved_time=0.0,
         )
         self.objects[self._next_id] = new_obj
         self._next_id += 1
@@ -411,39 +417,63 @@ class CentroidTracker:
             obj.confidence = conf
             obj.frame_count += 1
 
-            # 2. Universal Stationary Logic (displacement from anchor_point <= 40 px OR anchor_bbox IoU >= 0.50)
+            # 2. Sticky Stationary State Machine for Baggage
             is_bag_obj = (det_label or obj.class_label) in ("tas", "backpack", "handbag", "suitcase")
             if is_bag_obj:
                 anchor_box = getattr(obj, "anchor_bbox", obj.bbox)
                 anchor_iou = compute_bbox_iou(anchor_box, bbox)
-                is_within_anchor = (anchor_dist <= self.anchor_radius_px) or (anchor_iou >= 0.50)
-                if is_within_anchor:
-                    # Fluctuation / jitter within 40px or IoU >= 0.50 is DIAM (stationary) -> continuously accumulate dwell time
+                is_near_anchor = (anchor_dist <= self.anchor_radius_px) or (anchor_iou >= 0.50)
+
+                if is_near_anchor:
+                    # Near anchor: normal coordinate jitter / fluctuation, reset moved confirmation counter
+                    obj.moved_confirmation_frames = 0
                     if not obj.is_stationary:
                         obj.is_stationary = True
                         if obj.dwell_duration > 0.0:
-                            # Resume smoothly from held dwell duration
                             obj.stationary_start = now - obj.dwell_duration
-                    if not obj.is_attended:
-                        obj.dwell_duration = now - obj.stationary_start
-                    else:
-                        # Hold/pause dwell time while attended
-                        obj.stationary_start = now - obj.dwell_duration
-                    # Multi-stage alert escalation tracking
-                    obj.is_warning = (obj.dwell_duration >= obj.dwell_threshold * 0.50)
-                    obj.is_pre_alarm = (obj.dwell_duration >= obj.dwell_threshold * 0.85)
                 else:
-                    # Objek berpindah posisi nyata (> 40 px and IoU < 0.50) -> reset dwell timer
-                    obj.is_stationary = False
-                    obj.stationary_start = now
-                    obj.anchor_centroid = smoothed_centroid
-                    obj.anchor_bbox = bbox
-                    obj.dwell_duration = 0.0
-                    obj.is_triggered = False
-                    obj.alert_sent = False
-                    obj.is_warning = False
-                    obj.is_pre_alarm = False
-                    obj.pre_alarm_alerted = False
+                    # Beyond anchor radius: check if genuinely moving (> 50.0 px)
+                    if anchor_dist > 50.0:
+                        obj.moved_confirmation_frames += 1
+                    else:
+                        obj.moved_confirmation_frames = max(0, obj.moved_confirmation_frames - 1)
+
+                # STICKY STATIONARY LOGIC:
+                if obj.is_stationary:
+                    if obj.moved_confirmation_frames >= 30:
+                        # Genuine displacement confirmed: moved > 50px for >= 30 consecutive frames!
+                        obj.is_stationary = False
+                        obj.moved_confirmation_frames = 0
+                        obj.last_moved_time = now
+                        obj.stationary_start = now
+                        obj.anchor_centroid = smoothed_centroid
+                        obj.anchor_bbox = bbox
+                        obj.dwell_duration = 0.0
+                        obj.is_triggered = False
+                        obj.alert_sent = False
+                        obj.is_warning = False
+                        obj.is_pre_alarm = False
+                        obj.pre_alarm_alerted = False
+                        logger.info(
+                            f"[TRACKER] Track ID {obj.track_id} confirmed moved (>50px for 30 consecutive frames). Resetting stationary & dwell."
+                        )
+                    else:
+                        # STICKY: Maintain stationary status!
+                        # Accumulate dwell_duration continuously unless attended by owner
+                        if not obj.is_attended:
+                            obj.dwell_duration = now - obj.stationary_start
+                        else:
+                            obj.stationary_start = now - obj.dwell_duration
+                        obj.is_warning = (obj.dwell_duration >= obj.dwell_threshold * 0.50)
+                        obj.is_pre_alarm = (obj.dwell_duration >= obj.dwell_threshold * 0.85)
+                else:
+                    if is_near_anchor:
+                        obj.is_stationary = True
+                        obj.stationary_start = now
+                        obj.dwell_duration = 0.0
+                    else:
+                        obj.stationary_start = now
+                        obj.dwell_duration = 0.0
             else:
                 # Person never triggers dwell violation
                 obj.is_stationary = False
@@ -514,10 +544,16 @@ class CentroidTracker:
                             unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
                         else:
                             unmatched_obj.is_occluded = False
-                            unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
+                            # Sticky stationary: continue accumulating dwell duration even when YOLO missed detection
+                            if not unmatched_obj.is_attended:
+                                unmatched_obj.dwell_duration = now - unmatched_obj.stationary_start
+                            else:
+                                unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
+                            unmatched_obj.is_warning = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.50)
+                            unmatched_obj.is_pre_alarm = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.85)
 
         # 4. Anti ID Churning Guard for unassigned detections
-        # First check active memory within 50 px; if not found, check Spatial Memory!
+        # First check active memory within 60 px for bags (or 50px for person); if not found, check Spatial Memory!
         for col, det in enumerate(detections):
             if col in assigned_cols:
                 continue
@@ -527,8 +563,11 @@ class CentroidTracker:
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
 
+            is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
+            max_match_dist = 60.0 if is_det_bag else self.max_distance_px
+
             matched_existing = None
-            min_existing_dist = self.max_distance_px  # 50 px threshold
+            min_existing_dist = max_match_dist
 
             for ex_id, ex_obj in self.objects.items():
                 if ex_id in [existing_ids[r] for r in assigned_rows]:
@@ -536,14 +575,15 @@ class CentroidTracker:
 
                 # Class compatibility guard: Person cannot match Bag, and Bag cannot match Person
                 is_ex_bag = ex_obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-                is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
                 if (is_ex_bag and det_label == "person") or (ex_obj.class_label == "person" and is_det_bag):
                     continue
 
                 d_cent = float(np.linalg.norm(np.array(ex_obj.centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 d_anch = float(np.linalg.norm(np.array(ex_obj.anchor_centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 best_d = min(d_cent, d_anch)
-                if best_d <= min_existing_dist:
+                box_iou = compute_bbox_iou(getattr(ex_obj, "anchor_bbox", ex_obj.bbox), det_bbox)
+
+                if best_d <= min_existing_dist or (is_det_bag and box_iou >= 0.20):
                     min_existing_dist = best_d
                     matched_existing = ex_obj
 
@@ -567,35 +607,58 @@ class CentroidTracker:
                 if zone_id and zone_id != matched_existing.zone_id:
                     matched_existing.zone_id = zone_id
 
-                # Stationary logic: continue accumulating dwell time
+                # Sticky Stationary logic: continue accumulating dwell time
                 is_bag_obj = matched_existing.class_label in ("tas", "backpack", "handbag", "suitcase")
                 if is_bag_obj:
                     anchor_d = float(np.linalg.norm(np.array(matched_existing.anchor_centroid, dtype=np.float32) - np.array(matched_existing.centroid, dtype=np.float32)))
                     anchor_box = getattr(matched_existing, "anchor_bbox", matched_existing.bbox)
                     anchor_iou = compute_bbox_iou(anchor_box, det_bbox)
-                    is_within_anchor = (anchor_d <= self.anchor_radius_px) or (anchor_iou >= 0.50)
-                    if is_within_anchor:
+                    is_near_anchor = (anchor_d <= self.anchor_radius_px) or (anchor_iou >= 0.50)
+
+                    if is_near_anchor:
+                        matched_existing.moved_confirmation_frames = 0
                         if not matched_existing.is_stationary:
                             matched_existing.is_stationary = True
                             if matched_existing.dwell_duration > 0.0:
                                 matched_existing.stationary_start = now - matched_existing.dwell_duration
-                        if not matched_existing.is_attended:
-                            matched_existing.dwell_duration = now - matched_existing.stationary_start
-                        else:
-                            matched_existing.stationary_start = now - matched_existing.dwell_duration
-                        matched_existing.is_warning = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.50)
-                        matched_existing.is_pre_alarm = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.85)
                     else:
-                        matched_existing.is_stationary = False
-                        matched_existing.stationary_start = now
-                        matched_existing.anchor_centroid = matched_existing.centroid
-                        matched_existing.anchor_bbox = det_bbox
-                        matched_existing.dwell_duration = 0.0
-                        matched_existing.is_triggered = False
-                        matched_existing.alert_sent = False
-                        matched_existing.is_warning = False
-                        matched_existing.is_pre_alarm = False
-                        matched_existing.pre_alarm_alerted = False
+                        if anchor_d > 50.0:
+                            matched_existing.moved_confirmation_frames += 1
+                        else:
+                            matched_existing.moved_confirmation_frames = max(0, matched_existing.moved_confirmation_frames - 1)
+
+                    if matched_existing.is_stationary:
+                        if matched_existing.moved_confirmation_frames >= 30:
+                            matched_existing.is_stationary = False
+                            matched_existing.moved_confirmation_frames = 0
+                            matched_existing.last_moved_time = now
+                            matched_existing.stationary_start = now
+                            matched_existing.anchor_centroid = matched_existing.centroid
+                            matched_existing.anchor_bbox = det_bbox
+                            matched_existing.dwell_duration = 0.0
+                            matched_existing.is_triggered = False
+                            matched_existing.alert_sent = False
+                            matched_existing.is_warning = False
+                            matched_existing.is_pre_alarm = False
+                            matched_existing.pre_alarm_alerted = False
+                            logger.info(
+                                f"[TRACKER] Track ID {matched_existing.track_id} confirmed moved (>50px for 30 frames). Resetting stationary & dwell."
+                            )
+                        else:
+                            if not matched_existing.is_attended:
+                                matched_existing.dwell_duration = now - matched_existing.stationary_start
+                            else:
+                                matched_existing.stationary_start = now - matched_existing.dwell_duration
+                            matched_existing.is_warning = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.50)
+                            matched_existing.is_pre_alarm = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.85)
+                    else:
+                        if is_near_anchor:
+                            matched_existing.is_stationary = True
+                            matched_existing.stationary_start = now
+                            matched_existing.dwell_duration = 0.0
+                        else:
+                            matched_existing.stationary_start = now
+                            matched_existing.dwell_duration = 0.0
             else:
                 # Check Spatial Memory before registering a brand new ID!
                 matched_spatial = self._match_spatial_memory(det_centroid, det_bbox, zone_id, det_label, now)
@@ -604,7 +667,25 @@ class CentroidTracker:
                         matched_spatial, det_centroid, det_bbox, zone_id, area, det_label, edge_dist, conf, now
                     )
                 else:
-                    # Only register a new ID if completely outside 50 px of ANY known object
+                    # Spatial Matching Hardening: If there is ANY active bag within 60 px in sterile zone,
+                    # FORCE reuse of existing Track ID (do not create a duplicate new ID)
+                    if is_det_bag:
+                        nearby_active_bag = None
+                        for active_obj in self.objects.values():
+                            if active_obj.class_label in ("tas", "backpack", "handbag", "suitcase"):
+                                d_c = float(np.linalg.norm(np.array(active_obj.centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
+                                d_a = float(np.linalg.norm(np.array(active_obj.anchor_centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
+                                b_iou = compute_bbox_iou(active_obj.bbox, det_bbox)
+                                if min(d_c, d_a) <= 60.0 or b_iou >= 0.20:
+                                    nearby_active_bag = active_obj
+                                    break
+                        if nearby_active_bag is not None:
+                            logger.debug(
+                                f"[TRACKER] Suppressed duplicate bag detection within 60px of active Track ID {nearby_active_bag.track_id}"
+                            )
+                            continue
+
+                    # Only register a new ID if completely outside 60 px of ANY known object
                     self._register(det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
 
         # 5. Universal owner proximity across all zones

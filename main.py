@@ -90,7 +90,7 @@ class CameraPipeline:
             base_resolution=self.roi_base_resolution,
         )
         self.tracker = CentroidTracker(
-            max_distance_px=50.0,
+            max_distance_px=60.0,
             movement_threshold_px=15.0,
             anchor_radius_px=40.0,
             flicker_tolerance_sec=2.0,
@@ -98,7 +98,7 @@ class CameraPipeline:
             max_age_frames=150,
             ema_alpha=0.3,
             spatial_memory_ttl_sec=180.0,
-            spatial_match_distance_px=45.0,
+            spatial_match_distance_px=60.0,
             stationary_max_age_frames=600,
             stationary_max_disappeared_sec=45.0,
         )
@@ -647,16 +647,23 @@ class CameraPipeline:
                             if trk.track_id not in self._prev_stationary_bag_ids:
                                 trigger_burst = True
 
-            # Condition 3: Previously stationary bag starts moving (> 40 px from anchor) or is picked up/removed
+            # Condition 3: Previously stationary bag starts moving (>50px for >=30 frames) or is picked up/removed by person
             for prev_sid in self._prev_stationary_bag_ids:
                 if prev_sid not in current_stationary_bag_ids:
                     if prev_sid in self.tracker.objects:
                         trk = self.tracker.objects[prev_sid]
-                        anchor_d = float(np.linalg.norm(np.array(trk.centroid, dtype=np.float32) - np.array(trk.anchor_centroid, dtype=np.float32)))
-                        if anchor_d > 40.0:
+                        # Only trigger burst if genuine movement was confirmed!
+                        if getattr(trk, "moved_confirmation_frames", 0) >= 30 or (now - getattr(trk, "last_moved_time", 0.0)) <= 3.0:
                             trigger_burst = True
                     else:
-                        trigger_burst = True
+                        # Bag removed from active tracker: only trigger burst if contact with person occurred!
+                        purged_match = next((p for p in purged_tracks if p.track_id == prev_sid), None)
+                        if purged_match is not None:
+                            was_attended = getattr(purged_match, "is_attended", False)
+                            was_occluded = getattr(purged_match, "is_occluded", False)
+                            had_owner = getattr(purged_match, "last_owner_info", None) is not None
+                            if was_attended or was_occluded or had_owner:
+                                trigger_burst = True
 
             self._prev_stationary_bag_ids = current_stationary_bag_ids
 
