@@ -21,7 +21,7 @@ from engine.retention import cleanup_old_records, DiskGuardWorker
 from engine.rtsp_stream import ThreadedCapture
 from engine.face_detector import YuNetFaceDetector
 from engine.face_recognizer import FaceRecognizer
-from engine.tracker import CentroidTracker, TrackedObject
+from engine.tracker import CentroidTracker, TrackedObject, compute_bbox_iou
 from engine.yolo_detector import YOLOOpenVINODetector
 from engine.zone_filter import ZoneFilter
 from notification.local_alert import GlobalAudioWorker, VisualHUD
@@ -140,6 +140,9 @@ class CameraPipeline:
 
         # Recognition caching for stationary faces (eliminates redundant SFace calls & preserves 8-10 FPS)
         self._face_recog_cache: Dict[int, Dict[str, Any]] = {}
+
+        # Anti-ghost tile suppression tracking for retrieved bags
+        self._recently_retrieved_bags: Dict[int, Dict[str, Any]] = {}
 
         if self.face_detection_enabled:
             try:
@@ -471,6 +474,13 @@ class CameraPipeline:
 
             last_valid_frame_time = now
 
+            # Expire recently retrieved bags older than 60.0s
+            if self._recently_retrieved_bags:
+                self._recently_retrieved_bags = {
+                    tid: info for tid, info in self._recently_retrieved_bags.items()
+                    if (now - info["time"]) <= 60.0
+                }
+
             # Target resolution normalization (Display frame)
             if self.target_resolution is not None:
                 tw, th = self.target_resolution
@@ -549,6 +559,49 @@ class CameraPipeline:
                     if crop_var < 40.0 and crop_edges < 20 and edge_density < 0.015:
                         continue  # Discard bare floor ghost blob
 
+                # Anti-Ghost Tile Line Filter for Recently Retrieved / Taken Bags
+                is_near_retrieved = False
+                for r_info in self._recently_retrieved_bags.values():
+                    rcx, rcy = r_info["centroid"]
+                    r_anch = r_info["anchor_centroid"]
+                    r_box = r_info["bbox"]
+                    d_r = float(np.hypot(bcx - rcx, bcy - rcy))
+                    d_ra = float(np.hypot(bcx - r_anch[0], bcy - r_anch[1]))
+                    iou_r = compute_bbox_iou((bx, by, bw, bh), r_box)
+                    if min(d_r, d_ra) < 60.0 or iou_r > 0.15:
+                        is_near_retrieved = True
+                        break
+
+                # Also check active stationary bags where a person is nearby / interacting (< 80px)
+                is_near_active_bag_with_person = False
+                for trk in self.tracker.objects.values():
+                    if trk.class_label in ("tas", "backpack", "handbag", "suitcase") and trk.is_stationary:
+                        d_c = float(np.hypot(bcx - trk.centroid[0], bcy - trk.centroid[1]))
+                        d_a = float(np.hypot(bcx - trk.anchor_centroid[0], bcy - trk.anchor_centroid[1]))
+                        iou_b = compute_bbox_iou((bx, by, bw, bh), getattr(trk, "anchor_bbox", trk.bbox))
+                        if min(d_c, d_a) < 60.0 or iou_b > 0.15:
+                            if (now - getattr(trk, "last_person_near_time", 0.0)) <= 2.0 or (now - getattr(trk, "last_occluded_time", 0.0)) <= 2.0:
+                                is_near_active_bag_with_person = True
+                                break
+
+                if is_near_retrieved or is_near_active_bag_with_person:
+                    # Verify whether YOLO confirms any bag at this location (confidence > 0.15)
+                    yolo_bag_confirmed = False
+                    for y_box, y_cent, _, y_conf, y_cid, _ in yolo_results:
+                        if y_cid in (24, 26, 28) and y_conf > 0.15:
+                            d_yb = float(np.hypot(bcx - y_cent[0], bcy - y_cent[1]))
+                            iou_yb = compute_bbox_iou((bx, by, bw, bh), y_box)
+                            if d_yb < 60.0 or iou_yb > 0.15:
+                                yolo_bag_confirmed = True
+                                break
+
+                    if not yolo_bag_confirmed:
+                        logger.debug(
+                            f"[{self.camera_id}] Discarded ghost tile blob at ({bcx}, {bcy}) "
+                            f"(retrieved/interaction location without YOLO bag confirmation > 0.15)."
+                        )
+                        continue  # DISCARD ghost tile blob!
+
                 area = float(bw * bh)
                 formatted_detections.append(
                     ((bx, by, bw, bh), (bcx, bcy), bzone, area, "tas", 20.0, 0.95)
@@ -621,6 +674,17 @@ class CameraPipeline:
             active_tracks, purged_tracks = self.tracker.update(formatted_detections, timestamp=now)
             self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
 
+            # Record retrieved bags for ghost tile suppression
+            for purged in purged_tracks:
+                if getattr(purged, "is_retrieved", False):
+                    self._recently_retrieved_bags[purged.track_id] = {
+                        "centroid": purged.centroid,
+                        "anchor_centroid": purged.anchor_centroid,
+                        "bbox": getattr(purged, "anchor_bbox", purged.bbox),
+                        "zone_id": purged.zone_id,
+                        "time": now,
+                    }
+
             zones_cfg = self.config.get("zones", {})
 
             # Dynamic Burst Capture Triggers (3.0s burst at interval=1 on bag interaction in sterile zone)
@@ -662,7 +726,8 @@ class CameraPipeline:
                             was_attended = getattr(purged_match, "is_attended", False)
                             was_occluded = getattr(purged_match, "is_occluded", False)
                             had_owner = getattr(purged_match, "last_owner_info", None) is not None
-                            if was_attended or was_occluded or had_owner:
+                            was_retrieved = getattr(purged_match, "is_retrieved", False)
+                            if was_attended or was_occluded or had_owner or was_retrieved:
                                 trigger_burst = True
 
             self._prev_stationary_bag_ids = current_stationary_bag_ids

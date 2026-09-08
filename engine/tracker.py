@@ -87,6 +87,8 @@ class TrackedObject:
     anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
     moved_confirmation_frames: int = 0
     last_moved_time: float = 0.0
+    is_retrieved: bool = False
+    last_person_near_time: float = 0.0
 
     @property
     def is_static_artifact(self) -> bool:
@@ -104,15 +106,17 @@ class TrackedObject:
     def should_render(self) -> bool:
         """Edge-aware visual grace period and static artifact dismissal.
 
-        1. If identified as static background artifact -> do not render.
+        1. If retrieved by person or static artifact -> do not render.
         2. Active in this frame -> always render.
         3. Missed in this frame:
            - For stationary objects or baggage (tas, backpack, handbag, suitcase):
              hold visual render for at least 30 frames (track buffer / coasting)
              so if detection drops for 1-2 frames, the box does not immediately disappear.
-           - For moving persons inside zone (edge_distance >= 8.0 px): allow grace period up to 10 frames.
+           - For moving persons inside zone (edge_distance >= 8.0 px): allow grace period up to 20 frames.
            - Near or outside boundary (edge_distance < 8.0 px): immediately hide (0 frames grace period).
         """
+        if getattr(self, "is_retrieved", False):
+            return False
         if self.is_static_artifact:
             return False
         if self.is_active_this_frame:
@@ -159,6 +163,56 @@ class CentroidTracker:
         self._next_id: int = 1
         self.objects: Dict[int, TrackedObject] = {}
         self.spatial_memory: Dict[int, SpatialMemoryEntry] = {}
+
+    def _is_person_near_obj(
+        self,
+        obj: TrackedObject,
+        person_detections: List[Tuple[Tuple[int, int, int, int], Tuple[int, int]]],
+    ) -> bool:
+        """Check if any person in current frame is touching or within 80px of object."""
+        bcx, bcy = obj.centroid
+        acx, acy = obj.anchor_centroid
+        bx, by, bw, bh = obj.bbox
+        bag_base = (float(bx + bw / 2.0), float(by + bh))
+
+        # 1. Check incoming person detections
+        for (px, py, pw, ph), (pcx, pcy) in person_detections:
+            p_foot = (float(px + pw / 2.0), float(py + ph))
+            d_cent = float(np.hypot(bcx - pcx, bcy - pcy))
+            d_anch = float(np.hypot(acx - pcx, acy - pcy))
+            d_foot = float(np.hypot(bag_base[0] - p_foot[0], bag_base[1] - p_foot[1]))
+
+            ix1 = max(bx, px)
+            iy1 = max(by, py)
+            ix2 = min(bx + bw, px + pw)
+            iy2 = min(by + bh, py + ph)
+            if ix2 > ix1 and iy2 > iy1:
+                return True
+
+            if min(d_cent, d_anch, d_foot) < 80.0:
+                return True
+
+        # 2. Check active person tracks in self.objects
+        for trk in self.objects.values():
+            if trk.track_id != obj.track_id and trk.class_label == "person" and getattr(trk, "is_active_this_frame", False):
+                tcx, tcy = trk.centroid
+                tx, ty, tw, th = trk.bbox
+                t_foot = (float(tx + tw / 2.0), float(ty + th))
+                d_cent = float(np.hypot(bcx - tcx, bcy - tcy))
+                d_anch = float(np.hypot(acx - tcx, acy - tcy))
+                d_foot = float(np.hypot(bag_base[0] - t_foot[0], bag_base[1] - t_foot[1]))
+
+                ix1 = max(bx, tx)
+                iy1 = max(by, ty)
+                ix2 = min(bx + bw, tx + tw)
+                iy2 = min(by + bh, ty + th)
+                if ix2 > ix1 and iy2 > iy1:
+                    return True
+
+                if min(d_cent, d_anch, d_foot) < 80.0:
+                    return True
+
+        return False
 
     def _match_spatial_memory(
         self,
@@ -333,12 +387,28 @@ class CentroidTracker:
         for obj in self.objects.values():
             obj.is_active_this_frame = False
 
+        # Extract person detections in current frame
+        person_detections = [
+            (d[0], d[1]) for d in detections if (len(d) >= 5 and d[4] == "person")
+        ]
+
+        # Update last_person_near_time for existing objects if a person is nearby
+        for obj in self.objects.values():
+            if self._is_person_near_obj(obj, person_detections):
+                obj.last_person_near_time = now
+
         # If no detections provided, hold dwell duration and purge stale objects
         if len(detections) == 0:
             for obj in self.objects.values():
                 obj.missed_frames += 1
                 if obj.is_stationary:
                     obj.stationary_start = now - obj.dwell_duration
+                    recent_near = (now - getattr(obj, "last_person_near_time", 0.0)) <= 1.5
+                    recent_interaction = recent_near or ((now - getattr(obj, "last_occluded_time", 0.0)) <= 1.5)
+                    if recent_interaction and not getattr(obj, "is_occluded", False):
+                        obj.is_retrieved = True
+                        obj.missed_frames = getattr(self, "stationary_max_age_frames", 600) + 1
+                        logger.info(f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person. Resolving track immediately.")
             purged = self._purge_stale_objects(now)
             return list(self.objects.values()), purged
 
@@ -713,6 +783,25 @@ class CentroidTracker:
         # 5. Universal owner proximity across all zones
         self.evaluate_owner_proximity(now)
 
+        # 6. Instant Bag Pickup / Retrieval Resolution
+        for obj_id, obj in list(self.objects.items()):
+            if obj.is_active_this_frame:
+                continue
+
+            is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            if is_bag and obj.is_stationary:
+                person_near = self._is_person_near_obj(obj, person_detections)
+                if person_near:
+                    obj.last_person_near_time = now
+
+                recent_near = person_near or ((now - getattr(obj, "last_person_near_time", 0.0)) <= 1.5)
+                recent_interaction = recent_near or ((now - getattr(obj, "last_occluded_time", 0.0)) <= 1.5)
+
+                if recent_interaction and not getattr(obj, "is_occluded", False):
+                    obj.is_retrieved = True
+                    obj.missed_frames = getattr(self, "stationary_max_age_frames", 600) + 1
+                    logger.info(f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person. Resolving track immediately.")
+
         # Anti-memory leak: purge tracks unobserved for > max_disappeared_sec (4.5s) or > max_age_frames (45 frames)
         purged = self._purge_stale_objects(now)
 
@@ -723,6 +812,9 @@ class CentroidTracker:
         Stationary bags are archived into spatial_memory cache before purge."""
         stale_ids = []
         for obj_id, obj in self.objects.items():
+            if getattr(obj, "is_retrieved", False):
+                stale_ids.append(obj_id)
+                continue
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
             if is_bag or obj.is_stationary:
                 # Stationary Bag Latching: hold confirmed stationary bag for up to 600 frames (~45s)
@@ -738,18 +830,20 @@ class CentroidTracker:
         purged_objects: List[TrackedObject] = []
         for obj_id in stale_ids:
             obj = self.objects[obj_id]
+            is_retrieved = getattr(obj, "is_retrieved", False)
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
             elapsed_sec = now - obj.last_seen
             max_limit_frames = getattr(self, "stationary_max_age_frames", 600) if (is_bag or obj.is_stationary) else self.max_age_frames
             max_limit_sec = getattr(self, "stationary_max_disappeared_sec", 45.0) if (is_bag or obj.is_stationary) else self.max_disappeared_sec
 
-            # Diagnostic log: print exact reasons
-            logger.warning(
-                f"[TRACKER-PURGE] Purging track ID {obj.track_id} (label='{obj.class_label}', is_stationary={obj.is_stationary}, "
-                f"missed_frames={obj.missed_frames}/{max_limit_frames}, elapsed={elapsed_sec:.2f}s/{max_limit_sec:.2f}s, dwell={obj.dwell_duration:.1f}s)"
-            )
+            if not is_retrieved:
+                # Diagnostic log: print exact reasons
+                logger.warning(
+                    f"[TRACKER-PURGE] Purging track ID {obj.track_id} (label='{obj.class_label}', is_stationary={obj.is_stationary}, "
+                    f"missed_frames={obj.missed_frames}/{max_limit_frames}, elapsed={elapsed_sec:.2f}s/{max_limit_sec:.2f}s, dwell={obj.dwell_duration:.1f}s)"
+                )
 
-            if is_bag or obj.is_stationary or obj.dwell_duration > 0.0:
+            if not is_retrieved and (is_bag or obj.is_stationary or obj.dwell_duration > 0.0):
                 # Archive stationary bag to Spatial Memory cache
                 self.spatial_memory[obj_id] = SpatialMemoryEntry(
                     track_id=obj.track_id,
@@ -773,6 +867,9 @@ class CentroidTracker:
                 logger.info(
                     f"[TRACKER] Track ID {obj.track_id} archived to Spatial Memory (dwell={obj.dwell_duration:.1f}s, ttl={self.spatial_memory_ttl_sec:.1f}s)"
                 )
+            elif is_retrieved:
+                self.spatial_memory.pop(obj_id, None)
+
             purged_objects.append(obj)
             del self.objects[obj_id]
 
@@ -852,6 +949,7 @@ class CentroidTracker:
                     break
 
             if owner_nearby:
+                bag.last_person_near_time = now
                 if getattr(bag, "is_occluded", False):
                     # Occluded by passerby or person in front -> freeze/pause dwell, do not zero
                     bag.is_attended = False
