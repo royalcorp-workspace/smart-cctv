@@ -118,6 +118,9 @@ class CameraPipeline:
         self._face_detect_interval: int = int(face_cfg.get("detect_interval_frames", 3))
         self._cached_faces: List[Tuple[Tuple[int, int, int, int], float, str]] = []
         self._face_frame_index: int = 0
+        self._face_burst_until_time: float = 0.0
+        self._last_person_seen_time: float = 0.0
+        self._prev_stationary_bag_ids: set = set()
 
         # Focused Desk Sub-Frame Crop ROI on 1080p canvas with dynamic fallback
         face_crop_cfg = face_cfg.get("face_roi_crop", [100, 40, 1250, 520])
@@ -616,6 +619,41 @@ class CameraPipeline:
 
             zones_cfg = self.config.get("zones", {})
 
+            # Dynamic Burst Capture Triggers (3.0s burst at interval=1 on bag interaction in sterile zone)
+            trigger_burst = False
+            current_stationary_bag_ids = set()
+            for trk in active_tracks:
+                is_bag = getattr(trk, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+                if is_bag:
+                    z_info = zones_cfg.get(trk.zone_id, {})
+                    if not z_info and trk.zone_id.replace("__", "_") in zones_cfg:
+                        z_info = zones_cfg[trk.zone_id.replace("__", "_")]
+                    is_unattended_z = z_info.get("detect_unattended", None)
+                    if is_unattended_z is None:
+                        is_unattended_z = ("transit" in trk.zone_id.lower()) and ("koridor" not in trk.zone_id.lower())
+
+                    if is_unattended_z:
+                        # Condition 1: New bag in sterile zone
+                        if trk.frame_count <= 2:
+                            trigger_burst = True
+
+                        # Condition 2: Bag newly stationary
+                        if getattr(trk, "is_stationary", False):
+                            current_stationary_bag_ids.add(trk.track_id)
+                            if trk.track_id not in self._prev_stationary_bag_ids:
+                                trigger_burst = True
+
+            # Condition 3: Previously stationary bag starts moving or is picked up/removed
+            for prev_sid in self._prev_stationary_bag_ids:
+                if prev_sid not in current_stationary_bag_ids:
+                    trigger_burst = True
+
+            self._prev_stationary_bag_ids = current_stationary_bag_ids
+
+            if trigger_burst:
+                self._face_burst_until_time = max(self._face_burst_until_time, now + 3.0)
+                logger.info(f"[{self.camera_id}] Dynamic Face Burst activated for 3.0s (interval=1) due to bag interaction.")
+
             # 2a. Periodic 5-second terminal dwell time logging for stationary bags
             if (now - self._last_dwell_log_time) >= 5.0:
                 for track in active_tracks:
@@ -800,92 +838,157 @@ class CameraPipeline:
 
             # Universal Face Detection (OpenCV YuNet) and Recognition (OpenCV SFace)
             if self.face_detection_enabled and self.face_detector is not None:
-                if (self._face_frame_index % self._face_detect_interval) == 0:
-                    try:
-                        detected_faces = self.face_detector.detect_faces(
-                            frame=infer_frame,
-                            display_frame=display_frame,
-                            crop_roi=self.face_roi_crop,
-                        )
-                        recognized_faces = []
-                        active_fids = set()
-                        now_recog = time.time()
+                has_persons = len(person_boxes) > 0
 
-                        for item in detected_faces:
-                            bbox = item[0]
-                            score = item[1]
-                            raw_face_640 = item[2] if len(item) >= 3 else None
-                            raw_face_1080 = item[3] if len(item) >= 4 else None
-                            face_id = item[4] if len(item) >= 5 else None
+                if has_persons:
+                    self._last_person_seen_time = now
+                else:
+                    # Grace period: if no person seen for >= 1.5s, purge cached faces
+                    if (now - self._last_person_seen_time) >= 1.5:
+                        self._cached_faces = []
+                        self._face_recog_cache.clear()
 
-                            if face_id is not None:
-                                active_fids.add(face_id)
+                # CONDITIONAL INFERENCE: Skip YuNet & SFace when no person in frame
+                if has_persons:
+                    is_burst_active = (now < self._face_burst_until_time)
+                    current_face_interval = 1 if is_burst_active else self._face_detect_interval
 
-                            face_label = "Unknown"
-                            if self.face_recognition_enabled and self.face_recognizer is not None:
-                                # Determine 1080p face dimensions for minimum size gating (min 32x32 px)
-                                if raw_face_1080 is not None:
-                                    face_w_1080 = float(raw_face_1080[2])
-                                    face_h_1080 = float(raw_face_1080[3])
-                                else:
-                                    face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
-                                    face_h_1080 = float(bbox[3]) * (1080.0 / 360.0)
+                    if (self._face_frame_index % current_face_interval) == 0:
+                        try:
+                            # Zone-Prioritized Hybrid Head RoI: extract up to 2 head ROIs on 1080p canvas
+                            disp_h, disp_w = display_frame.shape[:2]
+                            scale_disp_x = float(disp_w) / 640.0
+                            scale_disp_y = float(disp_h) / 480.0
 
-                                if face_w_1080 < 32.0 or face_h_1080 < 32.0:
-                                    # Distant micro-face (< 32x32 px): Immediately classify as Unknown without SFace inference
-                                    face_label = "Unknown"
-                                    if face_id is not None:
-                                        self._face_recog_cache[face_id] = {
-                                            "label": "Unknown",
-                                            "time": now_recog,
-                                            "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
-                                        }
-                                else:
-                                    # Prominent face (>= 32x32 px): Check stationary cache
-                                    cached = self._face_recog_cache.get(face_id, {})
-                                    cached_label = cached.get("label")
-                                    last_time = cached.get("time", 0.0)
-                                    last_pos = cached.get("pos", (0, 0))
+                            relevant_head_rois = []
+                            for p_box in person_boxes:
+                                if len(relevant_head_rois) >= 2:
+                                    break
+                                px, py, pw, ph = p_box
+                                p_foot = (px + pw // 2, py + ph)
 
-                                    cur_pos = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
-                                    dist_moved = ((cur_pos[0] - last_pos[0]) ** 2 + (cur_pos[1] - last_pos[1]) ** 2) ** 0.5
-                                    elapsed = now_recog - last_time
+                                # Check if near or inside sterile zone
+                                p_zone, _ = self.zone_filter.find_zone_and_distance(p_foot, margin_px=15.0)
+                                is_in_sterile = False
+                                if p_zone:
+                                    z_cfg = zones_cfg.get(p_zone, {})
+                                    if not z_cfg and p_zone.replace("__", "_") in zones_cfg:
+                                        z_cfg = zones_cfg[p_zone.replace("__", "_")]
+                                    is_unattended = z_cfg.get("detect_unattended", None)
+                                    if is_unattended is None:
+                                        is_unattended = ("transit" in p_zone.lower()) and ("koridor" not in p_zone.lower())
+                                    if is_unattended:
+                                        is_in_sterile = True
 
-                                    # Reuse cache if stationary (< 15 px movement) within validity window (2.5s for known, 1.0s for unknown)
-                                    cache_ttl = 2.5 if (cached_label and cached_label != "Unknown") else 1.0
-                                    if cached_label and dist_moved < 15.0 and elapsed < cache_ttl:
-                                        face_label = cached_label
+                                # Check if near/contacting any bag
+                                is_near_bag = False
+                                for trk in active_tracks:
+                                    if trk.class_label in ("tas", "backpack", "handbag", "suitcase"):
+                                        bx, by, bw, bh = trk.bbox
+                                        bag_base = (bx + bw // 2, by + bh)
+                                        if ((p_foot[0] - bag_base[0])**2 + (p_foot[1] - bag_base[1])**2)**0.5 <= max(45.0, float(bh * 2.5)):
+                                            is_near_bag = True
+                                            break
+
+                                if is_in_sterile or is_near_bag:
+                                    pad_x = int(pw * 0.15)
+                                    h_x1 = max(0, px - pad_x)
+                                    h_y1 = max(0, py - int(ph * 0.05))
+                                    h_x2 = min(640, px + pw + pad_x)
+                                    h_y2 = min(480, py + int(ph * 0.45))
+
+                                    disp_x1 = int(round(h_x1 * scale_disp_x))
+                                    disp_y1 = int(round(h_y1 * scale_disp_y))
+                                    disp_x2 = int(round(h_x2 * scale_disp_x))
+                                    disp_y2 = int(round(h_y2 * scale_disp_y))
+                                    relevant_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
+
+                            target_crop_roi = relevant_head_rois if relevant_head_rois else self.face_roi_crop
+
+                            detected_faces = self.face_detector.detect_faces(
+                                frame=infer_frame,
+                                display_frame=display_frame,
+                                crop_roi=target_crop_roi,
+                            )
+                            recognized_faces = []
+                            active_fids = set()
+                            now_recog = time.time()
+
+                            for item in detected_faces:
+                                bbox = item[0]
+                                score = item[1]
+                                raw_face_640 = item[2] if len(item) >= 3 else None
+                                raw_face_1080 = item[3] if len(item) >= 4 else None
+                                face_id = item[4] if len(item) >= 5 else None
+
+                                if face_id is not None:
+                                    active_fids.add(face_id)
+
+                                face_label = "Unknown"
+                                if self.face_recognition_enabled and self.face_recognizer is not None:
+                                    # Determine 1080p face dimensions for minimum size gating (min 32x32 px)
+                                    if raw_face_1080 is not None:
+                                        face_w_1080 = float(raw_face_1080[2])
+                                        face_h_1080 = float(raw_face_1080[3])
                                     else:
-                                        # Recognize using 1080p display_frame with raw_face_1080 if available
-                                        if raw_face_1080 is not None and display_frame is not None:
-                                            _, _, face_label = self.face_recognizer.recognize(
-                                                frame=display_frame, face_data=raw_face_1080, min_size=32
-                                            )
-                                        else:
-                                            face_input = raw_face_640 if raw_face_640 is not None else bbox
-                                            _, _, face_label = self.face_recognizer.recognize(
-                                                frame=infer_frame, face_data=face_input, min_size=10
-                                            )
+                                        face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
+                                        face_h_1080 = float(bbox[3]) * (1080.0 / 360.0)
 
+                                    if face_w_1080 < 32.0 or face_h_1080 < 32.0:
+                                        # Distant micro-face (< 32x32 px): Immediately classify as Unknown without SFace inference
+                                        face_label = "Unknown"
                                         if face_id is not None:
                                             self._face_recog_cache[face_id] = {
-                                                "label": face_label,
+                                                "label": "Unknown",
                                                 "time": now_recog,
-                                                "pos": cur_pos,
+                                                "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
                                             }
+                                    else:
+                                        # Prominent face (>= 32x32 px): Check stationary cache
+                                        cached = self._face_recog_cache.get(face_id, {})
+                                        cached_label = cached.get("label")
+                                        last_time = cached.get("time", 0.0)
+                                        last_pos = cached.get("pos", (0, 0))
 
-                            recognized_faces.append((bbox, score, face_label))
+                                        cur_pos = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
+                                        dist_moved = ((cur_pos[0] - last_pos[0]) ** 2 + (cur_pos[1] - last_pos[1]) ** 2) ** 0.5
+                                        elapsed = now_recog - last_time
 
-                        # Purge stale face recognition caches
-                        if active_fids:
-                            self._face_recog_cache = {
-                                fid: v for fid, v in self._face_recog_cache.items() if fid in active_fids
-                            }
+                                        # Reuse cache if stationary (< 15 px movement) within validity window (2.5s for known, 1.0s for unknown)
+                                        cache_ttl = 2.5 if (cached_label and cached_label != "Unknown") else 1.0
+                                        if cached_label and dist_moved < 15.0 and elapsed < cache_ttl:
+                                            face_label = cached_label
+                                        else:
+                                            # Recognize using 1080p display_frame with raw_face_1080 if available
+                                            if raw_face_1080 is not None and display_frame is not None:
+                                                _, _, face_label = self.face_recognizer.recognize(
+                                                    frame=display_frame, face_data=raw_face_1080, min_size=32
+                                                )
+                                            else:
+                                                face_input = raw_face_640 if raw_face_640 is not None else bbox
+                                                _, _, face_label = self.face_recognizer.recognize(
+                                                    frame=infer_frame, face_data=face_input, min_size=10
+                                                )
 
-                        self._cached_faces = recognized_faces
-                    except Exception as e:
-                        logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
-                self._face_frame_index += 1
+                                            if face_id is not None:
+                                                self._face_recog_cache[face_id] = {
+                                                    "label": face_label,
+                                                    "time": now_recog,
+                                                    "pos": cur_pos,
+                                                }
+
+                                recognized_faces.append((bbox, score, face_label))
+
+                            # Purge stale face recognition caches
+                            if active_fids:
+                                self._face_recog_cache = {
+                                    fid: v for fid, v in self._face_recog_cache.items() if fid in active_fids
+                                }
+
+                            self._cached_faces = recognized_faces
+                        except Exception as e:
+                            logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
+                    self._face_frame_index += 1
 
             # Refresh bag-to-owner association with latest face detection results
             self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)

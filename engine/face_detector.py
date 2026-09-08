@@ -321,7 +321,19 @@ class YuNetFaceDetector:
         Supports alternating dual-YuNet inference (1 YuNet call per evaluation) to cut CPU latency in half.
         Returns list of (bbox_640, score, raw_face_640, raw_face_1080, face_id).
         """
-        has_crop = display_frame is not None and crop_roi is not None and len(crop_roi) == 4
+        # Support single ROI (x1, y1, x2, y2) or list of ROIs [(x1, y1, x2, y2), ...]
+        crop_rois_list: List[Tuple[int, int, int, int]] = []
+        if crop_roi is not None:
+            if isinstance(crop_roi, (list, tuple)) and len(crop_roi) > 0:
+                if isinstance(crop_roi[0], (int, float)):
+                    if len(crop_roi) >= 4:
+                        crop_rois_list.append(tuple(int(v) for v in crop_roi[:4]))
+                else:
+                    for r in crop_roi[:2]:  # Process up to 2 priority crops
+                        if isinstance(r, (list, tuple)) and len(r) >= 4:
+                            crop_rois_list.append(tuple(int(v) for v in r[:4]))
+
+        has_crop = (display_frame is not None) and (len(crop_rois_list) > 0)
         use_alternate = self.alternate_inference if alternate is None else bool(alternate)
 
         run_crop = False
@@ -345,11 +357,13 @@ class YuNetFaceDetector:
         # 1. Run Focused Desk Crop Face Detection (High Resolution)
         crop_detections: List[Dict[str, Any]] = []
         if run_crop and has_crop:
-            crop_detections = self.detect_crop(
-                display_frame=display_frame,
-                crop_roi=crop_roi,
-                target_crop_w=target_crop_w,
-            )
+            for single_roi in crop_rois_list:
+                c_dets = self.detect_crop(
+                    display_frame=display_frame,
+                    crop_roi=single_roi,
+                    target_crop_w=target_crop_w,
+                )
+                crop_detections.extend(c_dets)
             candidates.extend(crop_detections)
 
         # 2. Run Full-Frame Face Detection (Transit / Koridor / Outside Walkway)
