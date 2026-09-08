@@ -349,11 +349,11 @@ def test_composite_evidence_card_universal():
         camera_id="cam_01",
     )
     assert isinstance(card_with_face, np.ndarray)
-    assert card_with_face.shape == (700, 1200, 3), f"Expected (700, 1200, 3), got {card_with_face.shape}"
+    assert card_with_face.shape == (720, 1500, 3), f"Expected (720, 1500, 3), got {card_with_face.shape}"
     jpg_bytes = encode_composite_jpg(card_with_face)
     assert jpg_bytes is not None and len(jpg_bytes) > 1000
     assert jpg_bytes.startswith(b"\xff\xd8\xff"), "Expected valid JPEG magic header"
-    print(" - [PASS] Composite Card generated with valid dimensions (1200x700) and JPEG encoding.")
+    print(" - [PASS] Composite Card generated with valid dimensions (1500x720) and JPEG encoding.")
 
     # 3. Test Fallback when face and person crops are None
     fallback_obj = TrackedObject(
@@ -381,7 +381,7 @@ def test_composite_evidence_card_universal():
         camera_id="cam_01",
     )
     assert isinstance(card_fallback, np.ndarray)
-    assert card_fallback.shape == (700, 1200, 3)
+    assert card_fallback.shape == (720, 1500, 3)
     fallback_jpg = encode_composite_jpg(card_fallback)
     assert fallback_jpg is not None and len(fallback_jpg) > 1000
     print(" - [PASS] Fallback test succeeded: clean placeholder rendered without error when face=None.")

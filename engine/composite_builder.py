@@ -1,9 +1,10 @@
-"""Universal Side-by-Side Telegram Composite Evidence Card Builder for Smart CCTV 2.0.
+"""Universal 3-Panel Telegram Composite Evidence Card Builder for Smart CCTV 2.0.
 
-Generates sleek, high-resolution dark-mode visual cards combining:
-- Left Panel: Contextual current state of the object in the camera view (with 25% padding).
-- Right Panel: Associated actor/owner face (or body crop if face unavailable, or elegant placeholder).
-- Footer Banner: Structured metadata, escalation stage, dwell time, and identity telemetry.
+Generates sleek, high-resolution (1500x720) dark-mode visual cards combining:
+- Panel 1 (Kiri): "AREA STERIL" -> Contextual macro camera view (wide angle).
+- Panel 2 (Tengah): "OBJEK TERLENGKAP" -> Close-up crop of the violating physical object (20% padding).
+- Panel 3 (Kanan): "TERDUGA PELAKU" -> High-res face crop (YuNet/SFace), body fallback, or placeholder.
+- Footer Banner: 3-column structured metadata telemetry and stage escalation.
 """
 
 import datetime
@@ -48,7 +49,7 @@ def generate_composite_evidence(
     camera_id: str = "cam_01",
     timestamp_str: Optional[str] = None,
 ) -> np.ndarray:
-    """Construct a premium side-by-side composite evidence card.
+    """Construct a premium 3-panel side-by-side composite evidence card (1500x720).
 
     Args:
         object_track: TrackedObject instance or duck-typed object.
@@ -59,12 +60,12 @@ def generate_composite_evidence(
         timestamp_str: Formatted timestamp string (optional, defaults to now).
 
     Returns:
-        np.ndarray: BGR image of shape (700, 1200, 3).
+        np.ndarray: BGR image of shape (720, 1500, 3).
     """
-    card_w = 1200
-    card_h = 700
+    card_w = 1500
+    card_h = 720
 
-    # Base canvas: Dark slate / charcoal (#0b1120)
+    # Base canvas: Dark charcoal slate (#0d131f)
     canvas = np.full((card_h, card_w, 3), (28, 17, 11), dtype=np.uint8)
 
     # Timestamp normalization
@@ -91,15 +92,14 @@ def generate_composite_evidence(
         person_crop = actor_meta.get("person_crop")
 
     # 1. Header Bar (Y: 0 to 75)
-    # Background: #1e293b (deep slate navy)
     cv2.rectangle(canvas, (0, 0), (card_w, 75), (45, 30, 22), -1)
     cv2.line(canvas, (0, 75), (card_w, 75), (75, 55, 42), 1, cv2.LINE_AA)
 
     # Left: Camera Badge & Brand Title
     cam_badge = f"[{camera_id.upper()}]"
     cv2.putText(canvas, cam_badge, (24, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (240, 220, 100), 2, cv2.LINE_AA)
-    title_text = "SMART CCTV 2.0 | COMPOSITE EVIDENCE CARD"
-    cv2.putText(canvas, title_text, (135, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 2, cv2.LINE_AA)
+    title_text = "SMART CCTV 2.0 | COMPOSITE EVIDENCE CARD (3-PANEL)"
+    cv2.putText(canvas, title_text, (140, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Right: Stage Pill Badge
     stage_upper = stage_name.upper()
@@ -130,30 +130,39 @@ def generate_composite_evidence(
     cv2.rectangle(canvas, (pill_x1, pill_y1), (pill_x2, pill_y2), (255, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(canvas, stage_text, (pill_x1 + pill_pad_x, pill_y2 - pill_pad_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.52, stage_fg, 2, cv2.LINE_AA)
 
-    # 2. Side-by-Side Main Panels (Y: 88 to 565, Height: 477 px)
+    # 2. 3-Panel Main Layout (Y: 88 to 573, Height: 485 px)
     panel_y1 = 88
-    panel_h = 477
+    panel_h = 485
     panel_y2 = panel_y1 + panel_h
-    panel_w = 560
-    left_x1, left_x2 = 25, 25 + panel_w
-    right_x1, right_x2 = 615, 615 + panel_w
 
-    # --- LEFT PANEL: OBJECT DETAIL ---
-    cv2.rectangle(canvas, (left_x1, panel_y1), (left_x2, panel_y2), (38, 26, 18), -1)
-    cv2.rectangle(canvas, (left_x1, panel_y1), (left_x2, panel_y2), (75, 55, 42), 1, cv2.LINE_AA)
+    # 3 Balanced Columns (~468px width each, 20px gap)
+    p_w = 468
+    p1_x1, p1_x2 = 24, 24 + p_w
+    p2_x1, p2_x2 = 516, 516 + p_w
+    p3_x1, p3_x2 = 1008, 1008 + p_w
 
-    # Left Header Strip
-    cv2.rectangle(canvas, (left_x1, panel_y1), (left_x2, panel_y1 + 38), (52, 36, 26), -1)
-    cv2.circle(canvas, (left_x1 + 18, panel_y1 + 19), 5, (255, 200, 0), -1, cv2.LINE_AA)
-    left_header_title = f"OBJEK TERPANTAU : {class_label.upper()} #{track_id}"
-    cv2.putText(canvas, left_header_title, (left_x1 + 32, panel_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    inner_box_w = p_w - 24    # 444 px
+    inner_box_h = panel_h - 85 # 400 px
+    left_foot_y = panel_y2 - 26
 
-    # Extract contextual crop with 25% padding from current_frame
+    # ==========================================================
+    # --- PANEL 1 (KIRI): AREA STERIL (KONTEKS MAKRO WIDE) ---
+    # ==========================================================
+    cv2.rectangle(canvas, (p1_x1, panel_y1), (p1_x2, panel_y2), (38, 26, 18), -1)
+    cv2.rectangle(canvas, (p1_x1, panel_y1), (p1_x2, panel_y2), (75, 55, 42), 1, cv2.LINE_AA)
+
+    # Panel 1 Header Strip
+    cv2.rectangle(canvas, (p1_x1, panel_y1), (p1_x2, panel_y1 + 38), (52, 36, 26), -1)
+    cv2.circle(canvas, (p1_x1 + 18, panel_y1 + 19), 5, (60, 200, 50), -1, cv2.LINE_AA)
+    p1_title = "AREA STERIL (KONTEKS MAKRO)"
+    cv2.putText(canvas, p1_title, (p1_x1 + 32, panel_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Macro Frame (Wide-Angle overview with object location highlight)
     raw_bbox = getattr(object_track, "bbox", (0, 0, 0, 0))
     bx, by, bw, bh = raw_bbox
     fh, fw = current_frame.shape[:2] if (current_frame is not None and current_frame.size > 0) else (1080, 1920)
 
-    # Coordinate space scaling if bbox is 640x480 but frame is Full HD
+    # Coordinate space scaling if bbox is in 640x480 space
     if (fw, fh) != (640, 480) and (bx < 640 and by < 480 and bw <= 640 and bh <= 480):
         scale_x = fw / 640.0
         scale_y = fh / 480.0
@@ -166,8 +175,36 @@ def generate_composite_evidence(
     sbw = max(1, int(round(bw * scale_x)))
     sbh = max(1, int(round(bh * scale_y)))
 
-    pad_w = int(round(sbw * 0.25))
-    pad_h = int(round(sbh * 0.25))
+    if current_frame is not None and current_frame.size > 0:
+        macro_view = current_frame.copy()
+        # Highlight object in the macro scene
+        cv2.rectangle(macro_view, (sbx, sby), (sbx + sbw, sby + sbh), (0, 220, 255), 3, cv2.LINE_AA)
+        cv2.circle(macro_view, (sbx + sbw // 2, sby + sbh // 2), 8, (0, 220, 255), -1, cv2.LINE_AA)
+    else:
+        macro_view = np.full((360, 640, 3), (35, 25, 18), dtype=np.uint8)
+        cv2.putText(macro_view, "Tampilan Makro Tidak Tersedia", (40, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1, cv2.LINE_AA)
+
+    p1_display = _fit_image_into_box(macro_view, inner_box_w, inner_box_h, bg_color=(24, 16, 12))
+    canvas[panel_y1 + 42 : panel_y1 + 42 + inner_box_h, p1_x1 + 12 : p1_x1 + 12 + inner_box_w] = p1_display
+
+    p1_foot_text = f"Sudut Kamera Penuh  |  Zona: {display_zone}"
+    cv2.putText(canvas, p1_foot_text, (p1_x1 + 16, left_foot_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 180, 160), 1, cv2.LINE_AA)
+
+    # ==========================================================
+    # --- PANEL 2 (TENGAH): OBJEK TERLENGKAP (CROP DETAIL) ---
+    # ==========================================================
+    cv2.rectangle(canvas, (p2_x1, panel_y1), (p2_x2, panel_y2), (38, 26, 18), -1)
+    cv2.rectangle(canvas, (p2_x1, panel_y1), (p2_x2, panel_y2), (75, 55, 42), 1, cv2.LINE_AA)
+
+    # Panel 2 Header Strip
+    cv2.rectangle(canvas, (p2_x1, panel_y1), (p2_x2, panel_y1 + 38), (52, 36, 26), -1)
+    cv2.circle(canvas, (p2_x1 + 18, panel_y1 + 19), 5, (255, 200, 0), -1, cv2.LINE_AA)
+    p2_title = f"OBJEK TERLENGKAP : {class_label.upper()} #{track_id}"
+    cv2.putText(canvas, p2_title, (p2_x1 + 32, panel_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Extract close-up crop with 20% margin padding
+    pad_w = int(round(sbw * 0.20))
+    pad_h = int(round(sbh * 0.20))
     ox1 = max(0, sbx - pad_w)
     oy1 = max(0, sby - pad_h)
     ox2 = min(fw, sbx + sbw + pad_w)
@@ -175,7 +212,7 @@ def generate_composite_evidence(
 
     if current_frame is not None and current_frame.size > 0 and (ox2 > ox1 and oy2 > oy1):
         object_crop = current_frame[oy1:oy2, ox1:ox2].copy()
-        # Highlight object in crop
+        # Highlight object within its cropped frame
         rel_x = sbx - ox1
         rel_y = sby - oy1
         cv2.rectangle(object_crop, (rel_x, rel_y), (rel_x + sbw, rel_y + sbh), (0, 220, 255), 2, cv2.LINE_AA)
@@ -183,27 +220,25 @@ def generate_composite_evidence(
         object_crop = np.full((300, 400, 3), (35, 25, 18), dtype=np.uint8)
         cv2.putText(object_crop, "Crop Objek Tidak Tersedia", (40, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1, cv2.LINE_AA)
 
-    # Fit image in Left Inner Display Box (Width: 536, Height: 395)
-    inner_box_w, inner_box_h = 536, 395
-    left_display = _fit_image_into_box(object_crop, inner_box_w, inner_box_h, bg_color=(24, 16, 12))
-    canvas[panel_y1 + 42 : panel_y1 + 42 + inner_box_h, left_x1 + 12 : left_x1 + 12 + inner_box_w] = left_display
+    p2_display = _fit_image_into_box(object_crop, inner_box_w, inner_box_h, bg_color=(24, 16, 12))
+    canvas[panel_y1 + 42 : panel_y1 + 42 + inner_box_h, p2_x1 + 12 : p2_x1 + 12 + inner_box_w] = p2_display
 
-    # Left Bottom Tag
-    left_foot_y = panel_y2 - 28
-    left_foot_text = f"Ukuran: {sbw}x{sbh} px  |  Lokasi: {display_zone}"
-    cv2.putText(canvas, left_foot_text, (left_x1 + 16, left_foot_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 180, 160), 1, cv2.LINE_AA)
+    p2_foot_text = f"Ukuran: {sbw}x{sbh} px  |  Margin: 20%"
+    cv2.putText(canvas, p2_foot_text, (p2_x1 + 16, left_foot_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 180, 160), 1, cv2.LINE_AA)
 
-    # --- RIGHT PANEL: ASSOCIATED ACTOR ---
-    cv2.rectangle(canvas, (right_x1, panel_y1), (right_x2, panel_y2), (38, 26, 18), -1)
-    cv2.rectangle(canvas, (right_x1, panel_y1), (right_x2, panel_y2), (75, 55, 42), 1, cv2.LINE_AA)
+    # ==========================================================
+    # --- PANEL 3 (KANAN): TERDUGA PELAKU / PEMILIK ---
+    # ==========================================================
+    cv2.rectangle(canvas, (p3_x1, panel_y1), (p3_x2, panel_y2), (38, 26, 18), -1)
+    cv2.rectangle(canvas, (p3_x1, panel_y1), (p3_x2, panel_y2), (75, 55, 42), 1, cv2.LINE_AA)
 
-    # Right Header Strip
-    cv2.rectangle(canvas, (right_x1, panel_y1), (right_x2, panel_y1 + 38), (52, 36, 26), -1)
-    cv2.circle(canvas, (right_x1 + 18, panel_y1 + 19), 5, (0, 200, 255), -1, cv2.LINE_AA)
-    right_header_title = "PELAKU / PEMILIK TERAKHIR"
-    cv2.putText(canvas, right_header_title, (right_x1 + 32, panel_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    # Panel 3 Header Strip
+    cv2.rectangle(canvas, (p3_x1, panel_y1), (p3_x2, panel_y1 + 38), (52, 36, 26), -1)
+    cv2.circle(canvas, (p3_x1 + 18, panel_y1 + 19), 5, (0, 200, 255), -1, cv2.LINE_AA)
+    p3_title = "TERDUGA PELAKU / PEMILIK"
+    cv2.putText(canvas, p3_title, (p3_x1 + 32, panel_y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Decide Actor Image
+    # Select actor visual representation
     if face_crop is not None and face_crop.size > 0:
         actor_img = face_crop
         actor_badge = "WAJAH TERDETEKSI (YuNet + SFace)"
@@ -218,57 +253,55 @@ def generate_composite_evidence(
         badge_bg = None
 
     if actor_img is not None:
-        right_display = _fit_image_into_box(actor_img, inner_box_w, inner_box_h, bg_color=(24, 16, 12))
-        # Stamp badge overlay in top-left of image
+        p3_display = _fit_image_into_box(actor_img, inner_box_w, inner_box_h, bg_color=(24, 16, 12))
         if actor_badge:
-            (bw_t, bh_t), _ = cv2.getTextSize(actor_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-            cv2.rectangle(right_display, (8, 8), (8 + bw_t + 16, 8 + bh_t + 12), badge_bg, -1)
-            cv2.rectangle(right_display, (8, 8), (8 + bw_t + 16, 8 + bh_t + 12), (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(right_display, actor_badge, (16, 8 + bh_t + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+            (bw_t, bh_t), _ = cv2.getTextSize(actor_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.rectangle(p3_display, (8, 8), (8 + bw_t + 16, 8 + bh_t + 12), badge_bg, -1)
+            cv2.rectangle(p3_display, (8, 8), (8 + bw_t + 16, 8 + bh_t + 12), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(p3_display, actor_badge, (16, 8 + bh_t + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
     else:
         # Elegant Dark Card Placeholder
-        right_display = np.full((inner_box_h, inner_box_w, 3), (24, 16, 12), dtype=np.uint8)
-        # Inner dotted/dashed effect
-        cv2.rectangle(right_display, (30, 40), (inner_box_w - 30, inner_box_h - 40), (50, 35, 26), 2, cv2.LINE_AA)
-        cv2.putText(right_display, "[ WAJAH / ORANG TIDAK TERDETEKSI ]", (65, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (140, 140, 140), 2, cv2.LINE_AA)
-        cv2.putText(right_display, "Tidak ada person berada di dekat objek saat peletakan.", (72, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (110, 110, 110), 1, cv2.LINE_AA)
-        cv2.putText(right_display, "Area di luar jangkauan detektor wajah atau pencahayaan minim.", (55, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (95, 95, 95), 1, cv2.LINE_AA)
+        p3_display = np.full((inner_box_h, inner_box_w, 3), (24, 16, 12), dtype=np.uint8)
+        cv2.rectangle(p3_display, (20, 30), (inner_box_w - 20, inner_box_h - 30), (50, 35, 26), 2, cv2.LINE_AA)
+        cv2.putText(p3_display, "[ WAJAH / ORANG TIDAK TERDETEKSI ]", (30, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (140, 140, 140), 2, cv2.LINE_AA)
+        cv2.putText(p3_display, "Tidak ada person berada di dekat objek saat peletakan.", (28, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 110, 110), 1, cv2.LINE_AA)
+        cv2.putText(p3_display, "Area di luar jangkauan detektor wajah atau pencahayaan minim.", (16, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (95, 95, 95), 1, cv2.LINE_AA)
 
-    canvas[panel_y1 + 42 : panel_y1 + 42 + inner_box_h, right_x1 + 12 : right_x1 + 12 + inner_box_w] = right_display
+    canvas[panel_y1 + 42 : panel_y1 + 42 + inner_box_h, p3_x1 + 12 : p3_x1 + 12 + inner_box_w] = p3_display
 
-    # Right Bottom Tag
     conf_str = f"{int(round(actor_conf * 100))}%" if actor_conf > 0 else "-"
-    right_foot_text = f"Identitas: {actor_name}  |  Skor Kecocokan: {conf_str}"
-    cv2.putText(canvas, right_foot_text, (right_x1 + 16, left_foot_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 180, 160), 1, cv2.LINE_AA)
+    p3_foot_text = f"Identitas: {actor_name}  |  Skor: {conf_str}"
+    cv2.putText(canvas, p3_foot_text, (p3_x1 + 16, left_foot_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 180, 160), 1, cv2.LINE_AA)
 
-    # 3. Footer Metadata Banner (Y: 575 to 685, Height: 110 px)
-    foot_y1 = 575
-    foot_y2 = 685
-    cv2.rectangle(canvas, (25, foot_y1), (card_w - 25, foot_y2), (38, 26, 18), -1)
-    cv2.rectangle(canvas, (25, foot_y1), (card_w - 25, foot_y2), (75, 55, 42), 1, cv2.LINE_AA)
+    # ==========================================================
+    # --- 3. FOOTER METADATA BANNER (Y: 585 to 705, Height: 120 px) ---
+    # ==========================================================
+    foot_y1 = 585
+    foot_y2 = 705
+    cv2.rectangle(canvas, (24, foot_y1), (card_w - 24, foot_y2), (38, 26, 18), -1)
+    cv2.rectangle(canvas, (24, foot_y1), (card_w - 24, foot_y2), (75, 55, 42), 1, cv2.LINE_AA)
 
-    # 3-Column Structured Telemetry
     dwell_m = dwell_duration / 60.0
     thresh_m = dwell_threshold / 60.0
 
     # Column 1
     c1_x = 45
-    cv2.putText(canvas, f"ID OBJEK : {class_label.upper()} #{track_id}", (c1_x, foot_y1 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"ZONA     : {display_zone}", (c1_x, foot_y1 + 64), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 200, 190), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"KAMERA   : {camera_id.upper()}", (c1_x, foot_y1 + 92), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (150, 140, 130), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"ID OBJEK : {class_label.upper()} #{track_id}", (c1_x, foot_y1 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"ZONA     : {display_zone}", (c1_x, foot_y1 + 68), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 200, 190), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"KAMERA   : {camera_id.upper()}", (c1_x, foot_y1 + 98), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (150, 140, 130), 1, cv2.LINE_AA)
 
     # Column 2
-    c2_x = 430
-    cv2.putText(canvas, f"DWELL    : {dwell_m:.1f}m / {thresh_m:.1f}m", (c2_x, foot_y1 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"ESKALASI : {stage_text}", (c2_x, foot_y1 + 64), cv2.FONT_HERSHEY_SIMPLEX, 0.48, stage_bg, 1, cv2.LINE_AA)
+    c2_x = 535
+    cv2.putText(canvas, f"DWELL    : {dwell_m:.1f}m / {thresh_m:.1f}m", (c2_x, foot_y1 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"ESKALASI : {stage_text}", (c2_x, foot_y1 + 68), cv2.FONT_HERSHEY_SIMPLEX, 0.48, stage_bg, 1, cv2.LINE_AA)
     dwell_percent = min(100, int(round((dwell_duration / max(1.0, dwell_threshold)) * 100.0)))
-    cv2.putText(canvas, f"PROGRES  : {dwell_percent}% Dari Ambang Batas", (c2_x, foot_y1 + 92), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (150, 140, 130), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"PROGRES  : {dwell_percent}% Dari Ambang Batas", (c2_x, foot_y1 + 98), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (150, 140, 130), 1, cv2.LINE_AA)
 
     # Column 3
-    c3_x = 815
-    cv2.putText(canvas, f"WAKTU    : {timestamp_str}", (c3_x, foot_y1 + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"PELAKU   : {actor_name}", (c3_x, foot_y1 + 64), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 200, 190), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"KEMIRIPAN: {conf_str}", (c3_x, foot_y1 + 92), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (150, 140, 130), 1, cv2.LINE_AA)
+    c3_x = 1035
+    cv2.putText(canvas, f"WAKTU    : {timestamp_str}", (c3_x, foot_y1 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"PELAKU   : {actor_name}", (c3_x, foot_y1 + 68), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 200, 190), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"KEMIRIPAN: {conf_str}", (c3_x, foot_y1 + 98), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (150, 140, 130), 1, cv2.LINE_AA)
 
     return canvas
 
