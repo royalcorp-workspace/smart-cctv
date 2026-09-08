@@ -2,7 +2,7 @@
 
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from engine.logger import logger
@@ -45,6 +45,7 @@ class SpatialMemoryEntry:
     contour_area: float = 0.0
     confidence: float = 0.0
     dwell_threshold: float = 3600.0
+    last_owner_info: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -78,6 +79,10 @@ class TrackedObject:
     dwell_threshold: float = 3600.0
     is_occluded: bool = False
     last_occluded_time: float = 0.0
+    last_owner_info: Optional[Dict[str, Any]] = None
+    is_warning: bool = False
+    is_pre_alarm: bool = False
+    pre_alarm_alerted: bool = False
 
     @property
     def is_static_artifact(self) -> bool:
@@ -225,6 +230,10 @@ class CentroidTracker:
             dwell_threshold=entry.dwell_threshold,
             is_occluded=False,
             last_occluded_time=0.0,
+            last_owner_info=entry.last_owner_info,
+            is_warning=(entry.accumulated_dwell >= entry.dwell_threshold * 0.50),
+            is_pre_alarm=(entry.accumulated_dwell >= entry.dwell_threshold * 0.85),
+            pre_alarm_alerted=False,
         )
         self.objects[entry.track_id] = recovered_obj
         if entry.track_id in self.spatial_memory:
@@ -403,6 +412,9 @@ class CentroidTracker:
                     else:
                         # Hold/pause dwell time while attended
                         obj.stationary_start = now - obj.dwell_duration
+                    # Multi-stage alert escalation tracking
+                    obj.is_warning = (obj.dwell_duration >= obj.dwell_threshold * 0.50)
+                    obj.is_pre_alarm = (obj.dwell_duration >= obj.dwell_threshold * 0.85)
                 else:
                     # Objek berpindah posisi nyata (> 15 px) -> reset dwell timer
                     obj.is_stationary = False
@@ -411,6 +423,9 @@ class CentroidTracker:
                     obj.dwell_duration = 0.0
                     obj.is_triggered = False
                     obj.alert_sent = False
+                    obj.is_warning = False
+                    obj.is_pre_alarm = False
+                    obj.pre_alarm_alerted = False
             else:
                 # Person never triggers dwell violation
                 obj.is_stationary = False
@@ -547,6 +562,8 @@ class CentroidTracker:
                             matched_existing.dwell_duration = now - matched_existing.stationary_start
                         else:
                             matched_existing.stationary_start = now - matched_existing.dwell_duration
+                        matched_existing.is_warning = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.50)
+                        matched_existing.is_pre_alarm = (matched_existing.dwell_duration >= matched_existing.dwell_threshold * 0.85)
                     else:
                         matched_existing.is_stationary = False
                         matched_existing.stationary_start = now
@@ -554,6 +571,9 @@ class CentroidTracker:
                         matched_existing.dwell_duration = 0.0
                         matched_existing.is_triggered = False
                         matched_existing.alert_sent = False
+                        matched_existing.is_warning = False
+                        matched_existing.is_pre_alarm = False
+                        matched_existing.pre_alarm_alerted = False
             else:
                 # Check Spatial Memory before registering a brand new ID!
                 matched_spatial = self._match_spatial_memory(det_centroid, det_bbox, zone_id, det_label, now)
@@ -612,6 +632,7 @@ class CentroidTracker:
                     contour_area=obj.contour_area,
                     confidence=obj.confidence,
                     dwell_threshold=obj.dwell_threshold,
+                    last_owner_info=getattr(obj, "last_owner_info", None),
                 )
             purged_objects.append(obj)
             del self.objects[obj_id]

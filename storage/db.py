@@ -23,7 +23,7 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
-    """Initialize database tables and indexes."""
+    """Initialize database tables, columns, and indexes."""
     with get_connection(db_path) as conn:
         cursor: sqlite3.Cursor = conn.cursor()
         cursor.execute(
@@ -40,10 +40,23 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 snapshot_path TEXT,
                 resolved_time TIMESTAMP,
                 is_resolved INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                owner_name TEXT,
+                owner_confidence REAL,
+                face_snapshot_path TEXT
             );
             """
         )
+        # Dynamic schema migration for existing databases
+        cursor.execute("PRAGMA table_info(event_logs);")
+        existing_cols = {row["name"] for row in cursor.fetchall()}
+        if "owner_name" not in existing_cols:
+            cursor.execute("ALTER TABLE event_logs ADD COLUMN owner_name TEXT;")
+        if "owner_confidence" not in existing_cols:
+            cursor.execute("ALTER TABLE event_logs ADD COLUMN owner_confidence REAL;")
+        if "face_snapshot_path" not in existing_cols:
+            cursor.execute("ALTER TABLE event_logs ADD COLUMN face_snapshot_path TEXT;")
+
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_event_logs_camera ON event_logs (camera_id);"
         )
@@ -65,9 +78,12 @@ def log_event(
     start_time: str,
     trigger_time: str,
     snapshot_path: Optional[str] = None,
+    owner_name: Optional[str] = None,
+    owner_confidence: Optional[float] = None,
+    face_snapshot_path: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> int:
-    """Insert a violation event log and return its generated ID."""
+    """Insert a violation event log with optional owner metadata and return its generated ID."""
     with get_connection(db_path) as conn:
         cursor: sqlite3.Cursor = conn.cursor()
         cursor.execute(
@@ -75,8 +91,9 @@ def log_event(
             INSERT INTO event_logs (
                 camera_id, zone_id, track_id, event_type,
                 dwell_duration, start_time, trigger_time,
-                snapshot_path, is_resolved
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);
+                snapshot_path, is_resolved,
+                owner_name, owner_confidence, face_snapshot_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?);
             """,
             (
                 camera_id,
@@ -87,6 +104,9 @@ def log_event(
                 start_time,
                 trigger_time,
                 snapshot_path,
+                owner_name,
+                owner_confidence,
+                face_snapshot_path,
             ),
         )
         conn.commit()

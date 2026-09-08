@@ -17,7 +17,7 @@ import numpy as np
 from engine.config_loader import load_camera_config
 from engine.dual_subtractor import DualSubtractor
 from engine.logger import logger
-from engine.retention import cleanup_old_records
+from engine.retention import cleanup_old_records, DiskGuardWorker
 from engine.rtsp_stream import ThreadedCapture
 from engine.face_detector import YuNetFaceDetector
 from engine.face_recognizer import FaceRecognizer
@@ -240,13 +240,138 @@ class CameraPipeline:
         self._thread.start()
         return self
 
-    def _resolve_event_async(self, event_id: int) -> None:
-        """I/O worker task: mark event resolved in SQLite."""
+    def _resolve_event_async(
+        self,
+        event_id: int,
+        zone_name: Optional[str] = None,
+        track_id: Optional[int] = None,
+        dwell_duration: Optional[float] = None,
+        owner_name: Optional[str] = None,
+    ) -> None:
+        """I/O worker task: mark event resolved in SQLite and dispatch Telegram resolution."""
         try:
             resolve_event(event_id=event_id)
             logger.info(f"[{self.camera_id}] Event ID {event_id} marked as resolved.")
+            if zone_name and track_id is not None and dwell_duration is not None:
+                timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.telegram_notifier.dispatch_resolution(
+                    camera_id=self.camera_id,
+                    zone_name=zone_name,
+                    track_id=track_id,
+                    dwell_duration=dwell_duration,
+                    timestamp_str=timestamp_str,
+                    owner_name=owner_name,
+                )
         except Exception as e:
             logger.error(f"[{self.camera_id}] Async resolve failed for event {event_id}: {e}")
+
+    def _associate_bag_owners(
+        self,
+        active_tracks: List[TrackedObject],
+        infer_frame: np.ndarray,
+        clean_frame: np.ndarray,
+    ) -> None:
+        """Associate stationary bags in monitored zones with nearest/contacting person and YuNet face."""
+        bags = [
+            t for t in active_tracks
+            if t.class_label in ("tas", "backpack", "handbag", "suitcase")
+            and getattr(t, "is_stationary", False)
+        ]
+        if not bags:
+            return
+
+        persons = [
+            t for t in active_tracks
+            if t.class_label == "person" and getattr(t, "is_active_this_frame", False)
+        ]
+
+        scale_x = clean_frame.shape[1] / float(infer_frame.shape[1])
+        scale_y = clean_frame.shape[0] / float(infer_frame.shape[0])
+
+        for bag in bags:
+            bx, by, bw, bh = bag.bbox
+            bcx, bcy = bag.centroid
+            bag_base = (bx + bw / 2.0, by + bh)
+            adaptive_radius = max(45.0, min(120.0, float(bh * 2.5)))
+
+            # Find nearest contacting person
+            nearest_person = None
+            min_dist = float("inf")
+            for person in persons:
+                px, py, pw, ph = person.bbox
+                person_foot = (px + pw / 2.0, py + ph)
+                dist = float(
+                    ((bag_base[0] - person_foot[0]) ** 2 + (bag_base[1] - person_foot[1]) ** 2) ** 0.5
+                )
+
+                # Overlap or proximity check
+                is_contact = (
+                    dist <= adaptive_radius
+                    or (px <= bcx <= (px + pw) and py <= bcy <= (py + ph))
+                )
+                if is_contact and dist < min_dist:
+                    min_dist = dist
+                    nearest_person = person
+
+            if nearest_person is not None:
+                px, py, pw, ph = nearest_person.bbox
+                head_h = int(ph * 0.35)
+                head_top = py
+                head_bottom = py + head_h
+
+                # Match with cached faces from YuNet
+                matched_face = None
+                for face_item in (self._cached_faces or []):
+                    if len(face_item) >= 3:
+                        f_bbox, f_score, f_label = face_item[0], face_item[1], face_item[2]
+                    elif len(face_item) == 2:
+                        f_bbox, f_score_or_lbl = face_item[0], face_item[1]
+                        f_score = float(f_score_or_lbl) if isinstance(f_score_or_lbl, (int, float)) else 0.5
+                        f_label = str(f_score_or_lbl) if isinstance(f_score_or_lbl, str) else "Unknown"
+                    else:
+                        continue
+
+                    fx, fy, fw, fh = f_bbox
+                    fcx = fx + fw // 2
+                    fcy = fy + fh // 2
+
+                    # Check if face center falls inside head region (with 10px margin)
+                    if (px - 10) <= fcx <= (px + pw + 10) and (head_top - 10) <= fcy <= (head_bottom + 10):
+                        matched_face = (f_bbox, f_score, f_label)
+                        break
+
+                if matched_face is not None:
+                    f_bbox, f_score, f_label = matched_face
+                    name = str(f_label) if f_label else "Unknown"
+                    conf = float(f_score)
+                    fx, fy, fw, fh = f_bbox
+                    pad_w = int(fw * 0.25)
+                    pad_h = int(fh * 0.25)
+                    cx1 = max(0, int((fx - pad_w) * scale_x))
+                    cy1 = max(0, int((fy - pad_h) * scale_y))
+                    cx2 = min(clean_frame.shape[1], int((fx + fw + pad_w) * scale_x))
+                    cy2 = min(clean_frame.shape[0], int((fy + fh + pad_h) * scale_y))
+                    face_crop = clean_frame[cy1:cy2, cx1:cx2].copy() if (cx2 > cx1 and cy2 > cy1) else None
+                else:
+                    name = "Unknown"
+                    conf = 0.5
+                    cx1 = max(0, int((px - 5) * scale_x))
+                    cy1 = max(0, int((head_top - 5) * scale_y))
+                    cx2 = min(clean_frame.shape[1], int((px + pw + 5) * scale_x))
+                    cy2 = min(clean_frame.shape[0], int(head_bottom * scale_y))
+                    face_crop = clean_frame[cy1:cy2, cx1:cx2].copy() if (cx2 > cx1 and cy2 > cy1) else None
+
+                # Update owner info if none exists or if upgraded from Unknown to a known name
+                existing_owner = getattr(bag, "last_owner_info", None)
+                if existing_owner is None or (existing_owner.get("name") == "Unknown" and name != "Unknown"):
+                    bag.last_owner_info = {
+                        "name": name,
+                        "confidence": conf,
+                        "face_crop": face_crop,
+                        "person_bbox": (px, py, pw, ph),
+                        "timestamp": time.time(),
+                    }
+
 
     @staticmethod
     def _is_bag_overlapping_person(
@@ -295,7 +420,9 @@ class CameraPipeline:
                     for purged in purged_tracks:
                         eid = self.active_db_events.pop(purged.track_id, purged.db_event_id)
                         if purged.is_triggered and eid is not None:
-                            self._resolve_event_async(eid)
+                            z_name = self.config.get("zones", {}).get(purged.zone_id, {}).get("name", purged.zone_id)
+                            o_name = purged.last_owner_info.get("name") if getattr(purged, "last_owner_info", None) else None
+                            self._resolve_event_async(eid, zone_name=z_name, track_id=purged.track_id, dwell_duration=purged.dwell_duration, owner_name=o_name)
 
                     # Render offline canvas using target resolution dimensions
                     target_w = self.target_resolution[0] if self.target_resolution else 1920
@@ -485,6 +612,7 @@ class CameraPipeline:
 
             # 3. Tracking & Dwell Classification
             active_tracks, purged_tracks = self.tracker.update(formatted_detections, timestamp=now)
+            self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
 
             zones_cfg = self.config.get("zones", {})
 
@@ -546,7 +674,9 @@ class CameraPipeline:
                         track.dwell_duration = 0.0
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
-                            self._resolve_event_async(eid)
+                            z_name = zone_info.get("name", track.zone_id)
+                            o_name = track.last_owner_info.get("name") if getattr(track, "last_owner_info", None) else None
+                            self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration, owner_name=o_name)
                     continue
 
                 track.dwell_threshold = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
@@ -558,12 +688,19 @@ class CameraPipeline:
                         track.alert_sent = False
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
-                            self._resolve_event_async(eid)
+                            z_name = zone_info.get("name", track.zone_id)
+                            o_name = track.last_owner_info.get("name") if getattr(track, "last_owner_info", None) else None
+                            self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration, owner_name=o_name)
                     continue
 
                 # 4. VIOLATION ONLY FOR UNATTENDED BAGS:
                 if track.is_stationary:
                     dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
+
+                    # Multi-Stage Alert Escalation: Stage 2 (Pre-Alarm 85%) Local Chime
+                    if track.dwell_duration >= (dwell_thresh * 0.85) and not getattr(track, "pre_alarm_alerted", False):
+                        self.audio_worker.request_pre_alarm_chime()
+                        track.pre_alarm_alerted = True
 
                     if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                         track.is_triggered = True
@@ -587,6 +724,19 @@ class CameraPipeline:
                         filename = f"{timestamp_str}_{track.zone_id}_{track.track_id}.jpg"
                         filepath = self.snapshots_dir / filename
 
+                        # Extract owner metadata for breach registration and Telegram album
+                        owner_info = getattr(track, "last_owner_info", None)
+                        owner_name = owner_info.get("name") if owner_info else "Tidak Teridentifikasi"
+                        owner_conf = float(owner_info.get("confidence", 0.0)) if owner_info else 0.0
+                        face_crop = owner_info.get("face_crop") if owner_info else None
+
+                        face_filepath_str = None
+                        if face_crop is not None and face_crop.size > 0:
+                            face_filename = f"{timestamp_str}_{track.zone_id}_{track.track_id}_face.jpg"
+                            face_filepath = self.snapshots_dir / face_filename
+                            self.io_executor.submit(cv2.imwrite, str(face_filepath), face_crop)
+                            face_filepath_str = str(face_filepath)
+
                         # Immediate synchronous DB event registration
                         try:
                             event_type = "CLEAR_AREA_VIOLATION"
@@ -599,12 +749,15 @@ class CameraPipeline:
                                 start_time=start_iso,
                                 trigger_time=trigger_iso,
                                 snapshot_path=str(filepath),
+                                owner_name=owner_name,
+                                owner_confidence=owner_conf,
+                                face_snapshot_path=face_filepath_str,
                             )
                             track.db_event_id = event_id
                             self.active_db_events[track.track_id] = event_id
                             logger.warning(
                                 f"[{self.camera_id}] Pelanggaran Clear Area terdaftar di '{zone_name}' "
-                                f"oleh Track ID {track.track_id} (Dwell: {dwell_minutes:.1f}m). Event ID: {event_id}"
+                                f"oleh Track ID {track.track_id} (Dwell: {dwell_minutes:.1f}m, Pemilik: {owner_name}). Event ID: {event_id}"
                             )
                         except Exception as e:
                             logger.error(f"[{self.camera_id}] DB event log failed: {e}")
@@ -622,6 +775,8 @@ class CameraPipeline:
                                 "storage_path": storage_path,
                                 "reports_path": reports_path,
                                 "filepath": filepath,
+                                "owner_name": owner_name,
+                                "owner_face_crop": face_crop,
                             })
                     elif track.is_triggered:
                         # Continue requesting alarm pulses within cooldown
@@ -631,7 +786,9 @@ class CameraPipeline:
             for purged in purged_tracks:
                 eid = self.active_db_events.pop(purged.track_id, purged.db_event_id)
                 if purged.is_triggered and eid is not None:
-                    self._resolve_event_async(eid)
+                    z_name = zones_cfg.get(purged.zone_id, {}).get("name", purged.zone_id)
+                    o_name = purged.last_owner_info.get("name") if getattr(purged, "last_owner_info", None) else None
+                    self._resolve_event_async(eid, zone_name=z_name, track_id=purged.track_id, dwell_duration=purged.dwell_duration, owner_name=o_name)
 
             # 6. FPS Calculation
             self._frame_count += 1
@@ -730,6 +887,9 @@ class CameraPipeline:
                         logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
                 self._face_frame_index += 1
 
+            # Refresh bag-to-owner association with latest face detection results
+            self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
+
             # 7. Render Decoupled Visual Overlay onto Full HD display_frame
             display_frame = VisualHUD.render(
                 canvas=display_frame,
@@ -764,6 +924,8 @@ class CameraPipeline:
                             bbox=alert["bbox"],
                             zone_name=alert["zone_name"],
                             zones=self.roi_zones,
+                            owner_name=alert.get("owner_name"),
+                            owner_face_crop=alert.get("owner_face_crop"),
                         )
                     except Exception as e:
                         logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
@@ -874,11 +1036,16 @@ def main() -> None:
     # Execute auto-purge retention maintenance
     cleanup_old_records(retention_days=30)
 
+    # Start background Disk Guard (6-hour retention & low-disk emergency failsafe)
+    disk_guard = DiskGuardWorker()
+    disk_guard.start()
+
     workspace_dir = Path(__file__).resolve().parent
     camera_dirs = discover_cameras(workspace_dir)
 
     if not camera_dirs:
         logger.warning("No camera workspaces discovered in cameras/. Exiting.")
+        disk_guard.stop()
         sys.exit(0)
 
     logger.info(f"Discovered {len(camera_dirs)} camera workspace(s): {[c.name for c in camera_dirs]}")
@@ -967,6 +1134,7 @@ def main() -> None:
             for pipe in pipelines:
                 pipe.stop()
             DashboardServer.stop()
+            disk_guard.stop()
             cv2.destroyAllWindows()
             logger.info("All camera pipelines terminated gracefully.")
     else:
@@ -981,6 +1149,7 @@ def main() -> None:
             for pipe in pipelines:
                 pipe.stop()
             DashboardServer.stop()
+            disk_guard.stop()
             logger.info("All camera pipelines terminated gracefully.")
 
 

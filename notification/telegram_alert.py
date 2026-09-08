@@ -261,6 +261,8 @@ class TelegramNotifier:
         zone_name: Optional[str] = None,
         overview_frame: Optional[np.ndarray] = None,
         zones: Optional[Dict[str, Any]] = None,
+        owner_name: Optional[str] = None,
+        owner_face_crop: Optional[np.ndarray] = None,
     ) -> bool:
         """Enqueue alert job asynchronously (non-blocking, < 0.1ms).
 
@@ -282,6 +284,7 @@ class TelegramNotifier:
                 return False
 
             job = {
+                "type": "alert",
                 "camera_id": camera_id,
                 "zone_id": zone_id,
                 "zone_name": zone_name or zone_id,
@@ -293,6 +296,8 @@ class TelegramNotifier:
                 "bbox": bbox,
                 "zones": zones,
                 "recipients": recipients,
+                "owner_name": owner_name or "Tidak Teridentifikasi",
+                "owner_face_crop": owner_face_crop.copy() if owner_face_crop is not None else None,
             }
 
             self._queue.put_nowait(job)
@@ -304,6 +309,39 @@ class TelegramNotifier:
             logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
             return False
 
+    def dispatch_resolution(
+        self,
+        camera_id: str,
+        zone_name: str,
+        track_id: int,
+        dwell_duration: float,
+        timestamp_str: str,
+        owner_name: Optional[str] = None,
+    ) -> bool:
+        """Enqueue a resolution notice when stationary object is removed."""
+        if not self.enabled or not self.bot_token or not self.bot_token.strip():
+            return False
+
+        recipients = self.get_recipients_for_camera(camera_id)
+        if not recipients:
+            return False
+
+        job = {
+            "type": "resolution",
+            "camera_id": camera_id,
+            "zone_name": zone_name,
+            "track_id": track_id,
+            "dwell_duration": dwell_duration,
+            "timestamp_str": timestamp_str,
+            "owner_name": owner_name or "Tidak Teridentifikasi",
+            "recipients": recipients,
+        }
+        try:
+            self._queue.put_nowait(job)
+            return True
+        except queue.Full:
+            return False
+
     def _worker_loop(self) -> None:
         """Daemon worker loop: consumes queue and sends HTTP requests via Telegram Bot API."""
         while not self._stop_event.is_set():
@@ -313,7 +351,10 @@ class TelegramNotifier:
                 continue
 
             try:
-                self._send_job(job)
+                if job.get("type") == "resolution":
+                    self._send_resolution_job(job)
+                else:
+                    self._send_job(job)
             except Exception as e:
                 logger.error(f"[TelegramNotifier] Unhandled exception in worker: {e}")
             finally:
@@ -345,6 +386,10 @@ class TelegramNotifier:
         # 2. Extract Contextual Close-up Zoom Crop from clean frame (un-occluded, 35% padding)
         zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.35)
 
+        # 2b. Extract Owner Face Crop if available
+        owner_face_crop = job.get("owner_face_crop")
+        owner_name = job.get("owner_name", "Tidak Teridentifikasi")
+
         # 3. Encode images to JPEG
         success_ov, enc_overview = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not success_ov:
@@ -359,22 +404,30 @@ class TelegramNotifier:
             if success_zm:
                 zoom_bytes = enc_zoom.tobytes()
 
+        face_bytes = None
+        if owner_face_crop is not None and owner_face_crop.size > 0:
+            success_fc, enc_face = cv2.imencode(".jpg", owner_face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if success_fc:
+                face_bytes = enc_face.tobytes()
+
         # 4. Format structured caption (HTML mode)
         dwell_mins = dwell / 60.0
+        owner_line = f"👤 <b>Terduga Pemilik</b>: <b>{owner_name}</b>\n" if owner_name and owner_name != "Tidak Teridentifikasi" else "👤 <b>Terduga Pemilik</b>: <i>Tidak Teridentifikasi</i>\n"
         caption = (
             "🚨 <b>PERINGATAN: PELANGGARAN CLEAR AREA</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📹 <b>Kamera</b>: <code>{camera_id}</code>\n"
             f"📍 <b>Zona</b>: <code>{display_zone}</code>\n"
-            f"🏷️ <b>Objek</b>: Objek Terlarang / Halangan (Track ID #{track_id})\n"
+            f"🏷️ <b>Objek</b>: Objek Terlarang (Track ID #{track_id})\n"
+            f"{owner_line}"
             f"⏱️ <b>Durasi Pelanggaran</b>: <b>{dwell_mins:.1f} Menit</b> (Batas: 60 Menit)\n"
             f"🕒 <b>Waktu</b>: <code>{timestamp_str}</code>\n"
             "📷 <b>Bukti</b>: Foto Overview + Close-up Zoom terlampir.\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <i>Terdeteksi barang di area steril / clear area yang tidak semestinya. Harap petugas keamanan segera mensterilkan lokasi fisik.</i>"
+            "⚠️ <i>Terdeteksi barang di area steril yang tidak semestinya. Harap petugas keamanan segera mensterilkan lokasi.</i>"
         )
 
-        # 5. Dispatch dual-image album or single photo per recipient
+        # 5. Dispatch multi-image album or single photo per recipient
         if not self.bot_token or not self.bot_token.strip():
             logger.warning("[Telegram] Credentials not configured, skipping alert.")
             return
@@ -382,7 +435,7 @@ class TelegramNotifier:
         for chat_id in recipients:
             if zoom_bytes is not None:
                 # Primary: sendMediaGroup (album in 1 bubble)
-                sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption)
+                sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption, face_bytes=face_bytes)
                 if not sent:
                     # Fallback: sequential sendPhoto
                     logger.info(f"[TelegramNotifier] sendMediaGroup failed for {chat_id}; falling back to sendPhoto.")
@@ -390,9 +443,52 @@ class TelegramNotifier:
                     self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
                     zoom_caption = f"🔍 <b>[DETAIL CROP]</b> Objek Terlarang di Area Steril (Track ID #{track_id})"
                     self._send_photo_with_retry(send_photo_url, chat_id, zoom_bytes, zoom_caption)
+                    if face_bytes is not None:
+                        face_caption = f"👤 <b>[FOTO PEMILIK/TERDUGA]</b> {owner_name}"
+                        self._send_photo_with_retry(send_photo_url, chat_id, face_bytes, face_caption)
             else:
                 send_photo_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
                 self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
+
+    def _send_resolution_job(self, job: dict) -> None:
+        """Send HTML text message to Telegram when incident is resolved."""
+        camera_id = job["camera_id"]
+        zone_name = job["zone_name"]
+        track_id = job["track_id"]
+        dwell = job["dwell_duration"]
+        timestamp_str = job["timestamp_str"]
+        owner_name = job.get("owner_name", "Tidak Teridentifikasi")
+        recipients = job.get("recipients", [])
+
+        dwell_mins = dwell / 60.0
+        text = (
+            "✅ <b>AREA KEMBALI STERIL (RESOLVED)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📹 <b>Kamera</b>: <code>{camera_id}</code>\n"
+            f"📍 <b>Zona</b>: <code>{zone_name}</code>\n"
+            f"🏷️ <b>Objek</b>: Objek Terlarang (Track ID #{track_id})\n"
+            f"👤 <b>Terkait</b>: <code>{owner_name}</code>\n"
+            f"⏱️ <b>Total Durasi Diam</b>: <b>{dwell_mins:.1f} Menit</b>\n"
+            f"🕒 <b>Waktu Penyelesaian</b>: <code>{timestamp_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>Objek telah diambil atau dipindahkan dari area steril. Kondisi area telah kembali normal dan steril.</i>"
+        )
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        for chat_id in recipients:
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    }
+                    resp = requests.post(url, json=payload, timeout=self.request_timeout)
+                    if resp.status_code == 200:
+                        logger.info(f"[TelegramNotifier] Resolution notice sent to Chat ID {chat_id}")
+                        break
+                except Exception as e:
+                    logger.warning(f"[TelegramNotifier] Failed to send resolution message: {e}")
 
     def _send_media_group_with_retry(
         self,
@@ -400,8 +496,9 @@ class TelegramNotifier:
         overview_bytes: bytes,
         zoom_bytes: bytes,
         caption: str,
+        face_bytes: Optional[bytes] = None,
     ) -> bool:
-        """Send dual-image album via Telegram sendMediaGroup with retry protection."""
+        """Send 2 or 3-image album via Telegram sendMediaGroup with retry protection."""
         if not self.bot_token or not chat_id:
             logger.warning("[Telegram] Credentials not configured, skipping alert.")
             return False
@@ -419,6 +516,17 @@ class TelegramNotifier:
                 "media": "attach://photo_zoom.jpg",
             },
         ]
+        files = {
+            "photo_overview.jpg": ("photo_overview.jpg", overview_bytes, "image/jpeg"),
+            "photo_zoom.jpg": ("photo_zoom.jpg", zoom_bytes, "image/jpeg"),
+        }
+
+        if face_bytes is not None:
+            media.append({
+                "type": "photo",
+                "media": "attach://photo_face.jpg",
+            })
+            files["photo_face.jpg"] = ("photo_face.jpg", face_bytes, "image/jpeg")
 
         for attempt in range(1, self.max_retries + 1):
             try:

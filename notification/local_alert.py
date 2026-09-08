@@ -70,14 +70,24 @@ class GlobalAudioWorker:
         self._last_cycle_start: float = 0.0
         self._playback_lock: threading.Lock = threading.Lock()
         
-        # Audio file path
+        # Audio file paths
         base_dir = Path(__file__).resolve().parent
         self.sound_file: Path = base_dir / "alert.wav"
+        self.chime_file: Path = base_dir / "chime.wav"
+        self._last_chime_time: float = 0.0
+        self._chime_obj = None
+
         if not self.sound_file.exists():
             try:
                 generate_fallback_wav(self.sound_file)
             except Exception as e:
                 print(f"[WARN] Failed to generate fallback WAV: {e}")
+
+        if not self.chime_file.exists():
+            try:
+                generate_fallback_wav(self.chime_file, frequency_hz=880.0, duration_sec=0.35)
+            except Exception as e:
+                print(f"[WARN] Failed to generate fallback chime WAV: {e}")
 
         # Initialize Pygame Mixer safely
         try:
@@ -85,6 +95,8 @@ class GlobalAudioWorker:
             pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
             if self.sound_file.exists():
                 self._sound_obj = pygame.mixer.Sound(str(self.sound_file))
+            if self.chime_file.exists():
+                self._chime_obj = pygame.mixer.Sound(str(self.chime_file))
             self._audio_available = True
         except Exception as e:
             print(f"[WARN] Audio output unavailable (running in silent mode): {e}")
@@ -105,6 +117,19 @@ class GlobalAudioWorker:
                 if not pygame.mixer.get_busy():
                     self._sound_obj.play()
                     self._last_cycle_start = now
+
+    def request_pre_alarm_chime(self) -> None:
+        """Trigger gentle pre-alarm chime (85% dwell) with 20s debounce."""
+        if not self._audio_available or self._chime_obj is None:
+            return
+
+        now = time.time()
+        with self._playback_lock:
+            import pygame
+            if (now - self._last_chime_time) >= 20.0:
+                if not pygame.mixer.get_busy():
+                    self._chime_obj.play()
+                    self._last_chime_time = now
 
 
 class VisualHUD:
@@ -236,27 +261,40 @@ class VisualHUD:
             # User-friendly minute-based dwell time format (strictly no raw seconds)
             dwell_str = f"{dwell / 60.0:.1f}m/{max_mins}m"
 
-            # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT)
+            # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT / PRE-ALARM / WARNING)
             is_alert = (getattr(obj, "is_triggered", False) or dwell >= dwell_max)
+            is_pre_alarm = getattr(obj, "is_pre_alarm", False) or (dwell >= dwell_max * 0.85)
+            is_warning = getattr(obj, "is_warning", False) or (dwell >= dwell_max * 0.50)
             is_occluded = getattr(obj, "is_occluded", False)
+
+            owner_info = getattr(obj, "last_owner_info", None)
+            owner_name = owner_info.get("name") if owner_info else None
+            owner_suffix = f" [{owner_name}]" if owner_name and owner_name != "Unknown" else ""
+
             if is_attended:
                 box_color = COLOR_SAFE
-                badge_text = f"ID {track_id} | Objek [AMAN]"
+                badge_text = f"ID {track_id} | Objek [AMAN]{owner_suffix}"
             elif is_occluded:
                 box_color = (0, 215, 255)  # Amber / Soft Gold
-                badge_text = f"ID {track_id} | Objek [TERTUTUP] ({dwell_str})"
+                badge_text = f"ID {track_id} | Objek [TERTUTUP] ({dwell_str}){owner_suffix}"
             elif is_alert:
                 box_color = (0, 0, 255) if blink_state else (0, 165, 255)
-                badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m)"
+                badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m){owner_suffix}"
+            elif is_pre_alarm:
+                box_color = (0, 100, 255)  # Deep Orange-Red
+                badge_text = f"ID {track_id} | Objek [PRE-ALARM 85%] ({dwell_str}){owner_suffix}"
+            elif is_warning:
+                box_color = (0, 165, 255)  # Amber / Orange
+                badge_text = f"ID {track_id} | Objek [WARNING 50%] ({dwell_str}){owner_suffix}"
             elif getattr(obj, "is_stationary", False):
                 if dwell <= (dwell_max * 0.5):
                     box_color = (0, 255, 255)  # Kuning
                 else:
                     box_color = (0, 165, 255)  # Oranye Warning
-                badge_text = f"ID {track_id} | Objek ({dwell_str})"
+                badge_text = f"ID {track_id} | Objek ({dwell_str}){owner_suffix}"
             else:
                 box_color = COLOR_SAFE
-                badge_text = f"ID {track_id} | Objek"
+                badge_text = f"ID {track_id} | Objek{owner_suffix}"
 
             # Draw crisp thin bounding rectangle and centroid (1px normal, max 2px alert)
             cur_box_thick = box_thickness_alert if is_alert else box_thickness_normal
