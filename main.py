@@ -97,10 +97,10 @@ class CameraPipeline:
             max_disappeared_sec=12.0,
             max_age_frames=150,
             ema_alpha=0.3,
-            spatial_memory_ttl_sec=180.0,
+            spatial_memory_ttl_sec=600.0,          # 10 minutes: give YOLO enough time to re-detect
             spatial_match_distance_px=60.0,
-            stationary_max_age_frames=600,
-            stationary_max_disappeared_sec=45.0,
+            stationary_max_age_frames=900,          # ~67s latching at 13fps before purge
+            stationary_max_disappeared_sec=75.0,    # sync with 900 frames at ~13fps
         )
         self._kernel_close_large = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         self._kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))

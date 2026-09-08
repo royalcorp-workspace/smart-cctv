@@ -93,6 +93,7 @@ class TrackedObject:
     last_moved_time: float = 0.0
     is_retrieved: bool = False
     last_person_near_time: float = 0.0
+    last_physical_contact_time: float = 0.0  # Set only when person has real IoU/IoF overlap (>0.20/>0.30) with bag
     associated_face_crop: Optional[Any] = None
     associated_face_meta: Optional[Dict[str, Any]] = None
     associated_person_crop: Optional[Any] = None
@@ -341,6 +342,7 @@ class CentroidTracker:
             pre_alarm_alerted=(entry.accumulated_dwell >= entry.dwell_threshold * 0.85),
             moved_confirmation_frames=0,
             last_moved_time=0.0,
+            last_physical_contact_time=0.0,
             associated_face_crop=rec_face_crop,
             associated_face_meta=rec_meta,
             associated_person_crop=rec_person_crop,
@@ -436,12 +438,17 @@ class CentroidTracker:
                 obj.missed_frames += 1
                 if obj.is_stationary:
                     obj.stationary_start = now - obj.dwell_duration
-                    recent_near = (now - getattr(obj, "last_person_near_time", 0.0)) <= 1.5
-                    recent_interaction = recent_near or ((now - getattr(obj, "last_occluded_time", 0.0)) <= 1.5)
-                    if recent_interaction and not getattr(obj, "is_occluded", False):
+                    # HARDENED is_retrieved: require both missed_frames >= 15 AND confirmed physical
+                    # contact (IoU/IoF overlap) within the last 1.0 second. Mere proximity (80px)
+                    # without physical contact is treated as normal occlusion — NOT retrieval.
+                    has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 1.0
+                    if obj.missed_frames >= 15 and has_physical_contact and not getattr(obj, "is_occluded", False):
                         obj.is_retrieved = True
-                        obj.missed_frames = getattr(self, "stationary_max_age_frames", 600) + 1
-                        logger.info(f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person. Resolving track immediately.")
+                        obj.missed_frames = getattr(self, "stationary_max_age_frames", 900) + 1
+                        logger.info(
+                            f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person (confirmed physical contact, "
+                            f"missed_frames={obj.missed_frames}). Resolving track immediately."
+                        )
             purged = self._purge_stale_objects(now)
             return list(self.objects.values()), purged
 
@@ -817,23 +824,22 @@ class CentroidTracker:
         self.evaluate_owner_proximity(now)
 
         # 6. Instant Bag Pickup / Retrieval Resolution
+        # HARDENED: require missed_frames >= 15 AND confirmed physical contact (IoU/IoF > 0.20/0.30)
+        # within last 1.0 second. Proximity alone (< 80px) without physical contact = normal occlusion.
         for obj_id, obj in list(self.objects.items()):
             if obj.is_active_this_frame:
                 continue
 
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if is_bag and obj.is_stationary:
-                person_near = self._is_person_near_obj(obj, person_detections)
-                if person_near:
-                    obj.last_person_near_time = now
-
-                recent_near = person_near or ((now - getattr(obj, "last_person_near_time", 0.0)) <= 1.5)
-                recent_interaction = recent_near or ((now - getattr(obj, "last_occluded_time", 0.0)) <= 1.5)
-
-                if recent_interaction and not getattr(obj, "is_occluded", False):
+            if is_bag and obj.is_stationary and obj.missed_frames >= 15:
+                has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 1.0
+                if has_physical_contact and not getattr(obj, "is_occluded", False):
                     obj.is_retrieved = True
-                    obj.missed_frames = getattr(self, "stationary_max_age_frames", 600) + 1
-                    logger.info(f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person. Resolving track immediately.")
+                    obj.missed_frames = getattr(self, "stationary_max_age_frames", 900) + 1
+                    logger.info(
+                        f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person (confirmed physical contact, "
+                        f"missed_frames={obj.missed_frames}). Resolving track immediately."
+                    )
 
         # Anti-memory leak: purge tracks unobserved for > max_disappeared_sec (4.5s) or > max_age_frames (45 frames)
         purged = self._purge_stale_objects(now)
@@ -932,8 +938,14 @@ class CentroidTracker:
            - When person is within proximity_radius:
              is_attended = True (HUD turns Green [AMAN / ATTENDED])
              dwell_duration is PAUSED / HELD.
-           - Reset to 0.0s ONLY if person stays for >= 4.0 consecutive seconds.
+           - dwell_duration is NEVER zeroed by attendance — it is only PAUSED.
+           - dwell_duration is reset to 0.0s ONLY when confirmed genuine movement
+             (moved_confirmation_frames >= 30 with > 50px displacement).
            - If person leaves before 4.0s (passerby), resume dwell_duration from held value.
+
+        Physical contact tracking:
+           - `last_physical_contact_time` is set ONLY when IoU overlap > 0.20 OR IoF > 0.30
+             between person and bag (real physical contact, not just proximity).
         """
         all_objects = list(self.objects.values())
         bag_objects = [
@@ -962,13 +974,15 @@ class CentroidTracker:
 
                 is_person_or_moving = (other.class_label == "person" or not other.is_stationary) and getattr(other, "is_active_this_frame", False)
 
-                # Check overlap / carried containment with active person:
-                # If bag centroid is inside person box or IoF > 0.3
+                # Check physical contact: IoU overlap > 0.20 OR IoF (bag fraction) > 0.30
+                # This distinguishes mere proximity from actual physical interaction.
                 is_carried_or_overlapping = False
+                has_real_contact = False
                 if other.class_label == "person" and getattr(other, "is_active_this_frame", False):
                     bcx, bcy = bag.centroid
                     if ox <= bcx <= (ox + ow) and oy <= bcy <= (oy + oh):
                         is_carried_or_overlapping = True
+                        has_real_contact = True
                     else:
                         ix1 = max(bx, ox)
                         iy1 = max(by, oy)
@@ -977,8 +991,20 @@ class CentroidTracker:
                         if ix2 > ix1 and iy2 > iy1:
                             inter = float((ix2 - ix1) * (iy2 - iy1))
                             bag_area = float(bw * bh)
-                            if bag_area > 0 and (inter / bag_area) > 0.3:
+                            bag_box_a = float(bw * bh)
+                            person_box_a = float(ow * oh)
+                            union_a = bag_box_a + person_box_a - inter
+                            iou_val = inter / union_a if union_a > 0 else 0.0
+                            iof_val = inter / bag_area if bag_area > 0 else 0.0
+                            if iof_val > 0.30:
                                 is_carried_or_overlapping = True
+                                has_real_contact = True
+                            elif iou_val > 0.20:
+                                has_real_contact = True
+
+                if has_real_contact:
+                    # Record confirmed physical contact timestamp for is_retrieved gate
+                    bag.last_physical_contact_time = now
 
                 if (is_person_or_moving and dist <= adaptive_radius) or is_carried_or_overlapping:
                     owner_nearby = True
@@ -998,12 +1024,11 @@ class CentroidTracker:
                         bag.attended_start = now
                     bag.attended_duration = now - bag.attended_start
 
-                    # Sustained attendance (>= 4.0 consecutive seconds): reset dwell timer to 0
+                    # Sustained attendance (>= 4.0 consecutive seconds): PAUSE only, do NOT zero.
+                    # Dwell resets to 0.0 ONLY on confirmed genuine movement (moved_confirmation_frames >= 30).
                     if bag.attended_duration >= 4.0:
-                        bag.dwell_duration = 0.0
-                        bag.stationary_start = now
-                        bag.is_triggered = False
-                        bag.alert_sent = False
+                        # PAUSE: freeze stationary_start so dwell stops accumulating while attended
+                        bag.stationary_start = now - bag.dwell_duration
                     else:
                         # Passerby (< 4.0s): HOLD/PAUSE dwell timer at current accumulated duration
                         bag.stationary_start = now - bag.dwell_duration

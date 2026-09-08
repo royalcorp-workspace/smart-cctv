@@ -170,7 +170,7 @@ def test_anti_spam_cooldown_and_resets() -> bool:
     bag.alert_sent = True
     bag.is_triggered = True
 
-    # 5. Test owner attendance reset (>= 4.0s sustained)
+    # 5. Test owner attendance PAUSE (>= 4.0s sustained) — dwell MUST stay, not be zeroed
     # Person stands beside the bag:
     person_bbox = (240, 160, 50, 130)
     person_centroid = (265, 225)
@@ -186,12 +186,18 @@ def test_anti_spam_cooldown_and_resets() -> bool:
     assert bag.dwell_duration >= 3600.0
 
     # Frame at t=7246.0s (5.0s of sustained attendance >= 4.0s)
+    # NEW PAUSE SEMANTICS: dwell is FROZEN/PAUSED, NOT reset to 0.0s
     tracker.update(dets_with_person, timestamp=start_time + 7246.0)
     assert bag.is_attended is True
-    assert bag.dwell_duration == 0.0, f"Expected dwell reset to 0.0s after sustained attendance, got {bag.dwell_duration}"
-    assert bag.alert_sent is False, "Expected alert_sent reset to False after sustained attendance"
-    assert bag.is_triggered is False, "Expected is_triggered reset to False after sustained attendance"
-    print(" - Owner attendance reset check: Dwell reset to 0.0s and alert_sent reset to False after >= 4.0s.")
+    assert bag.dwell_duration >= 3600.0, (
+        f"PAUSE semantics: dwell MUST remain >= 3600s even during sustained attendance, got {bag.dwell_duration}"
+    )
+    # stationary_start must be frozen to now - dwell_duration (pure pause)
+    expected_stationary_start = (start_time + 7246.0) - bag.dwell_duration
+    assert abs(bag.stationary_start - expected_stationary_start) < 1.0, (
+        f"stationary_start must be frozen at now - dwell_duration for pause, got {bag.stationary_start}"
+    )
+    print(" - Owner attendance PAUSE check: Dwell held at >= 3600s (not zeroed), stationary_start frozen.")
 
     print(" -> PASS: Anti-spam cooldown and state resets work perfectly.")
     return True
