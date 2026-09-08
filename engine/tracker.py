@@ -5,6 +5,47 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
+from engine.logger import logger
+
+
+def compute_bbox_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
+    """Compute Intersection over Union (IoU) of two [x, y, w, h] boxes."""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+    inter_area = float((xi2 - xi1) * (yi2 - yi1))
+    area1 = float(w1 * h1)
+    area2 = float(w2 * h2)
+    union_area = area1 + area2 - inter_area
+    if union_area <= 0.0:
+        return 0.0
+    return inter_area / union_area
+
+
+@dataclass
+class SpatialMemoryEntry:
+    """Historical spatial snapshot of an unobserved or occluded stationary object."""
+    track_id: int
+    class_label: str
+    zone_id: str
+    anchor_centroid: Tuple[int, int]
+    last_centroid: Tuple[int, int]
+    last_bbox: Tuple[int, int, int, int]
+    first_seen: float
+    stationary_start: float
+    accumulated_dwell: float
+    last_seen: float
+    deregistered_at: float
+    occluded_by_person: bool = False
+    contour_area: float = 0.0
+    confidence: float = 0.0
+    dwell_threshold: float = 3600.0
+
 
 @dataclass
 class TrackedObject:
@@ -35,6 +76,8 @@ class TrackedObject:
     attended_start: Optional[float] = None
     attended_duration: float = 0.0
     dwell_threshold: float = 3600.0
+    is_occluded: bool = False
+    last_occluded_time: float = 0.0
 
     @property
     def is_static_artifact(self) -> bool:
@@ -67,9 +110,11 @@ class TrackedObject:
             return True
 
         # Hold stationary objects and bags for at least 150 frames (~8-10 seconds at 15-18 FPS)
+        # If occluded, extend render hold up to 300 frames (~15-20s)
         is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
         if self.is_stationary or is_bag:
-            return self.missed_frames <= 150
+            max_render_missed = 300 if self.is_occluded else 150
+            return self.missed_frames <= max_render_missed
 
         return self.edge_distance >= 8.0 and self.missed_frames <= 10
 
@@ -86,6 +131,8 @@ class CentroidTracker:
         max_disappeared_sec: float = 12.0,
         max_age_frames: int = 150,
         ema_alpha: float = 0.3,
+        spatial_memory_ttl_sec: float = 60.0,
+        spatial_match_distance_px: float = 45.0,
     ) -> None:
         self.max_distance_px: float = max_distance_px
         self.movement_threshold_px: float = movement_threshold_px
@@ -94,9 +141,101 @@ class CentroidTracker:
         self.max_disappeared_sec: float = max_disappeared_sec
         self.max_age_frames: int = max_age_frames
         self.ema_alpha: float = ema_alpha
+        self.spatial_memory_ttl_sec: float = spatial_memory_ttl_sec
+        self.spatial_match_distance_px: float = spatial_match_distance_px
 
         self._next_id: int = 1
         self.objects: Dict[int, TrackedObject] = {}
+        self.spatial_memory: Dict[int, SpatialMemoryEntry] = {}
+
+    def _match_spatial_memory(
+        self,
+        centroid: Tuple[int, int],
+        bbox: Tuple[int, int, int, int],
+        zone_id: str,
+        label: Optional[str],
+        now: float,
+    ) -> Optional[SpatialMemoryEntry]:
+        """Search spatial memory cache for a matching previously observed stationary bag."""
+        det_label = label if label is not None else ("tas" if zone_id else "person")
+        if det_label not in ("tas", "backpack", "handbag", "suitcase"):
+            return None
+
+        best_entry: Optional[SpatialMemoryEntry] = None
+        min_dist = self.spatial_match_distance_px
+
+        for entry in self.spatial_memory.values():
+            if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec:
+                continue
+
+            # Check Euclidean distance to anchor and last observed centroid
+            d_anchor = float(np.linalg.norm(np.array(entry.anchor_centroid, dtype=np.float32) - np.array(centroid, dtype=np.float32)))
+            d_last = float(np.linalg.norm(np.array(entry.last_centroid, dtype=np.float32) - np.array(centroid, dtype=np.float32)))
+            closest_d = min(d_anchor, d_last)
+
+            # Check Spatial Bounding Box IoU
+            box_iou = compute_bbox_iou(bbox, entry.last_bbox)
+
+            if closest_d <= min_dist or box_iou >= 0.25:
+                min_dist = closest_d
+                best_entry = entry
+
+        return best_entry
+
+    def _recover_from_spatial_memory(
+        self,
+        entry: SpatialMemoryEntry,
+        centroid: Tuple[int, int],
+        bbox: Tuple[int, int, int, int],
+        zone_id: str,
+        area: float,
+        label: Optional[str],
+        edge_dist: float,
+        conf: float,
+        now: float,
+    ) -> TrackedObject:
+        """Revive a TrackedObject from SpatialMemoryEntry preserving Track ID and accumulated dwell time."""
+        effective_label = label or entry.class_label
+        recovered_obj = TrackedObject(
+            track_id=entry.track_id,
+            centroid=centroid,
+            anchor_centroid=entry.anchor_centroid,
+            bbox=bbox,
+            zone_id=zone_id or entry.zone_id,
+            contour_area=area if area > 0 else entry.contour_area,
+            first_seen=entry.first_seen,
+            last_seen=now,
+            stationary_start=now - entry.accumulated_dwell,
+            dwell_duration=entry.accumulated_dwell,
+            is_stationary=True,
+            is_triggered=False,
+            alert_sent=False,
+            is_attended=False,
+            is_active_this_frame=True,
+            class_label=effective_label,
+            db_event_id=None,
+            missed_frames=0,
+            edge_distance=edge_dist,
+            confidence=conf if conf > 0 else entry.confidence,
+            initial_centroid=entry.anchor_centroid,
+            max_displacement_from_start=0.0,
+            frame_count=2,
+            attended_start=None,
+            attended_duration=0.0,
+            dwell_threshold=entry.dwell_threshold,
+            is_occluded=False,
+            last_occluded_time=0.0,
+        )
+        self.objects[entry.track_id] = recovered_obj
+        if entry.track_id in self.spatial_memory:
+            del self.spatial_memory[entry.track_id]
+
+        logger.info(
+            f"[TRACKER] Track ID {entry.track_id} RECOVERED from Spatial Memory "
+            f"(zone='{recovered_obj.zone_id}', preserved dwell={entry.accumulated_dwell:.1f}s, "
+            f"absent_duration={now - entry.deregistered_at:.1f}s)."
+        )
+        return recovered_obj
 
     def _register(
         self,
@@ -166,14 +305,21 @@ class CentroidTracker:
             purged = self._purge_stale_objects(now)
             return list(self.objects.values()), purged
 
-        # If no tracked objects currently exist, register all detections
+        # If no tracked objects currently exist, check spatial memory before registering new objects
         if len(self.objects) == 0:
             for det in detections:
                 bbox, centroid, zone_id, area = det[0], det[1], det[2], det[3]
                 det_label = det[4] if len(det) >= 5 else None
                 edge_dist = float(det[5]) if len(det) >= 6 else 20.0
                 conf = float(det[6]) if len(det) >= 7 else 0.0
-                self._register(centroid, bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
+
+                matched_spatial = self._match_spatial_memory(centroid, bbox, zone_id, det_label, now)
+                if matched_spatial is not None:
+                    self._recover_from_spatial_memory(
+                        matched_spatial, centroid, bbox, zone_id, area, det_label, edge_dist, conf, now
+                    )
+                else:
+                    self._register(centroid, bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
             return list(self.objects.values()), []
 
         # Build distance matrix between existing objects and incoming detections
@@ -204,8 +350,15 @@ class CentroidTracker:
             obj_id = existing_ids[row]
             obj = self.objects[obj_id]
             det = detections[col]
-            bbox, new_centroid, zone_id, area = det[0], det[1], det[2], det[3]
             det_label = det[4] if len(det) >= 5 else None
+
+            # Class compatibility guard: Person can NEVER match a Bag, and Bag can NEVER match a Person
+            is_obj_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
+            if (is_obj_bag and det_label == "person") or (obj.class_label == "person" and is_det_bag):
+                continue
+
+            bbox, new_centroid, zone_id, area = det[0], det[1], det[2], det[3]
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
 
@@ -276,6 +429,8 @@ class CentroidTracker:
             obj.is_active_this_frame = True
             obj.missed_frames = 0
             obj.edge_distance = edge_dist
+            obj.is_occluded = False
+            obj.last_occluded_time = 0.0
 
             if det_label is not None:
                 obj.class_label = det_label
@@ -283,15 +438,53 @@ class CentroidTracker:
             assigned_rows.add(row)
             assigned_cols.add(col)
 
-        # 3. Grace Period / Coasting: hold/pause accumulated dwell duration for objects missed this frame
+        # Extract person bounding boxes for occlusion evaluation
+        person_boxes = [d[0] for d in detections if (len(d) >= 5 and d[4] == "person")]
+
+        # 3. Grace Period / Coasting & Occlusion Detection for objects missed this frame
         for row, obj_id in enumerate(existing_ids):
             if row not in assigned_rows:
                 unmatched_obj = self.objects[obj_id]
                 unmatched_obj.missed_frames += 1
-                # Dwell duration is held intact (not reset to 0.0)
+
+                is_bag = unmatched_obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+                if is_bag and unmatched_obj.is_stationary:
+                    bx, by, bw, bh = unmatched_obj.bbox
+                    bcx, bcy = unmatched_obj.centroid
+                    bag_area = float(bw * bh)
+
+                    occluded = False
+                    for (px, py, pw, ph) in person_boxes:
+                        # 1. Centroid inside person bounding box (with 10px margin)
+                        if (px - 10) <= bcx <= (px + pw + 10) and (py - 10) <= bcy <= (py + ph + 10):
+                            occluded = True
+                            break
+                        # 2. IoF / Overlap between bag and person box >= 0.20
+                        ix1 = max(bx, px)
+                        iy1 = max(by, py)
+                        ix2 = min(bx + bw, px + pw)
+                        iy2 = min(by + bh, py + ph)
+                        if ix2 > ix1 and iy2 > iy1:
+                            inter = float((ix2 - ix1) * (iy2 - iy1))
+                            if bag_area > 0 and (inter / bag_area) >= 0.20:
+                                occluded = True
+                                break
+
+                    if occluded:
+                        unmatched_obj.is_occluded = True
+                        unmatched_obj.last_occluded_time = now
+                        # Freeze/Hold dwell time during occlusion
+                        unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
+                    else:
+                        if unmatched_obj.is_occluded and (now - unmatched_obj.last_occluded_time) < 3.0:
+                            # Hold occluded flag for 3s lingering grace
+                            unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
+                        else:
+                            unmatched_obj.is_occluded = False
+                            unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
 
         # 4. Anti ID Churning Guard for unassigned detections
-        # If an unassigned detection is within 50 px of ANY existing track in memory, REUSE that ID!
+        # First check active memory within 50 px; if not found, check Spatial Memory!
         for col, det in enumerate(detections):
             if col in assigned_cols:
                 continue
@@ -308,6 +501,12 @@ class CentroidTracker:
                 if ex_id in [existing_ids[r] for r in assigned_rows]:
                     continue  # already matched to another detection in this frame
 
+                # Class compatibility guard: Person cannot match Bag, and Bag cannot match Person
+                is_ex_bag = ex_obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+                is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
+                if (is_ex_bag and det_label == "person") or (ex_obj.class_label == "person" and is_det_bag):
+                    continue
+
                 d_cent = float(np.linalg.norm(np.array(ex_obj.centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 d_anch = float(np.linalg.norm(np.array(ex_obj.anchor_centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
                 best_d = min(d_cent, d_anch)
@@ -316,7 +515,7 @@ class CentroidTracker:
                     matched_existing = ex_obj
 
             if matched_existing is not None:
-                # REUSE EXISTING TRACK ID! DO NOT CREATE A NEW ID!
+                # REUSE EXISTING ACTIVE TRACK ID!
                 old_cx, old_cy = matched_existing.centroid
                 new_cx, new_cy = det_centroid
                 smooth_cx = int(round(self.ema_alpha * float(new_cx) + (1.0 - self.ema_alpha) * float(old_cx)))
@@ -329,6 +528,7 @@ class CentroidTracker:
                 matched_existing.missed_frames = 0
                 matched_existing.edge_distance = edge_dist
                 matched_existing.confidence = conf
+                matched_existing.is_occluded = False
                 if det_label is not None:
                     matched_existing.class_label = det_label
                 if zone_id and zone_id != matched_existing.zone_id:
@@ -355,8 +555,15 @@ class CentroidTracker:
                         matched_existing.is_triggered = False
                         matched_existing.alert_sent = False
             else:
-                # Only register a new ID if completely outside 50 px of ANY known object
-                self._register(det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
+                # Check Spatial Memory before registering a brand new ID!
+                matched_spatial = self._match_spatial_memory(det_centroid, det_bbox, zone_id, det_label, now)
+                if matched_spatial is not None:
+                    self._recover_from_spatial_memory(
+                        matched_spatial, det_centroid, det_bbox, zone_id, area, det_label, edge_dist, conf, now
+                    )
+                else:
+                    # Only register a new ID if completely outside 50 px of ANY known object
+                    self._register(det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
 
         # 5. Universal owner proximity across all zones
         self.evaluate_owner_proximity(now)
@@ -367,12 +574,14 @@ class CentroidTracker:
         return list(self.objects.values()), purged
 
     def _purge_stale_objects(self, now: float) -> List[TrackedObject]:
-        """Deregister objects that disappeared longer than max_disappeared_sec and max_age_frames."""
+        """Deregister objects that disappeared longer than max_disappeared_sec and max_age_frames.
+        Stationary bags are archived into spatial_memory cache before purge."""
         stale_ids = []
         for obj_id, obj in self.objects.items():
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
             if obj.is_stationary or is_bag:
-                max_frames = max(150, self.max_age_frames)
+                extra_frames = 150 if getattr(obj, "is_occluded", False) else 0
+                max_frames = max(150 + extra_frames, self.max_age_frames)
                 max_sec = max(12.0, self.max_disappeared_sec)
             else:
                 max_frames = self.max_age_frames
@@ -383,8 +592,38 @@ class CentroidTracker:
 
         purged_objects: List[TrackedObject] = []
         for obj_id in stale_ids:
-            purged_objects.append(self.objects[obj_id])
+            obj = self.objects[obj_id]
+            is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            if is_bag and (obj.is_stationary or obj.dwell_duration > 0.0):
+                # Archive stationary bag to Spatial Memory cache
+                self.spatial_memory[obj_id] = SpatialMemoryEntry(
+                    track_id=obj.track_id,
+                    class_label=obj.class_label,
+                    zone_id=obj.zone_id,
+                    anchor_centroid=obj.anchor_centroid,
+                    last_centroid=obj.centroid,
+                    last_bbox=obj.bbox,
+                    first_seen=obj.first_seen,
+                    stationary_start=obj.stationary_start,
+                    accumulated_dwell=obj.dwell_duration,
+                    last_seen=obj.last_seen,
+                    deregistered_at=now,
+                    occluded_by_person=getattr(obj, "is_occluded", False),
+                    contour_area=obj.contour_area,
+                    confidence=obj.confidence,
+                    dwell_threshold=obj.dwell_threshold,
+                )
+            purged_objects.append(obj)
             del self.objects[obj_id]
+
+        # Purge expired entries from spatial memory cache (TTL exceeded)
+        expired_cache_ids = [
+            cid for cid, entry in self.spatial_memory.items()
+            if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec
+        ]
+        for cid in expired_cache_ids:
+            del self.spatial_memory[cid]
+
         return purged_objects
 
     def evaluate_owner_proximity(self, now: float) -> None:
@@ -453,20 +692,27 @@ class CentroidTracker:
                     break
 
             if owner_nearby:
-                bag.is_attended = True
-                if bag.attended_start is None:
-                    bag.attended_start = now
-                bag.attended_duration = now - bag.attended_start
-
-                # Sustained attendance (>= 4.0 consecutive seconds): reset dwell timer to 0
-                if bag.attended_duration >= 4.0:
-                    bag.dwell_duration = 0.0
-                    bag.stationary_start = now
-                    bag.is_triggered = False
-                    bag.alert_sent = False
-                else:
-                    # Passerby (< 4.0s): HOLD/PAUSE dwell timer at current accumulated duration
+                if getattr(bag, "is_occluded", False):
+                    # Occluded by passerby or person in front -> freeze/pause dwell, do not zero
+                    bag.is_attended = False
+                    bag.attended_start = None
+                    bag.attended_duration = 0.0
                     bag.stationary_start = now - bag.dwell_duration
+                else:
+                    bag.is_attended = True
+                    if bag.attended_start is None:
+                        bag.attended_start = now
+                    bag.attended_duration = now - bag.attended_start
+
+                    # Sustained attendance (>= 4.0 consecutive seconds): reset dwell timer to 0
+                    if bag.attended_duration >= 4.0:
+                        bag.dwell_duration = 0.0
+                        bag.stationary_start = now
+                        bag.is_triggered = False
+                        bag.alert_sent = False
+                    else:
+                        # Passerby (< 4.0s): HOLD/PAUSE dwell timer at current accumulated duration
+                        bag.stationary_start = now - bag.dwell_duration
             else:
                 if bag.is_attended:
                     # Person walked away (passerby or former owner leaving)

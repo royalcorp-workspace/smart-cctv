@@ -95,6 +95,8 @@ class CameraPipeline:
             max_disappeared_sec=12.0,
             max_age_frames=150,
             ema_alpha=0.3,
+            spatial_memory_ttl_sec=60.0,
+            spatial_match_distance_px=45.0,
         )
         self._kernel_close_large = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         self._kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
@@ -502,7 +504,12 @@ class CameraPipeline:
                         dwell_max = float(z_info.get("dwell_threshold_sec", z_info.get("dwell_time_threshold", z_info.get("unattended_threshold", 3600.0))))
                         max_str = f"{max(1, int(round(dwell_max / 60.0)))}m"
                         cur_str = f"{track.dwell_duration / 60.0:.1f}m"
-                        status_str = "ATTENDED" if getattr(track, "is_attended", False) else "UNATTENDED"
+                        if getattr(track, "is_occluded", False):
+                            status_str = "OCCLUDED (PAUSED)"
+                        elif getattr(track, "is_attended", False):
+                            status_str = "ATTENDED"
+                        else:
+                            status_str = "UNATTENDED"
                         log_msg = f"[TRACKER] ID: {track.track_id} | Dwell: {cur_str} / {max_str} | Status: {status_str}"
                         print(log_msg)
                         logger.info(log_msg)

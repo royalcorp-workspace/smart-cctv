@@ -208,6 +208,9 @@ def test_telegram_safe_fallback() -> bool:
 
     # 2. Test dwell >= 3600s with missing credentials
     # Ensure it returns False cleanly without raising an exception or crashing
+    notifier.bot_token = ""
+    notifier.global_admins = []
+    notifier.camera_routing = {}
     res_no_creds = notifier.dispatch_alert(
         camera_id="cam_01",
         zone_id="zone_2_transit",
@@ -316,6 +319,93 @@ def test_hud_minute_format() -> bool:
     return True
 
 
+def test_occlusion_and_spatial_memory() -> bool:
+    """Validate that stationary bags maintain Track ID and dwell time during occlusion and buffer purge."""
+    print("\n[TEST 6] Testing Occlusion Handling & Spatial Memory Cache...")
+    tracker = CentroidTracker(
+        max_distance_px=50.0,
+        anchor_radius_px=15.0,
+        spatial_memory_ttl_sec=60.0,
+        spatial_match_distance_px=45.0,
+    )
+
+    t0 = 1000.0
+    bag_bbox = (300, 300, 60, 60)
+    bag_centroid = (330, 330)
+    zone_id = "zone_2_transit"
+    area = 3600.0
+
+    # 1. Initial observation: Bag stays stationary for 20 seconds
+    dets_t0 = [(bag_bbox, bag_centroid, zone_id, area, "tas", 25.0, 0.9)]
+    active, _ = tracker.update(dets_t0, timestamp=t0)
+    assert len(active) == 1
+    assert active[0].track_id == 1
+
+    active, _ = tracker.update(dets_t0, timestamp=t0 + 20.0)
+    assert active[0].track_id == 1
+    assert abs(active[0].dwell_duration - 20.0) < 0.5
+    print(f" - Bag initial stationary state: ID={active[0].track_id}, Dwell={active[0].dwell_duration:.1f}s")
+
+    # 2. Occlusion for 8.0 seconds (t = 1020s to t = 1028s):
+    # A person walks in front of the bag, overlapping / covering the bag
+    person_bbox = (300, 240, 80, 160)
+    person_centroid = (340, 320)
+    person_dets = [(person_bbox, person_centroid, zone_id, 12800.0, "person", 20.0, 0.95)]
+
+    for occl_t in [t0 + 21.0, t0 + 23.0, t0 + 25.0, t0 + 28.0]:
+        active, _ = tracker.update(person_dets, timestamp=occl_t)
+        bag_obj = tracker.objects.get(1)
+        assert bag_obj is not None, "Bag should still be in active tracker during occlusion grace period"
+        assert bag_obj.is_occluded is True, "Bag must be flagged as is_occluded=True"
+        assert bag_obj.is_attended is False, "Occluded bag must not be treated as attended owner"
+        assert abs(bag_obj.dwell_duration - 20.0) < 0.5, f"Dwell must be FROZEN/HELD at 20.0s during occlusion, got {bag_obj.dwell_duration}"
+
+    print(" - Occlusion check (8s blocked by person): Status=OCCLUDED, Dwell frozen at 20.0s.")
+
+    # 3. Person leaves at t = 1029.0s, bag reappears at the exact same location
+    bag_reappear_dets = [(bag_bbox, (331, 330), zone_id, area, "tas", 25.0, 0.88)]
+    active, _ = tracker.update(bag_reappear_dets, timestamp=t0 + 29.0)
+    reappeared_bag = tracker.objects.get(1)
+    assert reappeared_bag is not None, "Bag ID 1 must be preserved!"
+    assert reappeared_bag.is_occluded is False, "Occlusion flag must be cleared upon reappearance"
+    assert reappeared_bag.dwell_duration >= 20.0, f"Dwell time must NOT reset! Got {reappeared_bag.dwell_duration}s"
+    print(f" - Bag re-observation check: ID={reappeared_bag.track_id} preserved, Dwell resumed smoothly at {reappeared_bag.dwell_duration:.1f}s.")
+
+    # 4. Extended Occlusion / Buffer Exceeded Test:
+    # Bag disappears for 165 frames (~16.5 seconds), exceeding max_age_frames (150 frames)
+    held_dwell = reappeared_bag.dwell_duration
+    t_purge_start = t0 + 50.0
+    for f in range(165):
+        tracker.update([], timestamp=t_purge_start + f * 0.1)
+
+    assert 1 not in tracker.objects, "Bag should be purged from active objects after 165 frames"
+    assert 1 in tracker.spatial_memory, "Bag MUST be cached in Spatial Memory upon purge!"
+    assert abs(tracker.spatial_memory[1].accumulated_dwell - held_dwell) < 0.5
+    print(f" - Spatial Memory Archive check: ID=1 moved to spatial_memory with preserved dwell={tracker.spatial_memory[1].accumulated_dwell:.1f}s.")
+
+    # 5. Re-identification from Spatial Memory:
+    # Bag reappears at t = 1080.0s (14s after purge, within TTL 60s)
+    active, _ = tracker.update([(bag_bbox, (330, 330), zone_id, area, "tas", 25.0, 0.9)], timestamp=t0 + 80.0)
+    assert len(active) == 1
+    recovered_bag = active[0]
+    assert recovered_bag.track_id == 1, f"Track ID must be RECOVERED as 1, but got {recovered_bag.track_id}"
+    assert abs(recovered_bag.dwell_duration - held_dwell) < 0.5, f"Dwell must resume from {held_dwell}s, got {recovered_bag.dwell_duration}s"
+    assert 1 not in tracker.spatial_memory, "Recovered entry must be removed from spatial_memory cache"
+    print(f" - Spatial Memory Re-identification check: Track ID {recovered_bag.track_id} successfully revived with {recovered_bag.dwell_duration:.1f}s dwell!")
+
+    # 6. TTL Expire Check:
+    t_ttl = 3000.0
+    tracker.update([((100, 100, 50, 50), (125, 125), zone_id, 2500.0, "tas", 20.0, 0.9)], timestamp=t_ttl)
+    for f in range(165):
+        tracker.update([], timestamp=t_ttl + f * 0.1)
+    tracker.update([], timestamp=t_ttl + 100.0)
+    assert len(tracker.spatial_memory) == 0, "Expired entries must be purged after TTL 60s"
+    print(" - TTL Cache Expiry check: Expired entries cleanly purged after TTL window.")
+
+    print(" -> PASS: Spatial Memory & Occlusion Handling verified (Track ID & Dwell preserved).")
+    return True
+
+
 def run_all_tests():
     print("=" * 60)
     print("RUNNING STRICT 60-MINUTE DWELL & SAFE TELEGRAM AUDIT SUITE")
@@ -326,9 +416,10 @@ def run_all_tests():
     assert test_anti_spam_cooldown_and_resets()
     assert test_telegram_safe_fallback()
     assert test_hud_minute_format()
+    assert test_occlusion_and_spatial_memory()
 
     print("\n" + "=" * 60)
-    print("ALL 5 AUDIT TESTS PASSED SUCCESSFULLY! (100% COMPLIANT)")
+    print("ALL 6 AUDIT TESTS PASSED SUCCESSFULLY! (100% COMPLIANT)")
     print("=" * 60)
 
 

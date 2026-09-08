@@ -238,9 +238,13 @@ class VisualHUD:
 
             # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT)
             is_alert = (getattr(obj, "is_triggered", False) or dwell >= dwell_max)
+            is_occluded = getattr(obj, "is_occluded", False)
             if is_attended:
                 box_color = COLOR_SAFE
                 badge_text = f"ID {track_id} | Objek [AMAN]"
+            elif is_occluded:
+                box_color = (0, 215, 255)  # Amber / Soft Gold
+                badge_text = f"ID {track_id} | Objek [TERTUTUP] ({dwell_str})"
             elif is_alert:
                 box_color = (0, 0, 255) if blink_state else (0, 165, 255)
                 badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m)"
