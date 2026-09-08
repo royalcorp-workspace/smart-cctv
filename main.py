@@ -90,7 +90,7 @@ class CameraPipeline:
             base_resolution=self.roi_base_resolution,
         )
         self.tracker = CentroidTracker(
-            max_distance_px=60.0,
+            max_distance_px=80.0,
             movement_threshold_px=15.0,
             anchor_radius_px=40.0,
             flicker_tolerance_sec=2.0,
@@ -385,7 +385,7 @@ class CameraPipeline:
         bag_box: Tuple[int, int, int, int],
         bag_centroid: Tuple[int, int],
         person_boxes: List[Tuple[int, int, int, int]],
-        iof_threshold: float = 0.3,
+        iof_threshold: float = 0.60,
     ) -> bool:
         """Check if bag centroid is inside any person box or has IoF > 0.3 (carried bag)."""
         bx, by, bw, bh = bag_box
@@ -533,8 +533,8 @@ class CameraPipeline:
                     continue
 
                 # 2. Filter overlap / carried bag suppression:
-                # Discard if centroid is inside person box or IoF > 0.3
-                if self._is_bag_overlapping_person((bx, by, bw, bh), (bcx, bcy), person_boxes):
+                # Discard if centroid is inside person box or IoF > 0.60
+                if self._is_bag_overlapping_person((bx, by, bw, bh), (bcx, bcy), person_boxes, iof_threshold=0.60):
                     continue
 
                 # Ghost Artifact Elimination (uncovered flat floor verification)
@@ -545,8 +545,8 @@ class CameraPipeline:
                     crop_edges = int(np.count_nonzero(cv2.Canny(crop_gray, 40, 120)))
                     edge_density = crop_edges / float(max(1, bw * bh))
                     # Flat bare floor revealed upon object removal has near-zero variance and edges.
-                    # Real bags have rich textures, zippers, straps (variance > 80, edges > 40, density > 0.035)
-                    if crop_var < 80.0 or crop_edges < 40 or edge_density < 0.035:
+                    # Discard bare floor ghost blob only if ALL criteria confirm flat bare floor
+                    if crop_var < 40.0 and crop_edges < 20 and edge_density < 0.015:
                         continue  # Discard bare floor ghost blob
 
                 area = float(bw * bh)
@@ -581,7 +581,7 @@ class CameraPipeline:
                         continue
 
                     # 2. Filter overlap / carried bag suppression
-                    if self._is_bag_overlapping_person(bbox, centroid, person_boxes):
+                    if self._is_bag_overlapping_person(bbox, centroid, person_boxes, iof_threshold=0.60):
                         continue
 
                     # Bags detected by YOLO (margin 8.0 px for overhead angle tolerance)

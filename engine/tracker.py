@@ -124,7 +124,7 @@ class TrackedObject:
         if is_bag or self.is_stationary:
             return self.missed_frames <= 600
 
-        return self.edge_distance >= 8.0 and self.missed_frames <= 10
+        return self.edge_distance >= 8.0 and self.missed_frames <= 20
 
 
 class CentroidTracker:
@@ -132,7 +132,7 @@ class CentroidTracker:
 
     def __init__(
         self,
-        max_distance_px: float = 60.0,
+        max_distance_px: float = 80.0,
         movement_threshold_px: float = 15.0,
         anchor_radius_px: float = 40.0,
         flicker_tolerance_sec: float = 2.0,
@@ -401,7 +401,8 @@ class CentroidTracker:
                 if min(dist_matrix[row, col], d_anchor) > self.max_distance_px and max(box_iou, anchor_iou) < 0.20:
                     continue
             else:
-                if dist_matrix[row, col] > self.max_distance_px:
+                box_iou = compute_bbox_iou(obj.bbox, bbox)
+                if dist_matrix[row, col] > self.max_distance_px and box_iou < 0.15:
                     continue
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
@@ -601,7 +602,7 @@ class CentroidTracker:
                     compute_bbox_iou(getattr(ex_obj, "anchor_bbox", ex_obj.bbox), det_bbox),
                 )
 
-                if best_d <= min_existing_dist or (is_det_bag and box_iou >= 0.15):
+                if best_d <= min_existing_dist or box_iou >= 0.15:
                     if best_d < min_existing_dist:
                         min_existing_dist = best_d
                         matched_existing = ex_obj
