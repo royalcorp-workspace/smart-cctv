@@ -242,20 +242,33 @@ def test_periodic_storage_and_disk_guard():
         assert len(list(snap_dir.glob("*.jpg"))) == 0
         print(" - [PASS] Emergency FIFO purge deleted oldest snapshots successfully.")
 
-        # Test DiskGuardWorker lifecycle
+        # Verify production default thresholds
+        DiskGuardWorker.reset_instance()
+        default_worker = DiskGuardWorker()
+        assert default_worker.min_free_gb == 5.0, f"Expected 5.0, got {default_worker.min_free_gb}"
+        assert default_worker.max_usage_percent == 90.0, f"Expected 90.0, got {default_worker.max_usage_percent}"
+        assert default_worker.check_disk_interval_sec == 300.0, f"Expected 300.0, got {default_worker.check_disk_interval_sec}"
+        DiskGuardWorker.reset_instance()
+        print(" - [PASS] DiskGuardWorker default production thresholds verified (min_free=5.0GB, max_usage=90.0%, check=300s).")
+
+        # Test DiskGuardWorker lifecycle with isolated instance
+        DiskGuardWorker.reset_instance()
         worker = DiskGuardWorker(
             retention_interval_sec=3600.0,
             check_disk_interval_sec=1.0,
             retention_days=30,
             min_free_gb=5.0,
+            max_usage_percent=90.0,
         )
         worker.start()
         time.sleep(0.2)
         assert worker._thread is not None and worker._thread.is_alive()
         worker.stop()
         assert not worker._thread.is_alive()
+        DiskGuardWorker.reset_instance()
         print(" - [PASS] DiskGuardWorker background daemon starts and stops cleanly.")
     finally:
+        DiskGuardWorker.reset_instance()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

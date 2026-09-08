@@ -226,12 +226,16 @@ class DiskGuardWorker:
         retention_days: int = 30,
         min_free_gb: float = 5.0,
         max_usage_percent: float = 90.0,
+        check_interval_sec: Optional[float] = None,
     ) -> None:
         if getattr(self, "_initialized", False):
             return
 
+        eff_check_interval = check_interval_sec if check_interval_sec is not None else check_disk_interval_sec
+
         self.retention_interval_sec = retention_interval_sec
-        self.check_disk_interval_sec = check_disk_interval_sec
+        self.check_disk_interval_sec = eff_check_interval
+        self.check_interval_sec = eff_check_interval
         self.retention_days = retention_days
         self.min_free_gb = min_free_gb
         self.max_usage_percent = max_usage_percent
@@ -239,6 +243,14 @@ class DiskGuardWorker:
         self._stopped = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._initialized = True
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Reset singleton instance so tests or production can start with a clean state."""
+        with cls._lock:
+            if cls._instance is not None:
+                cls._instance.stop()
+            cls._instance = None
 
     def start(self) -> None:
         """Start the background daemon worker."""
@@ -250,7 +262,7 @@ class DiskGuardWorker:
         self._thread.start()
         logger.info(
             f"[DiskGuard] Background worker started (retention every {self.retention_interval_sec / 3600:.1f}h, "
-            f"disk check every {self.check_disk_interval_sec:.0f}s, min_free={self.min_free_gb}GB)."
+            f"disk check every {self.check_disk_interval_sec:.0f}s, min_free={self.min_free_gb}GB, max_usage={self.max_usage_percent}%)."
         )
 
     def _run(self) -> None:

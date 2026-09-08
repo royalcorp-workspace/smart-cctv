@@ -1166,7 +1166,14 @@ def main() -> None:
     cleanup_old_records(retention_days=30)
 
     # Start background Disk Guard (6-hour retention & low-disk emergency failsafe)
-    disk_guard = DiskGuardWorker()
+    DiskGuardWorker.reset_instance()
+    disk_guard = DiskGuardWorker(
+        retention_interval_sec=21600.0,
+        check_disk_interval_sec=300.0,
+        retention_days=30,
+        min_free_gb=5.0,
+        max_usage_percent=90.0,
+    )
     disk_guard.start()
 
     workspace_dir = Path(__file__).resolve().parent
