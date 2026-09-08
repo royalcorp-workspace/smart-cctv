@@ -498,11 +498,11 @@ class CameraPipeline:
 
             last_valid_frame_time = now
 
-            # Expire recently retrieved bags older than 60.0s
+            # Expire recently retrieved bags older than 120.0s
             if self._recently_retrieved_bags:
                 self._recently_retrieved_bags = {
                     tid: info for tid, info in self._recently_retrieved_bags.items()
-                    if (now - info["time"]) <= 60.0
+                    if (now - info["time"]) <= 120.0
                 }
 
             # Target resolution normalization (Display frame)
@@ -592,7 +592,7 @@ class CameraPipeline:
                     d_r = float(np.hypot(bcx - rcx, bcy - rcy))
                     d_ra = float(np.hypot(bcx - r_anch[0], bcy - r_anch[1]))
                     iou_r = compute_bbox_iou((bx, by, bw, bh), r_box)
-                    if min(d_r, d_ra) < 60.0 or iou_r > 0.15:
+                    if min(d_r, d_ra) < 75.0 or iou_r > 0.15:
                         is_near_retrieved = True
                         break
 
@@ -603,32 +603,53 @@ class CameraPipeline:
                         d_c = float(np.hypot(bcx - trk.centroid[0], bcy - trk.centroid[1]))
                         d_a = float(np.hypot(bcx - trk.anchor_centroid[0], bcy - trk.anchor_centroid[1]))
                         iou_b = compute_bbox_iou((bx, by, bw, bh), getattr(trk, "anchor_bbox", trk.bbox))
-                        if min(d_c, d_a) < 60.0 or iou_b > 0.15:
-                            if (now - getattr(trk, "last_person_near_time", 0.0)) <= 2.0 or (now - getattr(trk, "last_occluded_time", 0.0)) <= 2.0:
+                        if min(d_c, d_a) < 75.0 or iou_b > 0.15:
+                            if (now - getattr(trk, "last_person_near_time", 0.0)) <= 2.5 or (now - getattr(trk, "last_occluded_time", 0.0)) <= 2.5:
                                 is_near_active_bag_with_person = True
                                 break
 
-                if is_near_retrieved or is_near_active_bag_with_person:
-                    # Verify whether YOLO confirms any bag at this location (confidence > 0.15)
-                    yolo_bag_confirmed = False
-                    for y_box, y_cent, _, y_conf, y_cid, _ in yolo_results:
-                        if y_cid in (24, 26, 28) and y_conf > 0.15:
-                            d_yb = float(np.hypot(bcx - y_cent[0], bcy - y_cent[1]))
-                            iou_yb = compute_bbox_iou((bx, by, bw, bh), y_box)
-                            if d_yb < 60.0 or iou_yb > 0.15:
-                                yolo_bag_confirmed = True
+                # YOLO Verification Gate for DualSubtractor Blobs:
+                # 1. Current frame YOLO confirmation (confidence > 0.15)
+                has_current_yolo = False
+                for y_box, y_cent, _, y_conf, y_cid, _ in yolo_results:
+                    if y_cid in (24, 26, 28) and y_conf > 0.15:
+                        d_yb = float(np.hypot(bcx - y_cent[0], bcy - y_cent[1]))
+                        iou_yb = compute_bbox_iou((bx, by, bw, bh), y_box)
+                        if d_yb < 75.0 or iou_yb > 0.15:
+                            has_current_yolo = True
+                            break
+
+                # 2. Active track confirmed by YOLO within <= 5.0 seconds
+                has_recent_yolo_track = False
+                for trk in self.tracker.objects.values():
+                    if trk.class_label in ("tas", "backpack", "handbag", "suitcase"):
+                        d_tc = float(np.hypot(bcx - trk.centroid[0], bcy - trk.centroid[1]))
+                        d_ta = float(np.hypot(bcx - trk.anchor_centroid[0], bcy - trk.anchor_centroid[1]))
+                        iou_trk = compute_bbox_iou((bx, by, bw, bh), getattr(trk, "anchor_bbox", trk.bbox))
+                        if min(d_tc, d_ta) < 75.0 or iou_trk > 0.15:
+                            if (now - getattr(trk, "last_yolo_seen_time", 0.0)) <= 5.0:
+                                has_recent_yolo_track = True
                                 break
 
-                    if not yolo_bag_confirmed:
-                        logger.debug(
-                            f"[{self.camera_id}] Discarded ghost tile blob at ({bcx}, {bcy}) "
-                            f"(retrieved/interaction location without YOLO bag confirmation > 0.15)."
-                        )
-                        continue  # DISCARD ghost tile blob!
+                if (is_near_retrieved or is_near_active_bag_with_person) and not has_current_yolo:
+                    logger.debug(
+                        f"[{self.camera_id}] Discarded ghost tile blob at ({bcx}, {bcy}) "
+                        f"(retrieved/interaction location without YOLO bag confirmation > 0.15)."
+                    )
+                    continue  # DISCARD ghost tile blob!
+
+                # DualSubtractor Gate: Forbid bare floor/tile from creating or sustaining a bag
+                # without current YOLO bag detection OR active track seen by YOLO within 5.0s
+                if not has_current_yolo and not has_recent_yolo_track:
+                    logger.debug(
+                        f"[{self.camera_id}] Discarded unconfirmed DualSubtractor blob at ({bcx}, {bcy}) "
+                        f"(No YOLO bag on current frame and no active track confirmed by YOLO within 5.0s)."
+                    )
+                    continue
 
                 area = float(bw * bh)
                 formatted_detections.append(
-                    ((bx, by, bw, bh), (bcx, bcy), bzone, area, "tas", 20.0, 0.95)
+                    ((bx, by, bw, bh), (bcx, bcy), bzone, area, "tas", 20.0, 0.95, "subtractor")
                 )
 
             # 2b. Add YOLO detections (Persons and valid non-carried bags)
@@ -643,14 +664,14 @@ class CameraPipeline:
                     area = float(bbox[2] * bbox[3])
                     if matched_zone is not None:
                         formatted_detections.append(
-                            (bbox, centroid, matched_zone, area, "person", edge_dist, float(conf))
+                            (bbox, centroid, matched_zone, area, "person", edge_dist, float(conf), "yolo")
                         )
                     else:
                         # Also track person near any monitored zone (within 150 px) for universal owner proximity
                         dist_to_nearest = self.zone_filter.get_distance_to_nearest_zone(ref_point)
                         if dist_to_nearest >= -150.0:
                             formatted_detections.append(
-                                (bbox, centroid, "outside_zone", area, "person", dist_to_nearest, float(conf))
+                                (bbox, centroid, "outside_zone", area, "person", dist_to_nearest, float(conf), "yolo")
                             )
                 elif is_bag:
                     # 3. Filter batas aspek rasio & dimensi tas
@@ -685,22 +706,23 @@ class CameraPipeline:
                                 if ((d_c[0] - centroid[0]) ** 2 + (d_c[1] - centroid[1]) ** 2) ** 0.5 < 50.0:
                                     # Refine with YOLO bounding box and confidence
                                     formatted_detections[idx_d] = (
-                                        bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf)
+                                        bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf), "yolo"
                                     )
                                     is_dup = True
                                     break
                         if not is_dup:
                             formatted_detections.append(
-                                (bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf))
+                                (bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf), "yolo")
                             )
 
             # 3. Tracking & Dwell Classification
             active_tracks, purged_tracks = self.tracker.update(formatted_detections, timestamp=now)
             self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
 
-            # Record retrieved bags for ghost tile suppression
+            # Record retrieved / departing stationary bags for ghost tile suppression
             for purged in purged_tracks:
-                if getattr(purged, "is_retrieved", False):
+                is_purged_bag = getattr(purged, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+                if getattr(purged, "is_retrieved", False) or (is_purged_bag and getattr(purged, "is_stationary", False)):
                     self._recently_retrieved_bags[purged.track_id] = {
                         "centroid": purged.centroid,
                         "anchor_centroid": purged.anchor_centroid,

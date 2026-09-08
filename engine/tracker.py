@@ -47,6 +47,7 @@ class SpatialMemoryEntry:
     dwell_threshold: float = 3600.0
     last_owner_info: Optional[Dict[str, Any]] = None
     anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    last_yolo_seen_time: float = 0.0
     associated_face_crop: Optional[Any] = None
     associated_face_meta: Optional[Dict[str, Any]] = None
     associated_person_crop: Optional[Any] = None
@@ -94,6 +95,7 @@ class TrackedObject:
     is_retrieved: bool = False
     last_person_near_time: float = 0.0
     last_physical_contact_time: float = 0.0  # Set only when person has real IoU/IoF overlap (>0.20/>0.30) with bag
+    last_yolo_seen_time: float = 0.0
     associated_face_crop: Optional[Any] = None
     associated_face_meta: Optional[Dict[str, Any]] = None
     associated_person_crop: Optional[Any] = None
@@ -205,6 +207,15 @@ class CentroidTracker:
             ix2 = min(bx + bw, px + pw)
             iy2 = min(by + bh, py + ph)
             if ix2 > ix1 and iy2 > iy1:
+                # Real physical overlap detected
+                inter = float((ix2 - ix1) * (iy2 - iy1))
+                bag_area = float(max(1, bw * bh))
+                person_area = float(max(1, pw * ph))
+                union_a = bag_area + person_area - inter
+                iou_val = inter / union_a if union_a > 0 else 0.0
+                iof_val = inter / bag_area if bag_area > 0 else 0.0
+                if iof_val > 0.30 or iou_val > 0.20 or (px <= bcx <= (px + pw) and py <= bcy <= (py + ph)):
+                    obj.last_physical_contact_time = time.time()
                 return True
 
             if min(d_cent, d_anch, d_foot) < 80.0:
@@ -225,6 +236,14 @@ class CentroidTracker:
                 ix2 = min(bx + bw, tx + tw)
                 iy2 = min(by + bh, ty + th)
                 if ix2 > ix1 and iy2 > iy1:
+                    inter = float((ix2 - ix1) * (iy2 - iy1))
+                    bag_area = float(max(1, bw * bh))
+                    person_area = float(max(1, tw * th))
+                    union_a = bag_area + person_area - inter
+                    iou_val = inter / union_a if union_a > 0 else 0.0
+                    iof_val = inter / bag_area if bag_area > 0 else 0.0
+                    if iof_val > 0.30 or iou_val > 0.20 or (tx <= bcx <= (tx + tw) and ty <= bcy <= (ty + th)):
+                        obj.last_physical_contact_time = time.time()
                     return True
 
                 if min(d_cent, d_anch, d_foot) < 80.0:
@@ -343,6 +362,7 @@ class CentroidTracker:
             moved_confirmation_frames=0,
             last_moved_time=0.0,
             last_physical_contact_time=0.0,
+            last_yolo_seen_time=getattr(entry, "last_yolo_seen_time", 0.0),
             associated_face_crop=rec_face_crop,
             associated_face_meta=rec_meta,
             associated_person_crop=rec_person_crop,
@@ -368,6 +388,7 @@ class CentroidTracker:
         label: Optional[str] = None,
         edge_dist: float = 20.0,
         conf: float = 0.0,
+        last_yolo_seen_time: float = 0.0,
     ) -> TrackedObject:
         """Register a new tracked object."""
         if label is None:
@@ -401,6 +422,7 @@ class CentroidTracker:
             frame_count=1,
             moved_confirmation_frames=0,
             last_moved_time=0.0,
+            last_yolo_seen_time=last_yolo_seen_time,
         )
         self.objects[self._next_id] = new_obj
         self._next_id += 1
@@ -438,11 +460,10 @@ class CentroidTracker:
                 obj.missed_frames += 1
                 if obj.is_stationary:
                     obj.stationary_start = now - obj.dwell_duration
-                    # HARDENED is_retrieved: require both missed_frames >= 15 AND confirmed physical
-                    # contact (IoU/IoF overlap) within the last 1.0 second. Mere proximity (80px)
-                    # without physical contact is treated as normal occlusion — NOT retrieval.
-                    has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 1.0
-                    if obj.missed_frames >= 15 and has_physical_contact and not getattr(obj, "is_occluded", False):
+                    # HARDENED is_retrieved: require both missed_frames >= 10 AND confirmed physical
+                    # contact (IoU/IoF overlap) within the last 2.5 seconds.
+                    has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 2.5
+                    if obj.missed_frames >= 10 and has_physical_contact and not getattr(obj, "is_occluded", False):
                         obj.is_retrieved = True
                         obj.missed_frames = getattr(self, "stationary_max_age_frames", 900) + 1
                         logger.info(
@@ -459,14 +480,20 @@ class CentroidTracker:
                 det_label = det[4] if len(det) >= 5 else None
                 edge_dist = float(det[5]) if len(det) >= 6 else 20.0
                 conf = float(det[6]) if len(det) >= 7 else 0.0
+                det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
                 matched_spatial = self._match_spatial_memory(centroid, bbox, zone_id, det_label, now)
                 if matched_spatial is not None:
-                    self._recover_from_spatial_memory(
+                    recovered = self._recover_from_spatial_memory(
                         matched_spatial, centroid, bbox, zone_id, area, det_label, edge_dist, conf, now
                     )
+                    if det_source == "yolo":
+                        recovered.last_yolo_seen_time = now
                 else:
-                    self._register(centroid, bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
+                    self._register(
+                        centroid, bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf,
+                        last_yolo_seen_time=(now if det_source == "yolo" else 0.0)
+                    )
             return list(self.objects.values()), []
 
         # Build distance matrix between existing objects and incoming detections
@@ -516,6 +543,7 @@ class CentroidTracker:
                     continue
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
+            det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
             # 1. EMA Centroid Smoothing: centroid = alpha * new_centroid + (1 - alpha) * old_centroid (alpha = 0.3)
             old_cx, old_cy = obj.centroid
@@ -542,6 +570,8 @@ class CentroidTracker:
 
             obj.confidence = conf
             obj.frame_count += 1
+            if det_source == "yolo":
+                obj.last_yolo_seen_time = now
 
             # 2. Sticky Stationary State Machine for Baggage
             is_bag_obj = (det_label or obj.class_label) in ("tas", "backpack", "handbag", "suitcase")
@@ -665,18 +695,22 @@ class CentroidTracker:
                         # Freeze/Hold dwell time during occlusion
                         unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
                     else:
-                        if unmatched_obj.is_occluded and (now - unmatched_obj.last_occluded_time) < 3.0:
-                            # Hold occluded flag for 3s lingering grace
+                        has_recent_contact = (now - getattr(unmatched_obj, "last_physical_contact_time", 0.0)) <= 2.5
+                        if has_recent_contact:
+                            # Physical contact confirmed and person is no longer covering the bag -> clear occlusion immediately
+                            unmatched_obj.is_occluded = False
+                        elif unmatched_obj.is_occluded and (now - unmatched_obj.last_occluded_time) < 3.0:
+                            # Hold occluded flag for 3s lingering grace (only for non-contact occlusion)
                             unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
                         else:
                             unmatched_obj.is_occluded = False
-                            # Sticky stationary: continue accumulating dwell duration even when YOLO missed detection
-                            if not unmatched_obj.is_attended:
-                                unmatched_obj.dwell_duration = now - unmatched_obj.stationary_start
-                            else:
-                                unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
-                            unmatched_obj.is_warning = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.50)
-                            unmatched_obj.is_pre_alarm = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.85)
+                        # Sticky stationary: continue accumulating dwell duration even when YOLO missed detection
+                        if not unmatched_obj.is_attended:
+                            unmatched_obj.dwell_duration = now - unmatched_obj.stationary_start
+                        else:
+                            unmatched_obj.stationary_start = now - unmatched_obj.dwell_duration
+                        unmatched_obj.is_warning = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.50)
+                        unmatched_obj.is_pre_alarm = (unmatched_obj.dwell_duration >= unmatched_obj.dwell_threshold * 0.85)
 
         # 4. Anti ID Churning Guard for unassigned detections
         # First check active memory within 60 px for bags (or 50px for person); if not found, check Spatial Memory!
@@ -688,6 +722,7 @@ class CentroidTracker:
             det_label = det[4] if len(det) >= 5 else None
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
+            det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
             is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
             max_match_dist = 60.0 if is_det_bag else self.max_distance_px
@@ -734,6 +769,8 @@ class CentroidTracker:
                 matched_existing.edge_distance = edge_dist
                 matched_existing.confidence = conf
                 matched_existing.is_occluded = False
+                if det_source == "yolo":
+                    matched_existing.last_yolo_seen_time = now
                 if det_label is not None:
                     matched_existing.class_label = det_label
                 if zone_id and zone_id != matched_existing.zone_id:
@@ -818,28 +855,45 @@ class CentroidTracker:
                             continue
 
                     # Only register a new ID if completely outside 60 px of ANY known object
-                    self._register(det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf)
+                    self._register(
+                        det_centroid, det_bbox, zone_id, area, now, label=det_label, edge_dist=edge_dist, conf=conf,
+                        last_yolo_seen_time=(now if det_source == "yolo" else 0.0)
+                    )
 
         # 5. Universal owner proximity across all zones
         self.evaluate_owner_proximity(now)
 
-        # 6. Instant Bag Pickup / Retrieval Resolution
-        # HARDENED: require missed_frames >= 15 AND confirmed physical contact (IoU/IoF > 0.20/0.30)
-        # within last 1.0 second. Proximity alone (< 80px) without physical contact = normal occlusion.
+        # 6. Instant Bag Pickup / Retrieval & Exit Zone Resolution
+        # HARDENED: require missed_frames >= 10 (~0.8s) AND confirmed physical contact within last 2.5s.
         for obj_id, obj in list(self.objects.items()):
-            if obj.is_active_this_frame:
+            is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            if not is_bag or not obj.is_stationary or getattr(obj, "is_retrieved", False):
                 continue
 
-            is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if is_bag and obj.is_stationary and obj.missed_frames >= 15:
-                has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 1.0
-                if has_physical_contact and not getattr(obj, "is_occluded", False):
-                    obj.is_retrieved = True
-                    obj.missed_frames = getattr(self, "stationary_max_age_frames", 900) + 1
-                    logger.info(
-                        f"[TRACKER] Bag ID {obj.track_id} RETRIEVED by person (confirmed physical contact, "
-                        f"missed_frames={obj.missed_frames}). Resolving track immediately."
-                    )
+            has_physical_contact = (now - getattr(obj, "last_physical_contact_time", 0.0)) <= 2.5
+
+            # Condition A: Bag missing in zone with confirmed physical contact (Instant Pickup: missed_frames >= 10)
+            is_pickup_missing = (not obj.is_active_this_frame) and (obj.missed_frames >= 10)
+
+            # Condition B: Bag moved outside sterile zone or zone cleared with confirmed physical contact (Exit Zone)
+            is_exit_zone = (obj.zone_id in ("outside_zone", None, "")) or (
+                not obj.is_active_this_frame and obj.missed_frames >= 10
+            )
+
+            # Verify bag position is not currently physically blocked by a person
+            is_currently_blocked = False
+            for (px, py, pw, ph) in person_boxes:
+                if (px - 10) <= obj.centroid[0] <= (px + pw + 10) and (py - 10) <= obj.centroid[1] <= (py + ph + 10):
+                    is_currently_blocked = True
+                    break
+
+            if (is_pickup_missing or is_exit_zone) and has_physical_contact and not is_currently_blocked:
+                obj.is_retrieved = True
+                obj.missed_frames = getattr(self, "stationary_max_age_frames", 900) + 1
+                logger.info(
+                    f"[TRACKER] Bag ID {obj.track_id} RETRIEVED / EXITED ZONE by person (confirmed physical contact within "
+                    f"{now - obj.last_physical_contact_time:.2f}s, missed_frames={obj.missed_frames}). Resolving track immediately."
+                )
 
         # Anti-memory leak: purge tracks unobserved for > max_disappeared_sec (4.5s) or > max_age_frames (45 frames)
         purged = self._purge_stale_objects(now)
@@ -905,6 +959,7 @@ class CentroidTracker:
                     associated_face_crop=getattr(obj, "associated_face_crop", None) if getattr(obj, "associated_face_crop", None) is not None else (obj.last_owner_info.get("face_crop") if getattr(obj, "last_owner_info", None) else None),
                     associated_face_meta=getattr(obj, "associated_face_meta", getattr(obj, "last_owner_info", None)),
                     associated_person_crop=getattr(obj, "associated_person_crop", None) if getattr(obj, "associated_person_crop", None) is not None else (obj.last_owner_info.get("person_crop") if getattr(obj, "last_owner_info", None) else None),
+                    last_yolo_seen_time=getattr(obj, "last_yolo_seen_time", 0.0),
                 )
                 logger.info(
                     f"[TRACKER] Track ID {obj.track_id} archived to Spatial Memory (dwell={obj.dwell_duration:.1f}s, ttl={self.spatial_memory_ttl_sec:.1f}s)"
