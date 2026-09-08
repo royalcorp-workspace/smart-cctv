@@ -54,25 +54,25 @@
     "zone_1_koridor": {
       "name": "Koridor Utama (Walkway)",
       "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_threshold_sec": 300,
+      "dwell_time_threshold": 300.0,
+      "unattended_threshold": 300.0,
       "min_contour_area": 300
     },
     "zone_1__koridor": {
       "name": "Koridor Utama (Walkway)",
       "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_threshold_sec": 300,
+      "dwell_time_threshold": 300.0,
+      "unattended_threshold": 300.0,
       "min_contour_area": 300
     },
     "zone_2_transit": {
       "name": "Area Transit Depan (Penitipan)",
       "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_threshold_sec": 300,
+      "dwell_time_threshold": 300.0,
+      "unattended_threshold": 300.0,
       "min_contour_area": 250,
       "target_classes": [
         "backpack",
@@ -83,9 +83,9 @@
     "zone_2__transit": {
       "name": "Area Transit Depan (Penitipan)",
       "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_threshold_sec": 300,
+      "dwell_time_threshold": 300.0,
+      "unattended_threshold": 300.0,
       "min_contour_area": 250,
       "target_classes": [
         "backpack",

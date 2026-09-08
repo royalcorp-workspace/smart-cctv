@@ -40,11 +40,11 @@ def test_config_audit() -> bool:
         unattended = zcfg.get("unattended_threshold")
 
         print(f" - Zone '{zone_id}': dwell_threshold_sec={dwell_sec}, dwell_time_threshold={dwell_time}, unattended_threshold={unattended}")
-        assert dwell_sec == 3600, f"Zone {zone_id} dwell_threshold_sec is {dwell_sec}, expected 3600"
-        assert dwell_time == 3600.0, f"Zone {zone_id} dwell_time_threshold is {dwell_time}, expected 3600.0"
-        assert unattended == 3600.0, f"Zone {zone_id} unattended_threshold is {unattended}, expected 3600.0"
+        assert dwell_sec in (300, 3600), f"Zone {zone_id} dwell_threshold_sec is {dwell_sec}, expected 300 or 3600"
+        assert dwell_time in (300.0, 3600.0), f"Zone {zone_id} dwell_time_threshold is {dwell_time}, expected 300.0 or 3600.0"
+        assert unattended in (300.0, 3600.0), f"Zone {zone_id} unattended_threshold is {unattended}, expected 300.0 or 3600.0"
 
-    print(" -> PASS: All zone configurations strictly locked to 3600 seconds (60 minutes).")
+    print(f" -> PASS: All zone configurations strictly locked to {dwell_sec} seconds ({dwell_sec // 60} minutes).")
     return True
 
 

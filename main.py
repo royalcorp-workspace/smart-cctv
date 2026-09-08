@@ -773,7 +773,7 @@ class CameraPipeline:
                             is_unattended_z = ("transit" in track.zone_id.lower()) and ("koridor" not in track.zone_id.lower())
                         if not is_unattended_z:
                             continue
-                        dwell_max = float(z_info.get("dwell_threshold_sec", z_info.get("dwell_time_threshold", z_info.get("unattended_threshold", 3600.0))))
+                        dwell_max = float(z_info.get("dwell_threshold_sec", z_info.get("dwell_time_threshold", z_info.get("unattended_threshold", 300.0))))
                         max_str = f"{max(1, int(round(dwell_max / 60.0)))}m"
                         cur_str = f"{track.dwell_duration / 60.0:.1f}m"
                         if getattr(track, "is_occluded", False):
@@ -823,7 +823,7 @@ class CameraPipeline:
                             self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration, owner_name=o_name)
                     continue
 
-                track.dwell_threshold = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
+                track.dwell_threshold = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 300.0))))
 
                 # 3. OWNER PROXIMITY CHECK: If owner is nearby (is_attended = True), disarm trigger
                 if getattr(track, "is_attended", False):
@@ -843,7 +843,7 @@ class CameraPipeline:
 
                 # 4. VIOLATION ONLY FOR UNATTENDED OBJECTS:
                 if track.is_stationary:
-                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
+                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 300.0))))
 
                     # Multi-Stage Alert Escalation:
                     # Stage 1 (Warning 50% Dwell)
@@ -1201,7 +1201,7 @@ class CameraPipeline:
             violations_count = sum(
                 1 for obj in rendering_bags
                 if getattr(obj, "is_triggered", False)
-                or (getattr(obj, "dwell_duration", 0.0) >= getattr(obj, "dwell_threshold", 3600.0) and getattr(obj, "is_stationary", False))
+                or (getattr(obj, "dwell_duration", 0.0) >= getattr(obj, "dwell_threshold", 300.0) and getattr(obj, "is_stationary", False))
             )
             rendering_tracks = [
                 obj for obj in active_tracks

@@ -270,9 +270,15 @@ class TelegramNotifier:
 
         Returns True if enqueued, False if dropped or disabled.
         """
-        # Strict 60-minute threshold: alerts NEVER fire below 3600 seconds
-        if dwell_duration < 3600.0:
-            logger.debug(f"[TelegramNotifier] Dwell duration {dwell_duration:.1f}s < 3600.0s threshold. Alert skipped.")
+        # Strict dwell threshold: reads directly from active zone config, default 3600.0s
+        dwell_thresh = 3600.0
+        if zones and isinstance(zones, dict) and zone_id in zones:
+            z_cfg = zones[zone_id]
+            if isinstance(z_cfg, dict):
+                dwell_thresh = float(z_cfg.get("dwell_threshold_sec", z_cfg.get("dwell_time_threshold", z_cfg.get("unattended_threshold", 3600.0))))
+
+        if dwell_duration < dwell_thresh:
+            logger.debug(f"[TelegramNotifier] Dwell duration {dwell_duration:.1f}s < {dwell_thresh:.1f}s threshold. Alert skipped.")
             return False
 
         if not self.enabled or not self.bot_token or not self.bot_token.strip():

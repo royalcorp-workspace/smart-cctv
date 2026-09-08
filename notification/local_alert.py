@@ -255,7 +255,7 @@ class VisualHUD:
             scy = int(round(obj.centroid[1] * scale_y))
 
             is_attended = getattr(obj, "is_attended", False)
-            dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
+            dwell_max = float(getattr(obj, "dwell_threshold", 300.0))
             max_mins = max(1, int(round(dwell_max / 60.0)))
 
             # User-friendly minute-based dwell time format (strictly no raw seconds)
