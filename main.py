@@ -275,19 +275,19 @@ class CameraPipeline:
         except Exception as e:
             logger.error(f"[{self.camera_id}] Async resolve failed for event {event_id}: {e}")
 
-    def _associate_bag_owners(
+    def _associate_object_actors(
         self,
         active_tracks: List[TrackedObject],
         infer_frame: np.ndarray,
         clean_frame: np.ndarray,
     ) -> None:
-        """Associate stationary bags in monitored zones with nearest/contacting person and YuNet face."""
-        bags = [
+        """Associate tracked objects (tas, ransel, koper, boks, paket, dll.) with nearest/contacting actor."""
+        monitored_objects = [
             t for t in active_tracks
-            if t.class_label in ("tas", "backpack", "handbag", "suitcase")
-            and getattr(t, "is_stationary", False)
+            if t.class_label != "person"
+            and (getattr(t, "is_stationary", False) or getattr(t, "frame_count", 1) <= 15)
         ]
-        if not bags:
+        if not monitored_objects:
             return
 
         persons = [
@@ -298,11 +298,11 @@ class CameraPipeline:
         scale_x = clean_frame.shape[1] / float(infer_frame.shape[1])
         scale_y = clean_frame.shape[0] / float(infer_frame.shape[0])
 
-        for bag in bags:
-            bx, by, bw, bh = bag.bbox
-            bcx, bcy = bag.centroid
-            bag_base = (bx + bw / 2.0, by + bh)
-            adaptive_radius = max(45.0, min(120.0, float(bh * 2.5)))
+        for obj in monitored_objects:
+            bx, by, bw, bh = obj.bbox
+            bcx, bcy = obj.centroid
+            obj_base = (bx + bw / 2.0, by + bh)
+            adaptive_radius = max(60.0, min(120.0, float(bh * 2.5)))
 
             # Find nearest contacting person
             nearest_person = None
@@ -311,13 +311,14 @@ class CameraPipeline:
                 px, py, pw, ph = person.bbox
                 person_foot = (px + pw / 2.0, py + ph)
                 dist = float(
-                    ((bag_base[0] - person_foot[0]) ** 2 + (bag_base[1] - person_foot[1]) ** 2) ** 0.5
+                    ((obj_base[0] - person_foot[0]) ** 2 + (obj_base[1] - person_foot[1]) ** 2) ** 0.5
                 )
 
-                # Overlap or proximity check
+                # Overlap or proximity check (radius <= 120 px or bbox overlap)
                 is_contact = (
                     dist <= adaptive_radius
                     or (px <= bcx <= (px + pw) and py <= bcy <= (py + ph))
+                    or (bx < px + pw and bx + bw > px and by < py + ph and by + bh > py)
                 )
                 if is_contact and dist < min_dist:
                     min_dist = dist
@@ -329,7 +330,16 @@ class CameraPipeline:
                 head_top = py
                 head_bottom = py + head_h
 
-                # Match with cached faces from YuNet
+                # 1. Extract Person Body Crop from Full Resolution Frame
+                pad_px = int(pw * 0.10)
+                pad_py = int(ph * 0.05)
+                pcx1 = max(0, int((px - pad_px) * scale_x))
+                pcy1 = max(0, int((py - pad_py) * scale_y))
+                pcx2 = min(clean_frame.shape[1], int((px + pw + pad_px) * scale_x))
+                pcy2 = min(clean_frame.shape[0], int((py + ph + pad_py) * scale_y))
+                person_crop = clean_frame[pcy1:pcy2, pcx1:pcx2].copy() if (pcx2 > pcx1 and pcy2 > pcy1) else None
+
+                # 2. Match with cached faces from YuNet
                 matched_face = None
                 for face_item in (self._cached_faces or []):
                     if len(face_item) >= 3:
@@ -371,16 +381,30 @@ class CameraPipeline:
                     cy2 = min(clean_frame.shape[0], int(head_bottom * scale_y))
                     face_crop = clean_frame[cy1:cy2, cx1:cx2].copy() if (cx2 > cx1 and cy2 > cy1) else None
 
-                # Update owner info if none exists or if upgraded from Unknown to a known name
-                existing_owner = getattr(bag, "last_owner_info", None)
-                if existing_owner is None or (existing_owner.get("name") == "Unknown" and name != "Unknown"):
-                    bag.last_owner_info = {
+                # Update actor info if none exists or if upgraded from Unknown to a known name
+                existing_actor = getattr(obj, "associated_face_meta", None) or getattr(obj, "last_owner_info", None)
+                if existing_actor is None or (existing_actor.get("name") == "Unknown" and name != "Unknown"):
+                    actor_meta = {
                         "name": name,
                         "confidence": conf,
                         "face_crop": face_crop,
+                        "person_crop": person_crop,
                         "person_bbox": (px, py, pw, ph),
                         "timestamp": time.time(),
                     }
+                    obj.associated_face_meta = actor_meta
+                    obj.associated_face_crop = face_crop
+                    obj.associated_person_crop = person_crop
+                    obj.last_owner_info = actor_meta
+
+    def _associate_bag_owners(
+        self,
+        active_tracks: List[TrackedObject],
+        infer_frame: np.ndarray,
+        clean_frame: np.ndarray,
+    ) -> None:
+        """Backward compatibility alias for _associate_object_actors."""
+        self._associate_object_actors(active_tracks, infer_frame, clean_frame)
 
 
     @staticmethod
@@ -806,6 +830,10 @@ class CameraPipeline:
                     if track.is_triggered:
                         track.is_triggered = False
                         track.alert_sent = False
+                        track.warning_alerted = False
+                        track.pre_alarm_alerted = False
+                        track.is_warning = False
+                        track.is_pre_alarm = False
                         eid = self.active_db_events.pop(track.track_id, track.db_event_id)
                         if eid is not None:
                             z_name = zone_info.get("name", track.zone_id)
@@ -813,14 +841,51 @@ class CameraPipeline:
                             self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration, owner_name=o_name)
                     continue
 
-                # 4. VIOLATION ONLY FOR UNATTENDED BAGS:
+                # 4. VIOLATION ONLY FOR UNATTENDED OBJECTS:
                 if track.is_stationary:
                     dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
 
-                    # Multi-Stage Alert Escalation: Stage 2 (Pre-Alarm 85%) Local Chime
+                    # Multi-Stage Alert Escalation:
+                    # Stage 1 (Warning 50% Dwell)
+                    if track.dwell_duration >= (dwell_thresh * 0.50) and not getattr(track, "warning_alerted", False):
+                        track.warning_alerted = True
+                        track.is_warning = True
+                        logger.warning(
+                            f"[{self.camera_id}] STAGE 1 WARNING: {track.class_label.upper()} #{track.track_id} "
+                            f"mencapai 50% dwell ({track.dwell_duration / 60.0:.1f}m/{dwell_thresh / 60.0:.1f}m) di '{zone_info.get('name', track.zone_id)}'"
+                        )
+                        try:
+                            self.telegram_notifier.dispatch_composite_alert(
+                                camera_id=self.camera_id,
+                                zone_id=track.zone_id,
+                                track=track,
+                                stage="WARNING",
+                                frame=raw_clean_frame,
+                                zone_name=zone_info.get("name", track.zone_id),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Telegram] Error sending warning composite alert: {e}")
+
+                    # Stage 2 (Pre-Alarm 85% Dwell) Local Chime & Telegram Notification
                     if track.dwell_duration >= (dwell_thresh * 0.85) and not getattr(track, "pre_alarm_alerted", False):
                         self.audio_worker.request_pre_alarm_chime()
                         track.pre_alarm_alerted = True
+                        track.is_pre_alarm = True
+                        logger.warning(
+                            f"[{self.camera_id}] STAGE 2 PRE-ALARM: {track.class_label.upper()} #{track.track_id} "
+                            f"mencapai 85% dwell ({track.dwell_duration / 60.0:.1f}m/{dwell_thresh / 60.0:.1f}m) di '{zone_info.get('name', track.zone_id)}'"
+                        )
+                        try:
+                            self.telegram_notifier.dispatch_composite_alert(
+                                camera_id=self.camera_id,
+                                zone_id=track.zone_id,
+                                track=track,
+                                stage="PRE_ALARM",
+                                frame=raw_clean_frame,
+                                zone_name=zone_info.get("name", track.zone_id),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Telegram] Error sending pre-alarm composite alert: {e}")
 
                     if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                         track.is_triggered = True
@@ -1098,6 +1163,15 @@ class CameraPipeline:
 
                     # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
                     try:
+                        self.telegram_notifier.dispatch_composite_alert(
+                            camera_id=self.camera_id,
+                            zone_id=alert["zone_id"],
+                            track=alert["track"],
+                            stage="BREACH",
+                            frame=raw_clean_frame,
+                            zone_name=alert["zone_name"],
+                            timestamp_str=alert["timestamp_str"],
+                        )
                         self.telegram_notifier.dispatch_alert(
                             camera_id=self.camera_id,
                             zone_id=alert["zone_id"],

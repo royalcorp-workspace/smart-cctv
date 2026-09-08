@@ -12,11 +12,13 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import datetime
 import cv2
 import numpy as np
 import requests
 from dotenv import load_dotenv
 
+from engine.composite_builder import generate_composite_evidence, encode_composite_jpg
 from engine.config_loader import ensure_env_loaded, load_camera_config
 from engine.logger import logger
 
@@ -342,6 +344,74 @@ class TelegramNotifier:
         except queue.Full:
             return False
 
+    def dispatch_composite_alert(
+        self,
+        camera_id: str,
+        zone_id: str,
+        track: Any,
+        stage: str,
+        frame: np.ndarray,
+        zone_name: Optional[str] = None,
+        timestamp_str: Optional[str] = None,
+    ) -> bool:
+        """Enqueue side-by-side composite evidence card alert job asynchronously.
+
+        Generates 1200x700 side-by-side card (Object crop on Left, Face/Actor crop on Right)
+        and sends via background worker thread without blocking inference.
+        Returns True if enqueued, False if dropped or disabled.
+        """
+        if not self.enabled or not self.bot_token or not self.bot_token.strip():
+            logger.warning("[Telegram] Credentials not configured, skipping composite alert.")
+            return False
+
+        recipients = self.get_recipients_for_camera(camera_id)
+        if not recipients:
+            logger.warning("[Telegram] Credentials not configured or no recipients, skipping composite alert.")
+            return False
+
+        try:
+            if not timestamp_str:
+                timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Generate composite evidence card image (1200x700 side-by-side)
+            composite_img = generate_composite_evidence(
+                object_track=track,
+                current_frame=frame,
+                stage_name=stage,
+                zone_name=zone_name or zone_id,
+                camera_id=camera_id,
+                timestamp_str=timestamp_str,
+            )
+
+            img_bytes = encode_composite_jpg(composite_img, quality=90)
+            if not img_bytes:
+                logger.error("[TelegramNotifier] Failed to encode composite evidence image to JPEG.")
+                return False
+
+            job = {
+                "type": "composite_alert",
+                "camera_id": camera_id,
+                "zone_id": zone_id,
+                "zone_name": zone_name or zone_id,
+                "track_id": getattr(track, "track_id", 0),
+                "class_label": getattr(track, "class_label", "object"),
+                "stage": stage,
+                "dwell_duration": float(getattr(track, "dwell_duration", 0.0)),
+                "timestamp_str": timestamp_str,
+                "img_bytes": img_bytes,
+                "recipients": recipients,
+                "actor_meta": getattr(track, "associated_face_meta", None) or getattr(track, "last_owner_info", None) or {},
+            }
+
+            self._queue.put_nowait(job)
+            return True
+        except queue.Full:
+            logger.warning("[TelegramNotifier] Alert queue is full! Dropping composite alert.")
+            return False
+        except Exception as e:
+            logger.warning(f"[Telegram] Error enqueuing composite alert ({e}), skipping alert.")
+            return False
+
     def _worker_loop(self) -> None:
         """Daemon worker loop: consumes queue and sends HTTP requests via Telegram Bot API."""
         while not self._stop_event.is_set():
@@ -353,6 +423,8 @@ class TelegramNotifier:
             try:
                 if job.get("type") == "resolution":
                     self._send_resolution_job(job)
+                elif job.get("type") == "composite_alert":
+                    self._send_composite_job(job)
                 else:
                     self._send_job(job)
             except Exception as e:
@@ -489,6 +561,59 @@ class TelegramNotifier:
                         break
                 except Exception as e:
                     logger.warning(f"[TelegramNotifier] Failed to send resolution message: {e}")
+
+    def _send_composite_job(self, job: dict) -> None:
+        """Send composite evidence card to camera recipients via sendPhoto."""
+        camera_id = job["camera_id"]
+        zone_id = job["zone_id"]
+        zone_name = job.get("zone_name", zone_id)
+        display_zone = zone_name if zone_name else zone_id
+        track_id = job["track_id"]
+        class_label = job.get("class_label", "object").upper()
+        dwell = job["dwell_duration"]
+        dwell_min = dwell / 60.0
+        timestamp_str = job["timestamp_str"]
+        stage = job.get("stage", "BREACH").upper()
+        actor_meta = job.get("actor_meta", {})
+        actor_name = actor_meta.get("name", "Tidak Teridentifikasi")
+        actor_conf = float(actor_meta.get("confidence", 0.0))
+        conf_str = f"{int(round(actor_conf * 100))}%" if actor_conf > 0 else "-"
+
+        if "WARN" in stage:
+            header_icon = "⚠️"
+            stage_title = "STAGE 1: WARNING (50% DWELL)"
+            status_desc = "Objek mulai terindikasi diam di zona transit/steril melebihi 50% batas toleransi."
+        elif "PRE" in stage:
+            header_icon = "🚨"
+            stage_title = "STAGE 2: PRE-ALARM (85% DWELL)"
+            status_desc = "Objek mendekati ambang batas kritis (85%). Siapkan verifikasi sebelum eskalasi pelanggaran!"
+        elif "RESOLV" in stage:
+            header_icon = "✅"
+            stage_title = "STAGE 4: RESOLVED"
+            status_desc = "Objek telah dipindahkan atau diambil kembali oleh pemilik/petugas."
+        else:
+            header_icon = "⛔"
+            stage_title = "STAGE 3: CLEAR AREA BREACH (100% DWELL)"
+            status_desc = "Pelanggaran steril terkonfirmasi penuh (100% dwell). Intervensi petugas segera diperlukan!"
+
+        caption = (
+            f"<b>{header_icon} [{stage_title}]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Kamera:</b> <code>{camera_id.upper()}</code>\n"
+            f"<b>Zona:</b> {display_zone}\n"
+            f"<b>Objek:</b> {class_label} #{track_id}\n"
+            f"<b>Akumulasi Dwell:</b> {dwell_min:.1f} Menit\n"
+            f"<b>Pelaku Terakhir:</b> {actor_name} (Kecocokan: {conf_str})\n"
+            f"<b>Waktu:</b> <code>{timestamp_str}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>{status_desc}</i>\n"
+            f"<i>Smart CCTV 2.0 AI Composite Evidence</i>"
+        )
+
+        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
+        send_photo_url = f"{base_url}/bot{self.bot_token}/sendPhoto"
+        for chat_id in job.get("recipients", []):
+            self._send_photo_with_retry(send_photo_url, chat_id, job["img_bytes"], caption)
 
     def _send_media_group_with_retry(
         self,

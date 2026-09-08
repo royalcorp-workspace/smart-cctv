@@ -47,6 +47,9 @@ class SpatialMemoryEntry:
     dwell_threshold: float = 3600.0
     last_owner_info: Optional[Dict[str, Any]] = None
     anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    associated_face_crop: Optional[Any] = None
+    associated_face_meta: Optional[Dict[str, Any]] = None
+    associated_person_crop: Optional[Any] = None
 
 
 @dataclass
@@ -82,6 +85,7 @@ class TrackedObject:
     last_occluded_time: float = 0.0
     last_owner_info: Optional[Dict[str, Any]] = None
     is_warning: bool = False
+    warning_alerted: bool = False
     is_pre_alarm: bool = False
     pre_alarm_alerted: bool = False
     anchor_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
@@ -89,6 +93,19 @@ class TrackedObject:
     last_moved_time: float = 0.0
     is_retrieved: bool = False
     last_person_near_time: float = 0.0
+    associated_face_crop: Optional[Any] = None
+    associated_face_meta: Optional[Dict[str, Any]] = None
+    associated_person_crop: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        if self.associated_face_meta is not None and self.last_owner_info is None:
+            self.last_owner_info = self.associated_face_meta
+        elif self.last_owner_info is not None and self.associated_face_meta is None:
+            self.associated_face_meta = self.last_owner_info
+        if self.associated_face_crop is None and self.last_owner_info:
+            self.associated_face_crop = self.last_owner_info.get("face_crop")
+        if self.associated_person_crop is None and self.last_owner_info:
+            self.associated_person_crop = self.last_owner_info.get("person_crop")
 
     @property
     def is_static_artifact(self) -> bool:
@@ -222,11 +239,12 @@ class CentroidTracker:
         label: Optional[str],
         now: float,
     ) -> Optional[SpatialMemoryEntry]:
-        """Search spatial memory cache for a matching previously observed stationary bag."""
+        """Search spatial memory cache for a matching previously observed stationary object."""
         det_label = label if label is not None else ("tas" if zone_id else "person")
-        BAG_CLASSES = ("tas", "backpack", "handbag", "suitcase")
-        if det_label not in BAG_CLASSES:
+        if det_label == "person":
             return None
+
+        BAG_FAMILY = ("tas", "backpack", "handbag", "suitcase", "koper", "ransel")
 
         best_entry: Optional[SpatialMemoryEntry] = None
         min_dist = max(60.0, self.spatial_match_distance_px)
@@ -235,8 +253,11 @@ class CentroidTracker:
             if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec:
                 continue
 
-            # Allow cross-class matching among any bag family (e.g. backpack <-> handbag <-> tas)
-            if entry.class_label not in BAG_CLASSES:
+            if entry.class_label == "person":
+                continue
+
+            is_both_bags = (det_label in BAG_FAMILY and entry.class_label in BAG_FAMILY)
+            if not is_both_bags and entry.class_label != det_label:
                 continue
 
             # Check Euclidean distance to anchor and last observed centroid
@@ -275,6 +296,14 @@ class CentroidTracker:
         saved_anchor_bbox = getattr(entry, "anchor_bbox", bbox)
         if saved_anchor_bbox == (0, 0, 0, 0):
             saved_anchor_bbox = bbox
+        rec_face_crop = getattr(entry, "associated_face_crop", None)
+        if rec_face_crop is None and entry.last_owner_info:
+            rec_face_crop = entry.last_owner_info.get("face_crop")
+        rec_person_crop = getattr(entry, "associated_person_crop", None)
+        if rec_person_crop is None and entry.last_owner_info:
+            rec_person_crop = entry.last_owner_info.get("person_crop")
+        rec_meta = getattr(entry, "associated_face_meta", None) or entry.last_owner_info
+
         recovered_obj = TrackedObject(
             track_id=entry.track_id,
             centroid=centroid,
@@ -307,10 +336,14 @@ class CentroidTracker:
             last_occluded_time=0.0,
             last_owner_info=entry.last_owner_info,
             is_warning=(entry.accumulated_dwell >= entry.dwell_threshold * 0.50),
+            warning_alerted=(entry.accumulated_dwell >= entry.dwell_threshold * 0.50),
             is_pre_alarm=(entry.accumulated_dwell >= entry.dwell_threshold * 0.85),
-            pre_alarm_alerted=False,
+            pre_alarm_alerted=(entry.accumulated_dwell >= entry.dwell_threshold * 0.85),
             moved_confirmation_frames=0,
             last_moved_time=0.0,
+            associated_face_crop=rec_face_crop,
+            associated_face_meta=rec_meta,
+            associated_person_crop=rec_person_crop,
         )
         self.objects[entry.track_id] = recovered_obj
         if entry.track_id in self.spatial_memory:
@@ -861,8 +894,11 @@ class CentroidTracker:
                     contour_area=obj.contour_area,
                     confidence=obj.confidence,
                     dwell_threshold=obj.dwell_threshold,
-                    last_owner_info=getattr(obj, "last_owner_info", None),
+                    last_owner_info=getattr(obj, "last_owner_info", None) or getattr(obj, "associated_face_meta", None),
                     anchor_bbox=getattr(obj, "anchor_bbox", obj.bbox),
+                    associated_face_crop=getattr(obj, "associated_face_crop", None) if getattr(obj, "associated_face_crop", None) is not None else (obj.last_owner_info.get("face_crop") if getattr(obj, "last_owner_info", None) else None),
+                    associated_face_meta=getattr(obj, "associated_face_meta", getattr(obj, "last_owner_info", None)),
+                    associated_person_crop=getattr(obj, "associated_person_crop", None) if getattr(obj, "associated_person_crop", None) is not None else (obj.last_owner_info.get("person_crop") if getattr(obj, "last_owner_info", None) else None),
                 )
                 logger.info(
                     f"[TRACKER] Track ID {obj.track_id} archived to Spatial Memory (dwell={obj.dwell_duration:.1f}s, ttl={self.spatial_memory_ttl_sec:.1f}s)"
