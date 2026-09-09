@@ -134,6 +134,12 @@ class YOLOOpenVINODetector:
             cy = y1 + h // 2
             cname = self.TARGET_CLASSES.get(cid, "object")
 
+            # Geometric sanity filter: discard tiny floor blobs or flat lying objects (e.g. plastic sacks, trash)
+            if cid == 0:
+                aspect_ratio = float(h) / max(1.0, float(w))
+                if h < 60 or aspect_ratio < 1.0:
+                    continue
+
             # Accurate reference point:
             # Person: center-bottom / feet (contact point with floor)
             # Bag: center of mass

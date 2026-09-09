@@ -775,6 +775,12 @@ class CameraPipeline:
                 is_bag = cid in (24, 26, 28)
 
                 if cid == 0:  # person
+                    # Geometric sanity filter: eliminate flat floor items (plastic bags, trash) falsely detected as persons
+                    p_w, p_h = bbox[2], bbox[3]
+                    p_ratio = float(p_h) / max(1.0, float(p_w))
+                    if p_h < 60 or p_ratio < 1.0:
+                        continue
+
                     # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px
                     matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
                         ref_point, margin_px=10.0
@@ -1208,89 +1214,116 @@ class CameraPipeline:
                                 crop_roi=eval_head_rois,
                             )
                             if detected_faces:
-                                best_item = max(detected_faces, key=lambda it: it[1])
-                                bbox_f, f_det_score = best_item[0], best_item[1]
-                                raw_f_640 = best_item[2] if len(best_item) >= 3 else None
-                                raw_f_1080 = best_item[3] if len(best_item) >= 4 else None
+                                # Ensure detected face is spatially anchored to eval_track body/head
+                                px, py, pw, ph = eval_track.bbox
+                                track_anchored_faces = []
+                                for item in detected_faces:
+                                    bx, by, bw, bh = item[0]
+                                    bcx = bx + bw // 2
+                                    bcy = by + bh // 2
+                                    if (px - 25) <= bcx <= (px + pw + 25) and (py - 25) <= bcy <= (py + ph + 10):
+                                        track_anchored_faces.append(item)
 
-                                # 2. FACE QUALITY GATE BERBASIS LANDMARK (Bypass SFace on side-profile/extreme yaw)
-                                face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
-                                is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
-                                    face_landmark_data,
-                                    min_eye_dist_ratio=0.22,
-                                    min_symmetry_ratio=0.20,
-                                    min_score=0.60,
-                                )
+                                if track_anchored_faces:
+                                    best_item = max(track_anchored_faces, key=lambda it: it[1])
+                                    bbox_f, f_det_score = best_item[0], best_item[1]
+                                    raw_f_640 = best_item[2] if len(best_item) >= 3 else None
+                                    raw_f_1080 = best_item[3] if len(best_item) >= 4 else None
 
-                                prev_cache = self._person_face_recog.get(eval_track.track_id)
-                                prev_known = prev_cache and prev_cache.get("is_known", False)
-
-                                if not is_frontal:
-                                    logger.debug(
-                                        f"[{self.camera_id}] Track #{eval_track.track_id} face quality gate bypass: {quality_reason}"
+                                    # 2. FACE QUALITY GATE BERBASIS LANDMARK (Bypass SFace on side-profile/extreme yaw)
+                                    face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
+                                    is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
+                                        face_landmark_data,
+                                        min_eye_dist_ratio=0.22,
+                                        min_symmetry_ratio=0.20,
+                                        min_score=0.60,
                                     )
-                                    if prev_cache:
-                                        prev_cache["last_eval_time"] = now
-                                        prev_cache["last_eval_frame"] = self._face_frame_index
+
+                                    prev_cache = self._person_face_recog.get(eval_track.track_id)
+                                    prev_known = prev_cache and prev_cache.get("is_known", False)
+
+                                    if not is_frontal:
+                                        logger.debug(
+                                            f"[{self.camera_id}] Track #{eval_track.track_id} face quality gate bypass: {quality_reason}"
+                                        )
+                                        if prev_cache:
+                                            prev_cache["last_eval_time"] = now
+                                            prev_cache["last_eval_frame"] = self._face_frame_index
+                                        else:
+                                            # First time seen but non-frontal: throttle retry without creating fake face
+                                            self._person_face_recog[eval_track.track_id] = {
+                                                "has_seen_face": False,
+                                                "last_eval_time": now,
+                                                "last_eval_frame": self._face_frame_index,
+                                                "last_frontal_seen_time": 0.0,
+                                            }
                                     else:
-                                        # First time seen but non-frontal: throttle retry without creating fake face
+                                        # Frontal face: execute SFace feature extraction & identity matching
+                                        best_n = "Unknown"
+                                        best_s = 0.0
+                                        face_lbl = "Unknown"
+                                        if self.face_recognition_enabled and self.face_recognizer is not None:
+                                            if raw_f_1080 is not None and display_frame is not None:
+                                                best_n, best_s, face_lbl = self.face_recognizer.recognize(
+                                                    frame=display_frame,
+                                                    face_data=raw_f_1080,
+                                                    min_size=24,
+                                                    check_frontal=False,
+                                                )
+                                            else:
+                                                face_input = raw_f_640 if raw_f_640 is not None else bbox_f
+                                                best_n, best_s, face_lbl = self.face_recognizer.recognize(
+                                                    frame=infer_frame,
+                                                    face_data=face_input,
+                                                    min_size=10,
+                                                    check_frontal=False,
+                                                )
+
+                                        if best_n != "Unknown" and face_lbl != "Unknown":
+                                            self._person_face_recog[eval_track.track_id] = {
+                                                "label": face_lbl,
+                                                "name": best_n,
+                                                "score": best_s,
+                                                "last_eval_time": now,
+                                                "last_eval_frame": self._face_frame_index,
+                                                "last_frontal_seen_time": now,
+                                                "face_bbox_640": bbox_f,
+                                                "face_score": f_det_score,
+                                                "is_known": True,
+                                                "has_seen_face": True,
+                                            }
+                                        else:
+                                            # Unknown / non-match: retain previous known identity if established
+                                            if prev_known:
+                                                prev_cache["last_eval_time"] = now
+                                                prev_cache["last_eval_frame"] = self._face_frame_index
+                                                prev_cache["last_frontal_seen_time"] = now
+                                                prev_cache["face_bbox_640"] = bbox_f
+                                            else:
+                                                self._person_face_recog[eval_track.track_id] = {
+                                                    "label": "Unknown",
+                                                    "name": "Unknown",
+                                                    "score": 0.0,
+                                                    "last_eval_time": now,
+                                                    "last_eval_frame": self._face_frame_index,
+                                                    "last_frontal_seen_time": now,
+                                                    "face_bbox_640": bbox_f,
+                                                    "face_score": f_det_score,
+                                                    "is_known": False,
+                                                    "has_seen_face": True,
+                                                }
+                                else:
+                                    # Faces found elsewhere in buffer did not overlap this person track
+                                    if eval_track.track_id in self._person_face_recog:
+                                        self._person_face_recog[eval_track.track_id]["last_eval_time"] = now
+                                        self._person_face_recog[eval_track.track_id]["last_eval_frame"] = self._face_frame_index
+                                    else:
                                         self._person_face_recog[eval_track.track_id] = {
                                             "has_seen_face": False,
                                             "last_eval_time": now,
                                             "last_eval_frame": self._face_frame_index,
+                                            "last_frontal_seen_time": 0.0,
                                         }
-                                else:
-                                    # Frontal face: execute SFace feature extraction & identity matching
-                                    best_n = "Unknown"
-                                    best_s = 0.0
-                                    face_lbl = "Unknown"
-                                    if self.face_recognition_enabled and self.face_recognizer is not None:
-                                        if raw_f_1080 is not None and display_frame is not None:
-                                            best_n, best_s, face_lbl = self.face_recognizer.recognize(
-                                                frame=display_frame,
-                                                face_data=raw_f_1080,
-                                                min_size=24,
-                                                check_frontal=False,
-                                            )
-                                        else:
-                                            face_input = raw_f_640 if raw_f_640 is not None else bbox_f
-                                            best_n, best_s, face_lbl = self.face_recognizer.recognize(
-                                                frame=infer_frame,
-                                                face_data=face_input,
-                                                min_size=10,
-                                                check_frontal=False,
-                                            )
-
-                                    if best_n != "Unknown" and face_lbl != "Unknown":
-                                        self._person_face_recog[eval_track.track_id] = {
-                                            "label": face_lbl,
-                                            "name": best_n,
-                                            "score": best_s,
-                                            "last_eval_time": now,
-                                            "last_eval_frame": self._face_frame_index,
-                                            "face_bbox_640": bbox_f,
-                                            "face_score": f_det_score,
-                                            "is_known": True,
-                                            "has_seen_face": True,
-                                        }
-                                    else:
-                                        # Unknown / non-match: retain previous known identity if established
-                                        if prev_known:
-                                            prev_cache["last_eval_time"] = now
-                                            prev_cache["last_eval_frame"] = self._face_frame_index
-                                            prev_cache["face_bbox_640"] = bbox_f
-                                        else:
-                                            self._person_face_recog[eval_track.track_id] = {
-                                                "label": "Unknown",
-                                                "name": "Unknown",
-                                                "score": 0.0,
-                                                "last_eval_time": now,
-                                                "last_eval_frame": self._face_frame_index,
-                                                "face_bbox_640": bbox_f,
-                                                "face_score": f_det_score,
-                                                "is_known": False,
-                                                "has_seen_face": True,
-                                            }
                             else:
                                 # Head crop yielded no face (e.g. back of head/hair): throttle retry without creating fake face
                                 if eval_track.track_id in self._person_face_recog:
@@ -1301,24 +1334,33 @@ class CameraPipeline:
                                         "has_seen_face": False,
                                         "last_eval_time": now,
                                         "last_eval_frame": self._face_frame_index,
+                                        "last_frontal_seen_time": 0.0,
                                     }
 
-                        # Synthesize recognized_faces for VisualHUD and telemetry ONLY for tracks with genuine face detections
+                        # Synthesize recognized_faces for VisualHUD and telemetry ONLY for tracks with genuine frontal face detections within grace period
                         recognized_faces = []
                         active_track_ids = {t.track_id for t in active_person_tracks}
 
                         for trk in active_person_tracks:
                             p_info = self._person_face_recog.get(trk.track_id)
                             if p_info is not None and p_info.get("has_seen_face", False):
-                                px, py, pw, ph = trk.bbox
-                                f_box = p_info.get("face_bbox_640")
-                                if not f_box or f_box[2] <= 0 or f_box[3] <= 0 or abs(f_box[0] - px) > (pw * 1.5):
-                                    f_box = (px + pw // 4, py, pw // 2, ph // 3)
-                                f_lbl = p_info.get("label", "Unknown")
-                                f_name = p_info.get("name", "Unknown")
-                                f_score = p_info.get("score", 0.0)
-                                f_det_s = p_info.get("face_score", 0.80)
-                                recognized_faces.append((f_box, f_det_s, f_lbl, f_name, f_score))
+                                # 2.5s grace period: only render face badge if frontal face was seen within last 2.5 seconds
+                                last_frontal = p_info.get("last_frontal_seen_time", 0.0)
+                                if (now - last_frontal) <= 2.5:
+                                    px, py, pw, ph = trk.bbox
+                                    f_box = p_info.get("face_bbox_640")
+                                    # TOTAL ELIMINATION OF SYNTHETIC FALLBACK BOX:
+                                    # Never synthesize fake face box on back of head or floor objects
+                                    if not f_box or f_box[2] <= 0 or f_box[3] <= 0:
+                                        continue
+                                    # Reject if face box drifted far outside person track bbox
+                                    if abs(f_box[0] - px) > (pw * 1.5) or abs(f_box[1] - py) > (ph * 1.2):
+                                        continue
+                                    f_lbl = p_info.get("label", "Unknown")
+                                    f_name = p_info.get("name", "Unknown")
+                                    f_score = p_info.get("score", 0.0)
+                                    f_det_s = p_info.get("face_score", 0.80)
+                                    recognized_faces.append((f_box, f_det_s, f_lbl, f_name, f_score))
 
                         # Purge stale tracks no longer in active_person_tracks
                         if active_track_ids:

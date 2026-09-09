@@ -528,7 +528,7 @@ class YuNetFaceDetector:
             del self._face_buffer[fid]
 
         # Return all active/retained faces from buffer
-        return [
+        all_retained = [
             (
                 bface["bbox"],
                 bface["score"],
@@ -538,6 +538,32 @@ class YuNetFaceDetector:
             )
             for fid, bface in self._face_buffer.items()
         ]
+
+        # If specific crop ROIs were requested, filter results to ensure spatial containment
+        if crop_rois_list and display_frame is not None:
+            disp_h, disp_w = display_frame.shape[:2]
+            filtered = []
+            for item in all_retained:
+                fbx, fby, fbw, fbh = item[0]
+                rf_1080 = item[3]
+                if rf_1080 is not None:
+                    fcx_1080 = float(rf_1080[0]) + float(rf_1080[2]) / 2.0
+                    fcy_1080 = float(rf_1080[1]) + float(rf_1080[3]) / 2.0
+                else:
+                    fcx_1080 = (float(fbx) + float(fbw) / 2.0) * (float(disp_w) / 640.0)
+                    fcy_1080 = (float(fby) + float(fbh) / 2.0) * (float(disp_h) / 360.0)
+
+                inside_any_crop = False
+                for cx1, cy1, cx2, cy2 in crop_rois_list:
+                    # Allow 40px margin around crop ROI
+                    if (cx1 - 40) <= fcx_1080 <= (cx2 + 40) and (cy1 - 40) <= fcy_1080 <= (cy2 + 40):
+                        inside_any_crop = True
+                        break
+                if inside_any_crop:
+                    filtered.append(item)
+            return filtered
+
+        return all_retained
 
     def detect_outside_faces(
         self,
