@@ -26,6 +26,7 @@ class MultiCameraBuffer:
         self._telemetries: Dict[str, Dict[str, Any]] = {}
         self._camera_names: Dict[str, str] = {}
         self._last_update_times: Dict[str, float] = {}
+        self._pipelines: Dict[str, Any] = {}
 
     @classmethod
     def get_instance(cls) -> "MultiCameraBuffer":
@@ -57,6 +58,16 @@ class MultiCameraBuffer:
                     "identified_faces": [],
                     "updated_at": time.time(),
                 }
+
+    def register_pipeline(self, camera_id: str, pipeline: Any) -> None:
+        """Register CameraPipeline instance for control and hot-reload."""
+        with self._lock:
+            self._pipelines[camera_id] = pipeline
+
+    def get_pipeline(self, camera_id: str) -> Optional[Any]:
+        """Fetch registered CameraPipeline instance."""
+        with self._lock:
+            return self._pipelines.get(camera_id)
 
     def update_frame(
         self,

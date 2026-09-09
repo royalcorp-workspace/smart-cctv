@@ -43,7 +43,8 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 owner_name TEXT,
                 owner_confidence REAL,
-                face_snapshot_path TEXT
+                face_snapshot_path TEXT,
+                clip_path TEXT
             );
             """
         )
@@ -56,6 +57,8 @@ def init_db(db_path: Optional[Path] = None) -> None:
             cursor.execute("ALTER TABLE event_logs ADD COLUMN owner_confidence REAL;")
         if "face_snapshot_path" not in existing_cols:
             cursor.execute("ALTER TABLE event_logs ADD COLUMN face_snapshot_path TEXT;")
+        if "clip_path" not in existing_cols:
+            cursor.execute("ALTER TABLE event_logs ADD COLUMN clip_path TEXT;")
 
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_event_logs_camera ON event_logs (camera_id);"
@@ -81,6 +84,7 @@ def log_event(
     owner_name: Optional[str] = None,
     owner_confidence: Optional[float] = None,
     face_snapshot_path: Optional[str] = None,
+    clip_path: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """Insert a violation event log with optional owner metadata and return its generated ID."""
@@ -92,8 +96,8 @@ def log_event(
                 camera_id, zone_id, track_id, event_type,
                 dwell_duration, start_time, trigger_time,
                 snapshot_path, is_resolved,
-                owner_name, owner_confidence, face_snapshot_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?);
+                owner_name, owner_confidence, face_snapshot_path, clip_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?);
             """,
             (
                 camera_id,
@@ -107,10 +111,31 @@ def log_event(
                 owner_name,
                 owner_confidence,
                 face_snapshot_path,
+                clip_path,
             ),
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def update_event_clip(
+    event_id: int,
+    clip_path: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Update event log with generated incident video clip path."""
+    with get_connection(db_path) as conn:
+        cursor: sqlite3.Cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE event_logs
+            SET clip_path = ?
+            WHERE id = ?;
+            """,
+            (clip_path, event_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def resolve_event(
@@ -160,3 +185,35 @@ def get_unresolved_events(
             )
         rows: List[sqlite3.Row] = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+def get_recent_events(
+    limit: int = 50,
+    camera_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch recent incident logs ordered by trigger_time DESC."""
+    with get_connection(db_path) as conn:
+        cursor: sqlite3.Cursor = conn.cursor()
+        if camera_id:
+            cursor.execute(
+                """
+                SELECT * FROM event_logs
+                WHERE camera_id = ?
+                ORDER BY trigger_time DESC
+                LIMIT ?;
+                """,
+                (camera_id, limit),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM event_logs
+                ORDER BY trigger_time DESC
+                LIMIT ?;
+                """,
+                (limit,),
+            )
+        rows: List[sqlite3.Row] = cursor.fetchall()
+        return [dict(row) for row in rows]
+

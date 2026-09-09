@@ -712,3 +712,456 @@ body {
 .footer-right {
   font-family: var(--font-mono);
 }
+
+/* ==========================================================================
+   9. INTERACTIVE ZONE EDITOR (CANVAS OVERLAY & FLOATING TOOLBAR)
+   ========================================================================== */
+
+.btn-calibrate {
+  background-color: var(--accent-subtle);
+  color: var(--accent-primary);
+  border-color: rgba(59, 130, 246, 0.35);
+  font-weight: 600;
+}
+
+.btn-calibrate:hover {
+  background-color: var(--accent-primary);
+  color: #ffffff;
+  border-color: var(--accent-primary);
+}
+
+.btn-calibrate.active {
+  background-color: var(--accent-primary);
+  color: #ffffff;
+  border-color: var(--accent-hover);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
+}
+
+#zoneEditorCanvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 25;
+  display: none;
+}
+
+#zoneEditorCanvas.active {
+  display: block;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.zone-toolbar {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 290px;
+  background-color: rgba(24, 24, 27, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+  z-index: 35;
+  color: #f4f4f5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fadeIn 0.18s ease-out;
+}
+
+[data-theme="light"] .zone-toolbar {
+  background-color: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  color: #0f172a;
+}
+
+.toolbar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 8px;
+}
+
+[data-theme="light"] .toolbar-header {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+.toolbar-title {
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.2px;
+}
+
+.toolbar-badge {
+  font-size: 0.68rem;
+  background-color: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.toolbar-select {
+  flex: 1;
+  background-color: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: inherit;
+  font-size: 0.76rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  outline: none;
+}
+
+[data-theme="light"] .toolbar-select {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.toolbar-btn-group {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.btn-tool {
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: inherit;
+  border-radius: 6px;
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-tool svg {
+  width: 15px;
+  height: 15px;
+}
+
+.btn-tool:hover {
+  background-color: rgba(59, 130, 246, 0.2);
+  border-color: var(--accent-primary);
+}
+
+.btn-tool.active {
+  background-color: var(--accent-primary);
+  border-color: var(--accent-hover);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.4);
+}
+
+.toolbar-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+[data-theme="light"] .toolbar-footer {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+.toolbar-coord {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-tool-primary,
+.btn-tool-secondary,
+.btn-tool-danger {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.btn-tool-primary {
+  background-color: #10b981;
+  color: #ffffff;
+}
+
+.btn-tool-primary:hover {
+  background-color: #059669;
+}
+
+.btn-tool-secondary {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: inherit;
+}
+
+.btn-tool-secondary:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+
+.btn-tool-danger {
+  background-color: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+}
+
+.btn-tool-danger:hover {
+  background-color: #ef4444;
+  color: #ffffff;
+}
+
+/* ==========================================================================
+   10. INCIDENTS TABLE & DVR PLAYBACK SECTION
+   ========================================================================== */
+
+.incidents-section {
+  max-width: 1440px;
+  width: 100%;
+  margin: 0 auto 24px auto;
+  padding: 0 20px;
+}
+
+.incidents-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+}
+
+.incidents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.incidents-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.incidents-title h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.incidents-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--accent-primary);
+}
+
+.incidents-table-wrapper {
+  overflow-x: auto;
+}
+
+.incidents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  text-align: left;
+}
+
+.incidents-table th {
+  padding: 10px 12px;
+  background-color: var(--bg-subtle);
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.incidents-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.incidents-table tbody tr:hover {
+  background-color: var(--bg-card-hover);
+}
+
+.btn-play-clip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--accent-subtle);
+  color: var(--accent-primary);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-play-clip:hover {
+  background-color: var(--accent-primary);
+  color: #ffffff;
+}
+
+.btn-no-clip {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+/* ==========================================================================
+   11. HTML5 VIDEO PLAYER MODAL
+   ========================================================================== */
+
+.video-modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.video-modal-dialog {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 820px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.video-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+}
+
+.modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.badge-modal-live {
+  font-size: 0.66rem;
+  font-weight: 700;
+  background-color: var(--accent-primary);
+  color: #ffffff;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.modal-title-wrap h3 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 0;
+}
+
+.btn-close-modal {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.btn-close-modal:hover {
+  color: var(--text-main);
+}
+
+.video-modal-body {
+  background-color: #000000;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.video-modal-body video {
+  width: 100%;
+  max-height: 480px;
+  outline: none;
+}
+
+.video-modal-footer {
+  padding: 12px 18px;
+  background-color: var(--bg-surface);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.modal-clip-info {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.modal-footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+

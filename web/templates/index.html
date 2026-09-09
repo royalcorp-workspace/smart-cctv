@@ -60,9 +60,19 @@
       <!-- FULLSCREEN BUTTON -->
       <button class="btn-control" onclick="toggleFullscreen()" title="Layar Penuh Viewport">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 2 2h3"></path>
         </svg>
         <span>Layar Penuh</span>
+      </button>
+
+      <!-- ZONE CALIBRATION BUTTON -->
+      <button class="btn-control btn-calibrate" id="btnToggleEditor" onclick="toggleZoneEditor()" title="Kalibrasi & Edit Poligon Zona ROI Interaktif">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+          <polyline points="2 17 12 22 22 17"></polyline>
+          <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+        <span>🎯 Kalibrasi Zona</span>
       </button>
     </div>
   </header>
@@ -81,6 +91,43 @@
         </div>
 
         <img id="streamFeed" src="/video_feed/cam_01" alt="CCTV Stream Feed" onerror="onStreamError()" onload="onStreamLoad()" />
+
+        <!-- INTERACTIVE ZONE EDITOR CANVAS (NATIVE 1920x1080) -->
+        <canvas id="zoneEditorCanvas" width="1920" height="1080"></canvas>
+
+        <!-- FLOATING TOOLBAR KALIBRASI ZONA -->
+        <div class="zone-toolbar" id="zoneToolbar" style="display: none;">
+          <div class="toolbar-header">
+            <span class="toolbar-title">🎯 Editor Zona Poligon</span>
+            <span class="toolbar-badge" id="toolbarZoneCount">2 Zona</span>
+          </div>
+          <div class="toolbar-row">
+            <label for="zoneSelector" class="toolbar-label">Zona Aktif:</label>
+            <select id="zoneSelector" class="toolbar-select" onchange="onZoneSelectChange()"></select>
+          </div>
+          <div class="toolbar-btn-group">
+            <button type="button" id="btnModeDrag" class="btn-tool active" onclick="setZoneMode('drag')" title="Geser Titik Poligon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+              <span>Geser Handle</span>
+            </button>
+            <button type="button" id="btnModeAdd" class="btn-tool" onclick="setZoneMode('add')" title="Tambah Titik Baru pada Garis Poligon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+              <span>Tambah Titik</span>
+            </button>
+            <button type="button" id="btnModeDelete" class="btn-tool" onclick="setZoneMode('delete')" title="Klik Titik untuk Menghapus">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+              <span>Hapus Titik</span>
+            </button>
+          </div>
+          <div class="toolbar-footer">
+            <div class="toolbar-coord" id="zoneCoordDisplay">X: 0, Y: 0 (1080p)</div>
+            <div class="toolbar-actions">
+              <button type="button" class="btn-tool-secondary" onclick="resetCurrentZone()">Reset</button>
+              <button type="button" class="btn-tool-primary" onclick="saveZonesToServer()">Simpan</button>
+              <button type="button" class="btn-tool-danger" onclick="toggleZoneEditor(false)">Tutup</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- VIDEO METADATA BAR -->
@@ -157,6 +204,75 @@
     </aside>
   </main>
 
+  <!-- RECENT INCIDENTS & DVR PLAYBACK SECTION -->
+  <section class="incidents-section">
+    <div class="incidents-card">
+      <div class="incidents-header">
+        <div class="incidents-title">
+          <svg class="incidents-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <h3>Riwayat Insiden & Putar Ulang DVR (H.264 Ring Buffer)</h3>
+        </div>
+        <button class="btn-control btn-sm" onclick="loadRecentEvents()" title="Perbarui Riwayat Insiden">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          <span>Segarkan Log</span>
+        </button>
+      </div>
+      <div class="incidents-table-wrapper">
+        <table class="incidents-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Waktu Deteksi</th>
+              <th>Kamera</th>
+              <th>Zona</th>
+              <th>Dwell Time</th>
+              <th>Status</th>
+              <th>Personil Terkait</th>
+              <th>Rekaman Video</th>
+            </tr>
+          </thead>
+          <tbody id="incidentsTableBody">
+            <tr>
+              <td colspan="8" class="text-center py-4 text-muted">Memuat data riwayat insiden...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- INCIDENT VIDEO PLAYER MODAL -->
+  <div id="videoModal" class="video-modal-backdrop" style="display: none;">
+    <div class="video-modal-dialog">
+      <div class="video-modal-header">
+        <div class="modal-title-wrap">
+          <span class="badge-modal-live">DVR PLAYBACK</span>
+          <h3 id="modalClipTitle">Rekaman Insiden</h3>
+        </div>
+        <button type="button" class="btn-close-modal" onclick="closeVideoModal()" aria-label="Tutup Modal">&times;</button>
+      </div>
+      <div class="video-modal-body">
+        <video id="incidentVideoPlayer" controls preload="metadata" playsinline>
+          Browser Anda tidak mendukung video player HTML5.
+        </video>
+      </div>
+      <div class="video-modal-footer">
+        <div class="modal-clip-info" id="modalClipMeta">
+          Resolusi: 1280x720 | Codec: H.264 | Ring Buffer Deque
+        </div>
+        <div class="modal-footer-actions">
+          <a id="modalDownloadBtn" href="#" download class="btn-control">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>Unduh MP4</span>
+          </a>
+          <button type="button" class="btn-control btn-secondary" onclick="closeVideoModal()">Tutup</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- FOOTER -->
   <footer class="dashboard-footer">
     <div class="footer-left">
@@ -164,7 +280,9 @@
       <span class="footer-sep">&bull;</span>
       <span>Intel OpenVINO Accelerated</span>
       <span class="footer-sep">&bull;</span>
-      <span>OpenCV SFace 2021</span>
+      <span>DVR Ring Buffer (H.264)</span>
+      <span class="footer-sep">&bull;</span>
+      <span>Interactive Web Zone Editor</span>
     </div>
     <div class="footer-right" id="footerStatus">Sinkronisasi buffer lokal aktif</div>
   </footer>
@@ -173,3 +291,4 @@
   <script src="/static/js/dashboard.js"></script>
 </body>
 </html>
+

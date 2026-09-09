@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -26,9 +27,80 @@ from engine.yolo_detector import YOLOOpenVINODetector
 from engine.zone_filter import ZoneFilter
 from notification.local_alert import GlobalAudioWorker, VisualHUD
 from notification.telegram_alert import TelegramNotifier
-from storage.db import init_db, log_event, resolve_event
+from storage.db import init_db, log_event, resolve_event, update_event_clip
 from web.buffer import MultiCameraBuffer
 from web.server import DashboardServer
+
+
+class RingBufferRecorder:
+    """Maintains an in-memory circular buffer of JPEG-compressed frames (~15-25 MB RAM).
+    Exports browser-compatible H.264 MP4 video clips asynchronously upon incident breach."""
+
+    def __init__(self, maxlen: int = 250, target_size: Tuple[int, int] = (1280, 720), fps: float = 13.0) -> None:
+        self.maxlen = maxlen
+        self.target_size = target_size
+        self.fps = fps
+        self._buffer: deque = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._buffer)
+
+    def push_frame(self, frame: np.ndarray) -> None:
+        """Downscale frame to 720p and compress to JPEG bytes to maintain minimal RAM usage."""
+        if frame is None or frame.size == 0:
+            return
+        try:
+            if frame.shape[1] != self.target_size[0] or frame.shape[0] != self.target_size[1]:
+                scaled = cv2.resize(frame, self.target_size, interpolation=cv2.INTER_AREA)
+            else:
+                scaled = frame
+            success, encoded = cv2.imencode(".jpg", scaled, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if success:
+                with self._lock:
+                    self._buffer.append(encoded.tobytes())
+        except Exception as e:
+            logger.debug(f"[RingBuffer] Error encoding frame: {e}")
+
+    def export_clip(self, output_path: Path) -> bool:
+        """Decompress JPEG frames and export to an H.264 MP4 video clip."""
+        with self._lock:
+            frames_to_write = list(self._buffer)
+
+        if not frames_to_write:
+            logger.warning(f"[RingBuffer] No frames to export to {output_path}")
+            return False
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        w, h = self.target_size
+
+        # Codec selection: try avc1 first (standard HTML5 H.264), fallback to mp4v if needed
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (w, h))
+        if not writer.isOpened():
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (w, h))
+
+        if not writer.isOpened():
+            logger.error(f"[RingBuffer] Failed to initialize VideoWriter for {output_path}")
+            return False
+
+        try:
+            for fb in frames_to_write:
+                dec = cv2.imdecode(np.frombuffer(fb, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if dec is not None:
+                    if dec.shape[1] != w or dec.shape[0] != h:
+                        dec = cv2.resize(dec, (w, h))
+                    writer.write(dec)
+            writer.release()
+            logger.info(f"[RingBuffer] Incident clip exported ({len(frames_to_write)} frames) -> {output_path}")
+            return True
+        except Exception as e:
+            logger.error(f"[RingBuffer] Failed writing video clip: {e}")
+            if writer:
+                writer.release()
+            return False
 
 
 class CameraPipeline:
@@ -205,6 +277,29 @@ class CameraPipeline:
         self.current_fps: float = 0.0
 
         self.active_db_events: Dict[int, int] = {}
+        self._zone_lock = threading.Lock()
+        self.ring_buffer = RingBufferRecorder(maxlen=250, target_size=(1280, 720), fps=13.0)
+
+        # Register pipeline in MultiCameraBuffer for web control and atomic reload
+        MultiCameraBuffer.get_instance().register_pipeline(self.camera_id, self)
+
+    def reload_zones(self) -> Dict[str, Any]:
+        """Thread-safely reload ROI zones from roi_zones.json and re-initialize ZoneFilter."""
+        with self._zone_lock:
+            self._load_configurations()
+            self._unattended_zones_mask = None
+            self.zone_filter = ZoneFilter(
+                zones=self.roi_zones,
+                zone_configs=self.config.get("zones", {}),
+                frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
+                base_resolution=self.roi_base_resolution,
+            )
+            logger.info(f"[{self.camera_id}] ZoneFilter atomically reloaded ({len(self.roi_zones)} active zones).")
+            return {
+                "camera_id": self.camera_id,
+                "zones": self.roi_zones,
+                "base_resolution": self.roi_base_resolution,
+            }
 
     def _load_configurations(self) -> None:
         """Parse configuration and ROI zone files."""
@@ -515,6 +610,9 @@ class CameraPipeline:
             # 1. High-resolution clean copy for display and snapshots (Full HD 1080p)
             display_frame = frame.copy()
             raw_clean_frame = frame.copy()
+
+            # Push clean frame into memory ring buffer (compressed to 720p JPEG in memory)
+            self.ring_buffer.push_frame(raw_clean_frame)
 
             # 2. Scaled lightweight inference frame (640x480) for AI models (YOLO11n, MOG2, YuNet)
             infer_frame = cv2.resize(frame, self.infer_resolution, interpolation=cv2.INTER_LINEAR)
@@ -966,6 +1064,21 @@ class CameraPipeline:
                                 f"[{self.camera_id}] Pelanggaran Clear Area terdaftar di '{zone_name}' "
                                 f"oleh Track ID {track.track_id} (Dwell: {dwell_minutes:.1f}m, Pemilik: {owner_name}). Event ID: {event_id}"
                             )
+
+                            # Asynchronously export 15-20s incident video clip from Ring Buffer
+                            clip_filename = f"INCIDENT_{self.camera_id}_{timestamp_str}_{track.track_id}.mp4"
+                            clip_storage_path = Path(__file__).resolve().parent / "storage" / "clips" / clip_filename
+
+                            def _export_incident_clip_task(eid: int, out_path: Path, cname: str):
+                                try:
+                                    success = self.ring_buffer.export_clip(out_path)
+                                    if success and eid:
+                                        update_event_clip(eid, cname)
+                                        logger.info(f"[{self.camera_id}] Event ID {eid} linked with video clip: {cname}")
+                                except Exception as err:
+                                    logger.error(f"[{self.camera_id}] Failed exporting incident video clip: {err}")
+
+                            self.io_executor.submit(_export_incident_clip_task, event_id, clip_storage_path, clip_filename)
                         except Exception as e:
                             logger.error(f"[{self.camera_id}] DB event log failed: {e}")
 
