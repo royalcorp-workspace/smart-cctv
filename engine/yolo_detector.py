@@ -22,7 +22,7 @@ class YOLOOpenVINODetector:
     }
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
-        0: 0.38,   # person: calibrated to filter static door frame artifacts while detecting walking persons
+        0: 0.33,   # person: lowered for overhead CCTV angle where confidence is naturally suppressed
         24: 0.18,  # backpack: calibrated for floor/lying bags
         26: 0.18,  # handbag: calibrated for floor/lying bags
         28: 0.18,  # suitcase: calibrated for floor/lying bags
@@ -134,10 +134,12 @@ class YOLOOpenVINODetector:
             cy = y1 + h // 2
             cname = self.TARGET_CLASSES.get(cid, "object")
 
-            # Geometric sanity filter: discard tiny floor blobs or flat lying objects (e.g. plastic sacks, trash)
+            # Geometric sanity filter: discard tiny blobs that cannot be human.
+            # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
+            # seated at desk (wide box), walking (tall box), or crouching (medium box).
             if cid == 0:
-                aspect_ratio = float(h) / max(1.0, float(w))
-                if h < 45 or aspect_ratio < 0.55:
+                area = w * h
+                if h < 40 or w < 30 or area < 1500:
                     continue
 
             # Accurate reference point:

@@ -775,10 +775,11 @@ class CameraPipeline:
                 is_bag = cid in (24, 26, 28)
 
                 if cid == 0:  # person
-                    # Geometric sanity filter: eliminate flat floor items (plastic bags, trash) falsely detected as persons
+                    # Geometric sanity filter: discard tiny blobs that cannot be human.
+                    # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
+                    # seated at desk (wide box), walking (tall box), or crouching (medium box).
                     p_w, p_h = bbox[2], bbox[3]
-                    p_ratio = float(p_h) / max(1.0, float(p_w))
-                    if p_h < 45 or p_ratio < 0.55:
+                    if p_h < 40 or p_w < 30 or (p_w * p_h) < 1500:
                         continue
 
                     # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px
