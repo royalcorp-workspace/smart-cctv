@@ -76,3 +76,6 @@ runs/
 .DS_Store
 Thumbs.db
 *.swp
+*.bak
+storage/clips/*
+!storage/clips/.gitkeep
