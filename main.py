@@ -778,7 +778,7 @@ class CameraPipeline:
                     # Geometric sanity filter: eliminate flat floor items (plastic bags, trash) falsely detected as persons
                     p_w, p_h = bbox[2], bbox[3]
                     p_ratio = float(p_h) / max(1.0, float(p_w))
-                    if p_h < 60 or p_ratio < 1.0:
+                    if p_h < 45 or p_ratio < 0.55:
                         continue
 
                     # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px
@@ -1234,9 +1234,9 @@ class CameraPipeline:
                                     face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
                                     is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
                                         face_landmark_data,
-                                        min_eye_dist_ratio=0.22,
-                                        min_symmetry_ratio=0.20,
-                                        min_score=0.60,
+                                        min_eye_dist_ratio=0.18,
+                                        min_symmetry_ratio=0.15,
+                                        min_score=0.45,
                                     )
 
                                     prev_cache = self._person_face_recog.get(eval_track.track_id)

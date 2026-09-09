@@ -11,12 +11,14 @@ class TestPersonGeometryAndFloorFilter:
     """Verifies that flat floor items are filtered and face badges adhere to spatial anchors and grace periods."""
 
     def test_01_person_geometry_filter(self):
-        """Flat floor objects (plastic bags, trash) and tiny blobs must be rejected as persons."""
+        """Flat floor objects (plastic bags, trash) and tiny blobs must be rejected, while seated workers are tracked."""
         test_cases = [
             # (w, h, should_pass, description)
             (120, 45, False, "Crumpled plastic bag on floor (flat, h/w = 0.375)"),
             (150, 50, False, "Trash sack lying down (h/w = 0.33)"),
-            (35, 40, False, "Tiny floor speck / reflection (h < 60)"),
+            (50, 25, False, "Tiny floor speck / reflection (h < 45)"),
+            (90, 65, True, "Seated desk worker leaning forward (h=65, h/w = 0.72)"),
+            (80, 60, True, "Seated desk worker compact (h=60, h/w = 0.75)"),
             (70, 70, True, "Minimum square stance (h=70, h/w = 1.0)"),
             (80, 180, True, "Standing adult person (h/w = 2.25)"),
             (75, 120, True, "Seated desk worker (h/w = 1.60)"),
@@ -24,12 +26,12 @@ class TestPersonGeometryAndFloorFilter:
 
         for w, h, should_pass, desc in test_cases:
             ratio = float(h) / max(1.0, float(w))
-            passes = (h >= 60) and (ratio >= 1.0)
+            passes = (h >= 45) and (ratio >= 0.55)
             assert passes == should_pass, f"Failed on '{desc}': got {passes}, expected {should_pass}"
 
     def test_02_crop_roi_spatial_isolation(self):
         """Faces detected outside the requested crop ROI must be filtered out."""
-        detector = YuNetFaceDetector(score_threshold=0.65, auto_download=False)
+        detector = YuNetFaceDetector(score_threshold=0.50, auto_download=False)
 
         # Populate detector's buffer with 2 faces:
         # Face 1: at (50, 50, 60, 60) -> 1080p center ~ (240, 240)
@@ -125,3 +127,29 @@ class TestPersonGeometryAndFloorFilter:
         if (now - p_info_expired["last_frontal_seen_time"]) <= 2.5:
             rendered_expired.append(p_info_expired["face_bbox_640"])
         assert len(rendered_expired) == 0, "Face seen 3.0s ago must be hidden as grace period expired!"
+
+    def test_05_semi_frontal_face_tolerance(self):
+        """Semi-frontal face turned ~45 degrees with confidence 0.48-0.50 must pass is_frontal_face."""
+        from engine.face_recognizer import FaceRecognizer
+
+        # Simulated 45-degree turned face landmarks (w=50, h=55, score=0.48):
+        # right eye=(115, 105), left eye=(132, 107), nose=(124, 118)
+        # eye dist = hypot(17, 2) ~ 17.1 -> ratio = 17.1 / 50 = 0.34
+        # symmetry: d_r = |124 - 115| = 9, d_l = |124 - 132| = 8 -> ratio = 8/9 = 0.88
+        semi_frontal_face = [
+            100, 90, 50, 55,  # bbox
+            115, 105,         # right eye
+            132, 107,         # left eye
+            124, 118,         # nose tip
+            118, 130,         # mouth right
+            128, 131,         # mouth left
+            0.48,             # YuNet score 0.48
+        ]
+
+        is_frontal, reason = FaceRecognizer.is_frontal_face(
+            semi_frontal_face,
+            min_eye_dist_ratio=0.18,
+            min_symmetry_ratio=0.15,
+            min_score=0.45,
+        )
+        assert is_frontal is True, f"Semi-frontal face at 45 degrees should pass, but got rejected: {reason}"

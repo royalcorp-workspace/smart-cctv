@@ -137,7 +137,7 @@ class YOLOOpenVINODetector:
             # Geometric sanity filter: discard tiny floor blobs or flat lying objects (e.g. plastic sacks, trash)
             if cid == 0:
                 aspect_ratio = float(h) / max(1.0, float(w))
-                if h < 60 or aspect_ratio < 1.0:
+                if h < 45 or aspect_ratio < 0.55:
                     continue
 
             # Accurate reference point:
