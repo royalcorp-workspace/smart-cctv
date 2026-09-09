@@ -352,23 +352,16 @@ class YuNetFaceDetector:
                             crop_rois_list.append(tuple(int(v) for v in r[:4]))
 
         has_crop = (display_frame is not None) and (len(crop_rois_list) > 0)
-        use_alternate = self.alternate_inference if alternate is None else bool(alternate)
 
-        run_crop = False
-        run_full = False
-
-        if not has_crop:
-            run_full = True
-        elif not use_alternate:
+        # STRICT TARGETED CROP: When specific head crop ROIs are supplied, NEVER run full-frame detection.
+        # This completely eliminates ghost face detections on background walls, empty chairs, and partitions,
+        # while cutting inference latency on CPU significantly.
+        if has_crop:
             run_crop = True
-            run_full = True
+            run_full = False
         else:
-            # Alternating Dual-YuNet: 1 inference per evaluation cycle
-            if (self._eval_cycle % 2) == 0:
-                run_crop = True
-            else:
-                run_full = True
-            self._eval_cycle += 1
+            run_crop = False
+            run_full = True
 
         candidates: List[Dict[str, Any]] = []
 

@@ -424,9 +424,8 @@ class CameraPipeline:
 
             if nearest_person is not None:
                 px, py, pw, ph = nearest_person.bbox
-                head_h = int(ph * 0.35)
                 head_top = py
-                head_bottom = py + head_h
+                head_bottom = py + int(ph * 0.70)
 
                 # 1. Extract Person Body Crop from Full Resolution Frame
                 pad_px = int(pw * 0.10)
@@ -1172,19 +1171,47 @@ class CameraPipeline:
                         scale_disp_x = float(disp_w) / 640.0
                         scale_disp_y = float(disp_h) / 360.0
 
-                        # 1. TRACK-ID BASED EVALUATION GATING (Eliminates FPS drop & CPU spikes)
-                        # Re-evaluation criteria: Track not yet evaluated, OR (elapsed >= 1.0s AND frames >= 15)
+                        # 1. TRACK-ID BASED EVALUATION GATING (Adaptive Cooldown & Budget Optimizer)
                         tracks_needing_eval = []
                         for trk in active_person_tracks:
+                            pw, ph = trk.bbox[2], trk.bbox[3]
+                            # Sanity check: do not attempt face evaluation on tiny noise blobs
+                            if pw < 16 or ph < 25:
+                                continue
+
                             p_cache = self._person_face_recog.get(trk.track_id)
                             if p_cache is None:
                                 tracks_needing_eval.append((trk, 999.0))
                             else:
                                 elapsed_p = now - p_cache.get("last_eval_time", 0.0)
                                 frames_p = self._face_frame_index - p_cache.get("last_eval_frame", 0)
-                                # Changed AND -> OR: evaluate if time elapsed OR frame count exceeded
-                                # More responsive for new passersby (elapsed>=0.8s OR frames>=12)
-                                if elapsed_p >= 0.8 or frames_p >= 12:
+                                is_known = p_cache.get("is_known", False)
+                                score = p_cache.get("score", 0.0)
+                                is_moving = (
+                                    getattr(trk, "max_displacement_from_start", 0.0) > 25.0
+                                    or getattr(trk, "moved_confirmation_frames", 0) > 5
+                                )
+                                fail_count = p_cache.get("eval_fail_count", 0)
+
+                                # Adaptive throttle based on track state:
+                                if is_known and score >= 0.60 and not is_moving:
+                                    # Confirmed seated employee: massive cooldown (15.0s) to save CPU
+                                    throttle_sec = 15.0
+                                    min_frames = 150
+                                elif not is_moving and fail_count >= 2:
+                                    # Seated person with repeated non-match: backoff to 6.0s
+                                    throttle_sec = 6.0
+                                    min_frames = 60
+                                elif is_moving:
+                                    # Moving person / passerby: responsive evaluation
+                                    throttle_sec = 1.2
+                                    min_frames = 12
+                                else:
+                                    # Default stationary unknown: evaluate every 3.0s
+                                    throttle_sec = 3.0
+                                    min_frames = 30
+
+                                if elapsed_p >= throttle_sec or frames_p >= min_frames:
                                     tracks_needing_eval.append((trk, elapsed_p))
 
                         # Sort candidates with priority for new passersby and moving persons:
@@ -1192,7 +1219,10 @@ class CameraPipeline:
                             trk_obj, elapsed_time = item
                             p_c = self._person_face_recog.get(trk_obj.track_id)
                             has_face = p_c and p_c.get("has_seen_face", False)
-                            is_moving = getattr(trk_obj, "max_displacement_from_start", 0.0) > 20.0 or getattr(trk_obj, "moved_confirmation_frames", 0) > 5
+                            is_moving = (
+                                getattr(trk_obj, "max_displacement_from_start", 0.0) > 20.0
+                                or getattr(trk_obj, "moved_confirmation_frames", 0) > 5
+                            )
                             box_sz = float(trk_obj.bbox[2] * trk_obj.bbox[3])
                             # Tier 1 (highest): New track or moving passerby with no face yet
                             if not has_face and is_moving:
@@ -1206,32 +1236,29 @@ class CameraPipeline:
 
                         tracks_needing_eval.sort(key=_person_eval_priority, reverse=True)
 
-                        # Per-frame budget: evaluate at most 2 person tracks per frame
-                        # Increased from 1->2 to reduce label latency when multiple persons are present
-                        candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:2]]
+                        # Per-frame budget: evaluate at most 1 person track per frame
+                        # Preserves 12-15+ FPS by keeping SFace & YuNet overhead <= 35ms
+                        candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:1]]
 
                         eval_head_rois = []
                         eval_track = None
                         if candidate_tracks_to_eval:
                             eval_track = candidate_tracks_to_eval[0]
-                            # Collect head ROIs for all budgeted tracks (up to 2)
-                            for _eval_trk in candidate_tracks_to_eval:
-                                px, py, pw, ph = _eval_trk.bbox
-                                pad_x = int(pw * 0.20)
-                                h_x1 = max(0, px - pad_x)
-                                h_y1 = max(0, py - int(ph * 0.15))
-                                h_x2 = min(640, px + pw + pad_x)
-                                # Extended head crop from 65% to 75% body height to capture
-                                # downward-tilted faces (seated/typing at desk)
-                                h_y2 = min(360, py + int(ph * 0.75))
-                                disp_x1 = int(round(h_x1 * scale_disp_x))
-                                disp_y1 = int(round(h_y1 * scale_disp_y))
-                                disp_x2 = int(round(h_x2 * scale_disp_x))
-                                disp_y2 = int(round(h_y2 * scale_disp_y))
-                                if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
-                                    eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
+                            px, py, pw, ph = eval_track.bbox
+                            pad_x = int(pw * 0.15)
+                            h_x1 = max(0, px - pad_x)
+                            h_y1 = max(0, py - int(ph * 0.10))
+                            h_x2 = min(640, px + pw + pad_x)
+                            # Top 70% of body box strictly for head ROI crop
+                            h_y2 = min(360, py + int(ph * 0.70))
+                            disp_x1 = int(round(h_x1 * scale_disp_x))
+                            disp_y1 = int(round(h_y1 * scale_disp_y))
+                            disp_x2 = int(round(h_x2 * scale_disp_x))
+                            disp_y2 = int(round(h_y2 * scale_disp_y))
+                            if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
+                                eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
-                        # Execute YuNet detection only for the single budgeted head crop
+                        # Execute YuNet detection strictly on the targeted head crop
                         if eval_head_rois and eval_track is not None:
                             detected_faces = self.face_detector.detect_faces(
                                 frame=infer_frame,
@@ -1239,15 +1266,21 @@ class CameraPipeline:
                                 crop_roi=eval_head_rois,
                             )
                             if detected_faces:
-                                # Ensure detected face is spatially anchored to eval_track body/head
+                                # Strict Top 70% Person Containment (Anti-Ghost Face)
                                 px, py, pw, ph = eval_track.bbox
+                                head_x1 = px - int(pw * 0.10)
+                                head_x2 = px + pw + int(pw * 0.10)
+                                head_y1 = py - int(ph * 0.05)
+                                head_y2 = py + int(ph * 0.70)
+
                                 track_anchored_faces = []
                                 for item in detected_faces:
                                     bx, by, bw, bh = item[0]
                                     bcx = bx + bw // 2
                                     bcy = by + bh // 2
-                                    if (px - 25) <= bcx <= (px + pw + 25) and (py - 25) <= bcy <= (py + ph + 10):
-                                        track_anchored_faces.append(item)
+                                    if head_x1 <= bcx <= head_x2 and head_y1 <= bcy <= head_y2:
+                                        if bw <= (pw * 1.1) and bh <= (ph * 0.70):
+                                            track_anchored_faces.append(item)
 
                                 if track_anchored_faces:
                                     best_item = max(track_anchored_faces, key=lambda it: it[1])
@@ -1255,7 +1288,7 @@ class CameraPipeline:
                                     raw_f_640 = best_item[2] if len(best_item) >= 3 else None
                                     raw_f_1080 = best_item[3] if len(best_item) >= 4 else None
 
-                                    # 2. FACE QUALITY GATE BERBASIS LANDMARK (Toleransi sudut menunduk saat duduk di meja)
+                                    # 2. FACE QUALITY GATE BERBASIS LANDMARK
                                     face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
                                     is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
                                         face_landmark_data,
@@ -1274,13 +1307,14 @@ class CameraPipeline:
                                         if prev_cache:
                                             prev_cache["last_eval_time"] = now
                                             prev_cache["last_eval_frame"] = self._face_frame_index
+                                            prev_cache["eval_fail_count"] = prev_cache.get("eval_fail_count", 0) + 1
                                         else:
-                                            # First time seen but non-frontal: throttle retry without creating fake face
                                             self._person_face_recog[eval_track.track_id] = {
                                                 "has_seen_face": False,
                                                 "last_eval_time": now,
                                                 "last_eval_frame": self._face_frame_index,
                                                 "last_frontal_seen_time": 0.0,
+                                                "eval_fail_count": 1,
                                             }
                                     else:
                                         # Frontal face: execute SFace feature extraction & identity matching
@@ -1316,6 +1350,7 @@ class CameraPipeline:
                                                 "face_score": f_det_score,
                                                 "is_known": True,
                                                 "has_seen_face": True,
+                                                "eval_fail_count": 0,
                                             }
                                         else:
                                             # Unknown / non-match: retain previous known identity if established
@@ -1324,6 +1359,7 @@ class CameraPipeline:
                                                 prev_cache["last_eval_frame"] = self._face_frame_index
                                                 prev_cache["last_frontal_seen_time"] = now
                                                 prev_cache["face_bbox_640"] = bbox_f
+                                                prev_cache["eval_fail_count"] = 0
                                             else:
                                                 self._person_face_recog[eval_track.track_id] = {
                                                     "label": "Unknown",
@@ -1336,57 +1372,126 @@ class CameraPipeline:
                                                     "face_score": f_det_score,
                                                     "is_known": False,
                                                     "has_seen_face": True,
+                                                    "eval_fail_count": (prev_cache.get("eval_fail_count", 0) + 1) if prev_cache else 1,
                                                 }
                                 else:
-                                    # Faces found elsewhere in buffer did not overlap this person track
-                                    if eval_track.track_id in self._person_face_recog:
-                                        self._person_face_recog[eval_track.track_id]["last_eval_time"] = now
-                                        self._person_face_recog[eval_track.track_id]["last_eval_frame"] = self._face_frame_index
+                                    # Faces found did not fall within top 70% of this person track
+                                    p_c = self._person_face_recog.get(eval_track.track_id)
+                                    if p_c:
+                                        p_c["last_eval_time"] = now
+                                        p_c["last_eval_frame"] = self._face_frame_index
+                                        p_c["eval_fail_count"] = p_c.get("eval_fail_count", 0) + 1
                                     else:
                                         self._person_face_recog[eval_track.track_id] = {
                                             "has_seen_face": False,
                                             "last_eval_time": now,
                                             "last_eval_frame": self._face_frame_index,
                                             "last_frontal_seen_time": 0.0,
+                                            "eval_fail_count": 1,
                                         }
                             else:
-                                # Head crop yielded no face (e.g. back of head/hair): throttle retry without creating fake face
-                                if eval_track.track_id in self._person_face_recog:
-                                    self._person_face_recog[eval_track.track_id]["last_eval_time"] = now
-                                    self._person_face_recog[eval_track.track_id]["last_eval_frame"] = self._face_frame_index
+                                # Head crop yielded no face: throttle retry without creating fake face
+                                p_c = self._person_face_recog.get(eval_track.track_id)
+                                if p_c:
+                                    p_c["last_eval_time"] = now
+                                    p_c["last_eval_frame"] = self._face_frame_index
+                                    p_c["eval_fail_count"] = p_c.get("eval_fail_count", 0) + 1
                                 else:
                                     self._person_face_recog[eval_track.track_id] = {
                                         "has_seen_face": False,
                                         "last_eval_time": now,
                                         "last_eval_frame": self._face_frame_index,
                                         "last_frontal_seen_time": 0.0,
+                                        "eval_fail_count": 1,
                                     }
 
-                        # Synthesize recognized_faces for VisualHUD and telemetry ONLY for tracks with genuine frontal face detections within grace period
-                        recognized_faces = []
+                        # Synthesize recognized_faces with STRICT ANCHOR & IDENTITY MUTEX
+                        candidate_faces = []
                         active_track_ids = {t.track_id for t in active_person_tracks}
 
                         for trk in active_person_tracks:
+                            # Verify track is currently active or at most missed 2 frames
+                            if not getattr(trk, "is_active_this_frame", False) and getattr(trk, "missed_frames", 0) > 2:
+                                continue
+
                             p_info = self._person_face_recog.get(trk.track_id)
                             if p_info is not None and p_info.get("has_seen_face", False):
-                                # 7.0s grace period: only render face badge if frontal/semi-frontal face was seen within last 7.0 seconds
-                                # Extended from 5.0s -> 7.0s to prevent label disappearing when person briefly turns away
                                 last_frontal = p_info.get("last_frontal_seen_time", 0.0)
                                 if (now - last_frontal) <= 7.0:
                                     px, py, pw, ph = trk.bbox
                                     f_box = p_info.get("face_bbox_640")
-                                    # TOTAL ELIMINATION OF SYNTHETIC FALLBACK BOX:
-                                    # Never synthesize fake face box on back of head or floor objects
                                     if not f_box or f_box[2] <= 0 or f_box[3] <= 0:
                                         continue
-                                    # Reject if face box drifted far outside person track bbox
-                                    if abs(f_box[0] - px) > (pw * 1.5) or abs(f_box[1] - py) > (ph * 1.2):
+
+                                    # STRICT TOP 70% ANCHOR:
+                                    # Ensure face center is within top 70% of person's CURRENT body box
+                                    fcx = f_box[0] + f_box[2] // 2
+                                    fcy = f_box[1] + f_box[3] // 2
+                                    head_x1 = px - int(pw * 0.15)
+                                    head_x2 = px + pw + int(pw * 0.15)
+                                    head_y1 = py - int(ph * 0.10)
+                                    head_y2 = py + int(ph * 0.70)
+                                    if not (head_x1 <= fcx <= head_x2 and head_y1 <= fcy <= head_y2):
+                                        # Face has drifted outside person body (e.g. ghost box or rapid move)
                                         continue
-                                    f_lbl = p_info.get("label", "Unknown")
-                                    f_name = p_info.get("name", "Unknown")
-                                    f_score = p_info.get("score", 0.0)
-                                    f_det_s = p_info.get("face_score", 0.80)
-                                    recognized_faces.append((f_box, f_det_s, f_lbl, f_name, f_score))
+
+                                    candidate_faces.append({
+                                        "track_id": trk.track_id,
+                                        "f_box": f_box,
+                                        "f_det_score": p_info.get("face_score", 0.80),
+                                        "label": p_info.get("label", "Unknown"),
+                                        "name": p_info.get("name", "Unknown"),
+                                        "score": p_info.get("score", 0.0),
+                                        "is_known": p_info.get("is_known", False),
+                                    })
+
+                        # IDENTITY MUTEX (Anti-Cloning Guard):
+                        # Sort candidates claiming registered names by recognition score descending.
+                        # Highest score wins the identity; any duplicate in the same frame is demoted to Unknown!
+                        known_candidates = [
+                            c for c in candidate_faces
+                            if c["is_known"] and c["name"].lower() != "unknown"
+                        ]
+                        known_candidates.sort(key=lambda c: c["score"], reverse=True)
+
+                        claimed_identities: Dict[str, Tuple[int, float]] = {}
+                        demoted_track_ids = set()
+
+                        for c in known_candidates:
+                            c_name = c["name"]
+                            tid = c["track_id"]
+                            score = c["score"]
+                            if c_name not in claimed_identities:
+                                claimed_identities[c_name] = (tid, score)
+                            else:
+                                win_tid, win_score = claimed_identities[c_name]
+                                demoted_track_ids.add(tid)
+                                logger.warning(
+                                    f"[{self.camera_id}] [IdentityMutex] Collision for '{c_name}': "
+                                    f"Track #{win_tid} won with {win_score*100:.0f}%, "
+                                    f"Track #{tid} ({score*100:.0f}%) demoted to 'Unknown'."
+                                )
+
+                        # Build final collision-free recognized_faces list
+                        recognized_faces = []
+                        for c in candidate_faces:
+                            tid = c["track_id"]
+                            if tid in demoted_track_ids:
+                                c_lbl = "Unknown"
+                                c_name = "Unknown"
+                                c_score = 0.0
+                                # Clear stolen identity from memory cache
+                                if tid in self._person_face_recog:
+                                    self._person_face_recog[tid]["name"] = "Unknown"
+                                    self._person_face_recog[tid]["label"] = "Unknown"
+                                    self._person_face_recog[tid]["score"] = 0.0
+                                    self._person_face_recog[tid]["is_known"] = False
+                            else:
+                                c_lbl = c["label"]
+                                c_name = c["name"]
+                                c_score = c["score"]
+
+                            recognized_faces.append((c["f_box"], c["f_det_score"], c_lbl, c_name, c_score))
 
                         # Purge stale tracks no longer in active_person_tracks
                         if active_track_ids:
