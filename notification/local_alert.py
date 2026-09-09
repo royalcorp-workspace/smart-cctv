@@ -335,29 +335,37 @@ class VisualHUD:
                 cv2.LINE_AA,
             )
 
-        # 2a. Draw Faces (Cyan BGR: 255, 200, 0) across all areas
+        # 2a. Draw Faces with Solid Background Badge across all areas (1080p optimized)
         if active_faces:
-            face_font_scale = 0.42
-            face_font_thick = 1
-            face_pad_x = 4
-            face_pad_y = 2
-            face_box_thick = 1
+            face_font_scale = 0.75
+            face_font_thick = 2
+            face_pad_x = 8
+            face_pad_y = 6
+            face_box_thick = 2
 
             for item in active_faces:
+                face_label = None
+                f_score = 0.0
                 if len(item) >= 3:
                     (fx, fy, fw_f, fh_f), f_score, face_label = item[0], item[1], item[2]
-                    if isinstance(face_label, str) and face_label:
-                        f_badge = face_label
-                    else:
-                        f_badge = f"Face {f_score:.2f}"
                 elif len(item) == 2:
                     (fx, fy, fw_f, fh_f), f_score_or_label = item[0], item[1]
                     if isinstance(f_score_or_label, str):
-                        f_badge = f_score_or_label
+                        face_label = f_score_or_label
                     else:
-                        f_badge = f"Face {f_score_or_label:.2f}"
+                        f_score = float(f_score_or_label)
                 else:
                     continue
+
+                if isinstance(face_label, str) and face_label and face_label != "Unknown":
+                    f_badge = face_label
+                    is_known = True
+                elif face_label == "Unknown":
+                    f_badge = "Unknown"
+                    is_known = False
+                else:
+                    f_badge = f"Face {f_score:.2f}"
+                    is_known = False
 
                 if fx > 640 or fy > 360:
                     sfx = int(round(fx))
@@ -372,11 +380,24 @@ class VisualHUD:
                     sfw = int(round(fw_f * face_scale_x))
                     sfh = int(round(fh_f * face_scale_y))
 
-                # Crisp 1px bounding box
-                cv2.rectangle(canvas, (sfx, sfy), (sfx + sfw, sfy + sfh), COLOR_FACE_OUTSIDE, face_box_thick, lineType=cv2.LINE_AA)
-                (f_tw, f_th), _ = cv2.getTextSize(f_badge, cv2.FONT_HERSHEY_SIMPLEX, face_font_scale, face_font_thick)
-                f_badge_h = f_th + (face_pad_y * 2) + 1
+                # Color palette for face
+                # Known: Vibrant cyan border (255, 200, 0), Solid Dark Cyan background (70, 45, 10)
+                # Unknown: Amber/Slate border (0, 165, 255), Solid Charcoal background (25, 25, 30)
+                if is_known:
+                    box_border_color = (255, 200, 0)   # Cyan BGR
+                    badge_bg_color = (70, 45, 10)       # Solid Dark Cyan BGR
+                else:
+                    box_border_color = (0, 165, 255)   # Amber Warning BGR
+                    badge_bg_color = (25, 25, 30)       # Solid Charcoal / Dark Slate BGR
+
+                # Draw solid 2px bounding box
+                cv2.rectangle(canvas, (sfx, sfy), (sfx + sfw, sfy + sfh), box_border_color, face_box_thick, lineType=cv2.LINE_AA)
+
+                # Compute badge dimensions with font baseline
+                (f_tw, f_th), baseline = cv2.getTextSize(f_badge, cv2.FONT_HERSHEY_SIMPLEX, face_font_scale, face_font_thick)
+                f_badge_h = f_th + (face_pad_y * 2) + baseline
                 f_badge_w = f_tw + (face_pad_x * 2)
+
                 if sfy - f_badge_h >= 0:
                     f_by1 = sfy - f_badge_h
                     f_by2 = sfy
@@ -386,19 +407,20 @@ class VisualHUD:
                 f_bx1 = max(0, min(sfx, w - f_badge_w))
                 f_bx2 = min(w, f_bx1 + f_badge_w)
 
-                # Semi-transparent badge background (65% tint, 35% frame)
-                sub_f = canvas[f_by1:f_by2, f_bx1:f_bx2]
-                if sub_f.size > 0:
-                    color_rect = np.full_like(sub_f, COLOR_FACE_OUTSIDE, dtype=np.uint8)
-                    cv2.addWeighted(color_rect, 0.65, sub_f, 0.35, 0, sub_f)
+                # 1. Solid Background Badge tightly touching top edge of bounding box (cv2.FILLED)
+                cv2.rectangle(canvas, (f_bx1, f_by1), (f_bx2, f_by2), badge_bg_color, cv2.FILLED)
+                # Outer crisp border for the badge
+                cv2.rectangle(canvas, (f_bx1, f_by1), (f_bx2, f_by2), box_border_color, 1, lineType=cv2.LINE_AA)
 
+                # 2. Bold White Text on Solid Badge (high contrast)
+                text_y = f_by2 - face_pad_y - baseline + 2
                 cv2.putText(
                     canvas,
                     f_badge,
-                    (f_bx1 + face_pad_x, f_by2 - face_pad_y - 1),
+                    (f_bx1 + face_pad_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     face_font_scale,
-                    (0, 0, 0),
+                    (255, 255, 255),
                     face_font_thick,
                     cv2.LINE_AA,
                 )

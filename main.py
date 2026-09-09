@@ -254,7 +254,9 @@ class CameraPipeline:
             try:
                 rec_model = face_rec_cfg.get("model_path", None)
                 rec_dir = face_rec_cfg.get("known_faces_dir", None)
-                cos_th = float(face_rec_cfg.get("cosine_threshold", 0.50))
+                cos_th = float(face_rec_cfg.get("cosine_threshold", 0.60))
+                if cos_th > 1.0:
+                    cos_th = cos_th / 100.0
                 self.face_recognizer = FaceRecognizer(
                     model_path=rec_model,
                     known_faces_dir=rec_dir,
@@ -1230,13 +1232,17 @@ class CameraPipeline:
                                         dist_moved = ((cur_pos[0] - last_pos[0]) ** 2 + (cur_pos[1] - last_pos[1]) ** 2) ** 0.5
                                         elapsed = now_recog - last_time
 
-                                        # Reuse cache if stationary (< 15 px movement) within validity window (2.5s for known, 1.0s for unknown)
-                                        cache_ttl = 2.5 if (cached_label and cached_label != "Unknown") else 1.0
-                                        if cached_label and dist_moved < 15.0 and elapsed < cache_ttl:
+                                        # Reuse cache if stationary (< 15 px movement) within validity window ONLY for recognized identities.
+                                        # For Unknown faces, never lock out recognition; continuously re-evaluate to capture clear frontal angle.
+                                        is_known_cached = bool(cached_label and cached_label != "Unknown")
+                                        if is_known_cached and dist_moved < 15.0 and elapsed < 2.5:
                                             face_label = cached_label
+                                            best_n = cached.get("name", cached_label.split(" (")[0])
+                                            best_s = cached_score
                                         else:
                                             # Recognize using 1080p display_frame with raw_face_1080 if available
                                             best_s = 0.0
+                                            best_n = "Unknown"
                                             if raw_face_1080 is not None and display_frame is not None:
                                                 best_n, best_s, face_label = self.face_recognizer.recognize(
                                                     frame=display_frame, face_data=raw_face_1080, min_size=24
@@ -1248,18 +1254,21 @@ class CameraPipeline:
                                                 )
 
                                             # Multi-frame best-shot score aggregation
-                                            if cached_label and cached_label != "Unknown" and face_label == "Unknown" and dist_moved < 15.0 and elapsed < 5.0:
+                                            if is_known_cached and face_label == "Unknown" and dist_moved < 15.0 and elapsed < 5.0:
                                                 face_label = cached_label
-                                            elif best_s >= cached_score or (cached_label == "Unknown" and face_label != "Unknown"):
+                                                best_n = cached.get("name", cached_label.split(" (")[0])
+                                                best_s = cached_score
+                                            elif best_s >= cached_score or (not is_known_cached and face_label != "Unknown"):
                                                 if face_id is not None:
                                                     self._face_recog_cache[face_id] = {
                                                         "label": face_label,
+                                                        "name": best_n,
                                                         "score": best_s,
                                                         "time": now_recog,
                                                         "pos": cur_pos,
                                                     }
 
-                                recognized_faces.append((bbox, score, face_label))
+                                recognized_faces.append((bbox, score, face_label, best_n, best_s))
 
                             # Purge stale face recognition caches
                             if active_fids:
@@ -1351,20 +1360,25 @@ class CameraPipeline:
                         "zone": f.get("zone", self.camera_id),
                     })
                 elif isinstance(f, (list, tuple)) and len(f) >= 3:
-                    # Format: (bbox, score, face_label)
+                    # Format: (bbox, score, face_label, [best_n, best_s])
                     _, f_score, f_label = f[0], f[1], f[2]
+                    f_name = f[3] if len(f) >= 4 and f[3] else (str(f_label).split(" (")[0] if isinstance(f_label, str) and " (" in f_label else str(f_label))
+                    f_conf = f[4] if len(f) >= 5 and f[4] > 0 else (float(f_score) if isinstance(f_score, (int, float)) else 0.0)
+                    is_recog = bool(f_name and f_name.lower() != "unknown" and str(f_label) != "Unknown")
+
                     face_telemetry.append({
-                        "name": str(f_label) if f_label else "Unknown",
-                        "confidence": float(f_score) if isinstance(f_score, (int, float)) else 0.0,
+                        "name": f_name if is_recog else "Unknown",
+                        "confidence": float(f_conf) if is_recog else 0.0,
                         "zone": self.camera_id,
                     })
                 elif isinstance(f, (list, tuple)) and len(f) == 2:
                     _, f_score_or_label = f[0], f[1]
                     name = str(f_score_or_label) if isinstance(f_score_or_label, str) else "Unknown"
                     conf = float(f_score_or_label) if isinstance(f_score_or_label, (int, float)) else 0.0
+                    is_recog = bool(name and name.lower() != "unknown")
                     face_telemetry.append({
-                        "name": name,
-                        "confidence": conf,
+                        "name": name if is_recog else "Unknown",
+                        "confidence": conf if is_recog else 0.0,
                         "zone": self.camera_id,
                     })
             telemetry = {

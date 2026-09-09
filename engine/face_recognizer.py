@@ -36,6 +36,8 @@ class FaceRecognizer:
         detector: Optional[Any] = None,
     ) -> None:
         self.cosine_threshold: float = float(cosine_threshold)
+        if self.cosine_threshold > 1.0:
+            self.cosine_threshold = self.cosine_threshold / 100.0
         base_dir = Path(__file__).resolve().parent.parent
 
         if model_path:
@@ -143,10 +145,12 @@ class FaceRecognizer:
             'ALGHANY-1' -> 'Alghany'
             'RIZQI-SETIAWAN' -> 'Rizqi Setiawan'
         """
-        clean = re.sub(r"[-_]\d+$", "", raw_name)
+        if not raw_name or not str(raw_name).strip():
+            return "Unknown"
+        clean = re.sub(r"[-_]\d+$", "", str(raw_name))
         clean = re.sub(r"[-_]+", " ", clean)
         clean_name = " ".join(clean.split()).title()
-        return clean_name if clean_name else raw_name
+        return clean_name if (clean_name and clean_name.strip()) else str(raw_name).strip()
 
     def _compute_dataset_signature(self, image_files: List[Path]) -> str:
         """Compute composite SHA-256 hash over sorted image filenames, sizes, and mtimes."""
@@ -358,8 +362,11 @@ class FaceRecognizer:
                 logger.debug(f"[FaceRecognizer] Match comparison error: {e}")
 
         if best_score >= self.cosine_threshold:
+            clean_name = self.normalize_name(best_name) if (best_name and best_name != "Unknown") else best_name
+            if not clean_name or clean_name.strip().lower() == "unknown":
+                return ("Unknown", max(0.0, best_score), "Unknown")
             pct = int(round(best_score * 100.0))
-            label = f"{best_name} ({pct}%)"
-            return (best_name, best_score, label)
+            label = f"{clean_name} ({pct}%)"
+            return (clean_name, best_score, label)
         else:
             return ("Unknown", max(0.0, best_score), "Unknown")

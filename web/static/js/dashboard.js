@@ -234,7 +234,7 @@ async function pollTelemetry() {
           const initials = isKnown ? rawName.substring(0, 2).toUpperCase() : "??";
           const tagClass = isKnown ? "tag-badge authorized" : "tag-badge unknown";
           const tagText = isKnown ? "Terdaftar" : "Tamu / Unknown";
-          const conf = face.confidence ? `(${(face.confidence * 100).toFixed(0)}%)` : "";
+          const conf = (isKnown && face.confidence) ? `(${(face.confidence * 100).toFixed(0)}%)` : "";
           const zoneText = face.zone || "Area Pantau";
 
           return `
