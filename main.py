@@ -1232,17 +1232,12 @@ class CameraPipeline:
                                     if prev_cache:
                                         prev_cache["last_eval_time"] = now
                                         prev_cache["last_eval_frame"] = self._face_frame_index
-                                        prev_cache["face_bbox_640"] = bbox_f
                                     else:
+                                        # First time seen but non-frontal: throttle retry without creating fake face
                                         self._person_face_recog[eval_track.track_id] = {
-                                            "label": "Unknown",
-                                            "name": "Unknown",
-                                            "score": 0.0,
+                                            "has_seen_face": False,
                                             "last_eval_time": now,
                                             "last_eval_frame": self._face_frame_index,
-                                            "face_bbox_640": bbox_f,
-                                            "face_score": f_det_score,
-                                            "is_known": False,
                                         }
                                 else:
                                     # Frontal face: execute SFace feature extraction & identity matching
@@ -1276,6 +1271,7 @@ class CameraPipeline:
                                             "face_bbox_640": bbox_f,
                                             "face_score": f_det_score,
                                             "is_known": True,
+                                            "has_seen_face": True,
                                         }
                                     else:
                                         # Unknown / non-match: retain previous known identity if established
@@ -1293,33 +1289,28 @@ class CameraPipeline:
                                                 "face_bbox_640": bbox_f,
                                                 "face_score": f_det_score,
                                                 "is_known": False,
+                                                "has_seen_face": True,
                                             }
                             else:
-                                # Head crop yielded no face: set throttle timestamps
-                                px, py, pw, ph = eval_track.bbox
+                                # Head crop yielded no face (e.g. back of head/hair): throttle retry without creating fake face
                                 if eval_track.track_id in self._person_face_recog:
                                     self._person_face_recog[eval_track.track_id]["last_eval_time"] = now
                                     self._person_face_recog[eval_track.track_id]["last_eval_frame"] = self._face_frame_index
                                 else:
                                     self._person_face_recog[eval_track.track_id] = {
-                                        "label": "Unknown",
-                                        "name": "Unknown",
-                                        "score": 0.0,
+                                        "has_seen_face": False,
                                         "last_eval_time": now,
                                         "last_eval_frame": self._face_frame_index,
-                                        "face_bbox_640": (px + pw // 4, py, pw // 2, ph // 3),
-                                        "face_score": 0.50,
-                                        "is_known": False,
                                     }
 
-                        # Synthesize recognized_faces for VisualHUD and telemetry
+                        # Synthesize recognized_faces for VisualHUD and telemetry ONLY for tracks with genuine face detections
                         recognized_faces = []
                         active_track_ids = {t.track_id for t in active_person_tracks}
 
                         for trk in active_person_tracks:
                             p_info = self._person_face_recog.get(trk.track_id)
-                            px, py, pw, ph = trk.bbox
-                            if p_info is not None:
+                            if p_info is not None and p_info.get("has_seen_face", False):
+                                px, py, pw, ph = trk.bbox
                                 f_box = p_info.get("face_bbox_640")
                                 if not f_box or f_box[2] <= 0 or f_box[3] <= 0 or abs(f_box[0] - px) > (pw * 1.5):
                                     f_box = (px + pw // 4, py, pw // 2, ph // 3)
@@ -1328,9 +1319,6 @@ class CameraPipeline:
                                 f_score = p_info.get("score", 0.0)
                                 f_det_s = p_info.get("face_score", 0.80)
                                 recognized_faces.append((f_box, f_det_s, f_lbl, f_name, f_score))
-                            else:
-                                f_box = (px + pw // 4, py, pw // 2, ph // 3)
-                                recognized_faces.append((f_box, 0.50, "Unknown", "Unknown", 0.0))
 
                         # Purge stale tracks no longer in active_person_tracks
                         if active_track_ids:
