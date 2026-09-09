@@ -137,9 +137,14 @@ class YOLOOpenVINODetector:
             # Geometric sanity filter: discard tiny blobs that cannot be human.
             # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
             # seated at desk (wide box), walking (tall box), or crouching (medium box).
+            # Thresholds lowered to detect persons far from camera (e.g. back row desks at 640x360)
             if cid == 0:
                 area = w * h
-                if h < 22 or w < 16 or area < 400:
+                if h < 18 or w < 12 or area < 300:
+                    logger.debug(
+                        f"[YOLODetector] Person blob filtered (too small): "
+                        f"w={w}px h={h}px area={area}px² (min: w>=12, h>=18, area>=300)"
+                    )
                     continue
 
             # Accurate reference point:

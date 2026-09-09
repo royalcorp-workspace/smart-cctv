@@ -38,17 +38,17 @@ class TestFaceQualityAndTrackCache(unittest.TestCase):
         is_f, reason = FaceRecognizer.is_frontal_face(self.frontal_face)
         self.assertTrue(is_f, f"Frontal face should pass: {reason}")
 
-        # 2. Side profile with narrow eye distance (e.g. eyes collapsed to 15px on 100px face -> ratio 0.15)
+        # 2. Side profile with narrow eye distance (e.g. eyes collapsed to 10px on 100px face -> ratio 0.10 < 0.14)
         side_face_narrow = self.frontal_face.copy()
-        side_face_narrow[4] = 90.0
-        side_face_narrow[6] = 105.0  # eye dist = 15px, ratio = 0.15 < 0.22
+        side_face_narrow[4] = 95.0
+        side_face_narrow[6] = 105.0  # eye dist = 10px, ratio = 0.10 < 0.14
         is_f, reason = FaceRecognizer.is_frontal_face(side_face_narrow)
         self.assertFalse(is_f, "Narrow eye distance must be rejected as side profile")
         self.assertIn("narrow eye distance", reason.lower())
 
         # 3. Side profile with nose outside eye span
         side_face_nose_out = self.frontal_face.copy()
-        side_face_nose_out[8] = 135.0  # eyes are 75..125, nose at 135 (outside)
+        side_face_nose_out[8] = 145.0  # eyes are 75..125 (max_span=137 with 12% tol), nose at 145 (outside)
         is_f, reason = FaceRecognizer.is_frontal_face(side_face_nose_out)
         self.assertFalse(is_f, "Nose tip outside eye span must be rejected")
         self.assertIn("nose tip outside", reason.lower())

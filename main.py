@@ -162,12 +162,12 @@ class CameraPipeline:
             base_resolution=self.roi_base_resolution,
         )
         self.tracker = CentroidTracker(
-            max_distance_px=80.0,
+            max_distance_px=100.0,                  # Increased from 80 -> 100px for faster-moving persons
             movement_threshold_px=15.0,
             anchor_radius_px=40.0,
             flicker_tolerance_sec=2.0,
             max_disappeared_sec=12.0,
-            max_age_frames=150,
+            max_age_frames=250,                     # Increased from 150 -> 250 (~19s) to keep seated persons alive
             ema_alpha=0.3,
             spatial_memory_ttl_sec=600.0,          # 10 minutes: give YOLO enough time to re-detect
             spatial_match_distance_px=60.0,
@@ -777,8 +777,13 @@ class CameraPipeline:
                     # Geometric sanity filter: discard tiny blobs that cannot be human.
                     # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
                     # seated at desk (wide box), walking (tall box), or crouching (medium box).
+                    # Thresholds synced with yolo_detector.py to detect persons at back-row desks (640x360)
                     p_w, p_h = bbox[2], bbox[3]
-                    if p_h < 22 or p_w < 16 or (p_w * p_h) < 400:
+                    if p_h < 18 or p_w < 12 or (p_w * p_h) < 300:
+                        logger.debug(
+                            f"[{self.camera_id}] Person detection filtered (too small for human): "
+                            f"w={p_w}px h={p_h}px area={p_w*p_h}px² (min: w>=12, h>=18, area>=300)"
+                        )
                         continue
 
                     # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px
@@ -1154,8 +1159,9 @@ class CameraPipeline:
                 if has_persons:
                     self._last_person_seen_time = now
                 else:
-                    # Grace period: if no person seen for >= 1.5s, purge cached faces
-                    if (now - self._last_person_seen_time) >= 1.5:
+                    # Grace period: if no person seen for >= 3.0s, purge cached faces
+                    # Extended from 1.5s to 3.0s to prevent label flicker on single-frame YOLO miss
+                    if (now - self._last_person_seen_time) >= 3.0:
                         self._cached_faces = []
                         self._face_recog_cache.clear()
                         self._person_face_recog.clear()
@@ -1176,7 +1182,9 @@ class CameraPipeline:
                             else:
                                 elapsed_p = now - p_cache.get("last_eval_time", 0.0)
                                 frames_p = self._face_frame_index - p_cache.get("last_eval_frame", 0)
-                                if elapsed_p >= 1.0 and frames_p >= 15:
+                                # Changed AND -> OR: evaluate if time elapsed OR frame count exceeded
+                                # More responsive for new passersby (elapsed>=0.8s OR frames>=12)
+                                if elapsed_p >= 0.8 or frames_p >= 12:
                                     tracks_needing_eval.append((trk, elapsed_p))
 
                         # Sort candidates with priority for new passersby and moving persons:
@@ -1198,25 +1206,30 @@ class CameraPipeline:
 
                         tracks_needing_eval.sort(key=_person_eval_priority, reverse=True)
 
-                        # Per-frame budget: evaluate at most 1 person track per frame (preserves 12-15+ FPS)
-                        candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:1]]
+                        # Per-frame budget: evaluate at most 2 person tracks per frame
+                        # Increased from 1->2 to reduce label latency when multiple persons are present
+                        candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:2]]
 
                         eval_head_rois = []
                         eval_track = None
                         if candidate_tracks_to_eval:
                             eval_track = candidate_tracks_to_eval[0]
-                            px, py, pw, ph = eval_track.bbox
-                            pad_x = int(pw * 0.20)
-                            h_x1 = max(0, px - pad_x)
-                            h_y1 = max(0, py - int(ph * 0.15))
-                            h_x2 = min(640, px + pw + pad_x)
-                            h_y2 = min(360, py + int(ph * 0.65))
-                            disp_x1 = int(round(h_x1 * scale_disp_x))
-                            disp_y1 = int(round(h_y1 * scale_disp_y))
-                            disp_x2 = int(round(h_x2 * scale_disp_x))
-                            disp_y2 = int(round(h_y2 * scale_disp_y))
-                            if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
-                                eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
+                            # Collect head ROIs for all budgeted tracks (up to 2)
+                            for _eval_trk in candidate_tracks_to_eval:
+                                px, py, pw, ph = _eval_trk.bbox
+                                pad_x = int(pw * 0.20)
+                                h_x1 = max(0, px - pad_x)
+                                h_y1 = max(0, py - int(ph * 0.15))
+                                h_x2 = min(640, px + pw + pad_x)
+                                # Extended head crop from 65% to 75% body height to capture
+                                # downward-tilted faces (seated/typing at desk)
+                                h_y2 = min(360, py + int(ph * 0.75))
+                                disp_x1 = int(round(h_x1 * scale_disp_x))
+                                disp_y1 = int(round(h_y1 * scale_disp_y))
+                                disp_x2 = int(round(h_x2 * scale_disp_x))
+                                disp_y2 = int(round(h_y2 * scale_disp_y))
+                                if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
+                                    eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
                         # Execute YuNet detection only for the single budgeted head crop
                         if eval_head_rois and eval_track is not None:
@@ -1356,10 +1369,10 @@ class CameraPipeline:
                         for trk in active_person_tracks:
                             p_info = self._person_face_recog.get(trk.track_id)
                             if p_info is not None and p_info.get("has_seen_face", False):
-                                # 5.0s grace period: only render face badge if frontal/semi-frontal face was seen within last 5.0 seconds
-                                # Prevents flickering when employee looks down to type or read at desk
+                                # 7.0s grace period: only render face badge if frontal/semi-frontal face was seen within last 7.0 seconds
+                                # Extended from 5.0s -> 7.0s to prevent label disappearing when person briefly turns away
                                 last_frontal = p_info.get("last_frontal_seen_time", 0.0)
-                                if (now - last_frontal) <= 5.0:
+                                if (now - last_frontal) <= 7.0:
                                     px, py, pw, ph = trk.bbox
                                     f_box = p_info.get("face_bbox_640")
                                     # TOTAL ELIMINATION OF SYNTHETIC FALLBACK BOX:

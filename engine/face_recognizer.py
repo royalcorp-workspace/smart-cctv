@@ -498,18 +498,19 @@ class FaceRecognizer:
         best_name, best_score = sorted_identities[0]
 
         # Top-2 Ambiguity Guard:
-        # If best score is below high-confidence (> 0.65) and difference to 2nd-best identity is < 0.08,
+        # If best score is below high-confidence (> 0.65) and difference to 2nd-best identity is < 0.06,
         # the match is ambiguous (e.g. Aji vs Rizqi separated by only 0.03).
         # Reject to "Unknown" to protect against identity swap.
+        # Margin relaxed from 0.08 -> 0.06 to avoid over-rejecting near-certain matches (0.06-0.08 gap).
         is_ambiguous = False
         if len(sorted_identities) > 1 and best_score < 0.65:
             second_name, second_score = sorted_identities[1]
             margin = best_score - second_score
-            if margin < 0.08:
+            if margin < 0.06:
                 is_ambiguous = True
                 logger.info(
                     f"[DEBUG-FACE] Ambiguous match: '{best_name}' ({best_score:.3f}) vs '{second_name}' ({second_score:.3f}), "
-                    f"margin {margin:.3f} < 0.08 -> rejected to Unknown to prevent identity swap"
+                    f"margin {margin:.3f} < 0.06 -> rejected to Unknown to prevent identity swap"
                 )
 
         if best_score >= self.cosine_threshold and not is_ambiguous:
