@@ -31,7 +31,7 @@ class FaceRecognizer:
         self,
         model_path: Optional[str] = None,
         known_faces_dir: Optional[str] = None,
-        cosine_threshold: float = 0.50,
+        cosine_threshold: float = 0.58,
         auto_download: bool = True,
         detector: Optional[Any] = None,
     ) -> None:
@@ -481,19 +481,38 @@ class FaceRecognizer:
         if feature is None:
             return ("Unknown", 0.0, "Unknown")
 
-        best_name: str = "Unknown"
-        best_score: float = -1.0
-
+        # Group scores by distinct identity to evaluate per-person best similarity
+        scores_by_identity: Dict[str, float] = {}
         for name, known_feat in self.known_embeddings:
             try:
                 score = float(self.recognizer.match(feature, known_feat, cv2.FaceRecognizerSF_FR_COSINE))
-                if score > best_score:
-                    best_score = score
-                    best_name = name
+                if name not in scores_by_identity or score > scores_by_identity[name]:
+                    scores_by_identity[name] = score
             except Exception as e:
                 logger.debug(f"[FaceRecognizer] Match comparison error: {e}")
 
-        if best_score >= self.cosine_threshold:
+        if not scores_by_identity:
+            return ("Unknown", 0.0, "Unknown")
+
+        sorted_identities = sorted(scores_by_identity.items(), key=lambda it: it[1], reverse=True)
+        best_name, best_score = sorted_identities[0]
+
+        # Top-2 Ambiguity Guard:
+        # If best score is below high-confidence (> 0.65) and difference to 2nd-best identity is < 0.08,
+        # the match is ambiguous (e.g. Aji vs Rizqi separated by only 0.03).
+        # Reject to "Unknown" to protect against identity swap.
+        is_ambiguous = False
+        if len(sorted_identities) > 1 and best_score < 0.65:
+            second_name, second_score = sorted_identities[1]
+            margin = best_score - second_score
+            if margin < 0.08:
+                is_ambiguous = True
+                logger.info(
+                    f"[DEBUG-FACE] Ambiguous match: '{best_name}' ({best_score:.3f}) vs '{second_name}' ({second_score:.3f}), "
+                    f"margin {margin:.3f} < 0.08 -> rejected to Unknown to prevent identity swap"
+                )
+
+        if best_score >= self.cosine_threshold and not is_ambiguous:
             clean_name = self.normalize_name(best_name) if (best_name and best_name != "Unknown") else best_name
             if not clean_name or clean_name.strip().lower() == "unknown":
                 return ("Unknown", max(0.0, best_score), "Unknown")
@@ -501,9 +520,8 @@ class FaceRecognizer:
             label = f"{clean_name} ({pct}%)"
             return (clean_name, best_score, label)
         else:
-            # Telemetry: log closest candidate even if rejected below threshold.
-            # Helps operators calibrate dataset / threshold without touching the HUD.
-            if best_score > 0.0 and best_name != "Unknown":
+            # Telemetry: log closest candidate if rejected by threshold (and not ambiguous)
+            if best_score > 0.0 and best_name != "Unknown" and not is_ambiguous:
                 logger.info(
                     f"[DEBUG-FACE] Wajah mirip dengan '{best_name}' "
                     f"({best_score:.3f}) tapi ditolak karena < {self.cosine_threshold:.2f}"

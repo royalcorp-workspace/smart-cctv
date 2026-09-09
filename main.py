@@ -778,7 +778,7 @@ class CameraPipeline:
                     # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
                     # seated at desk (wide box), walking (tall box), or crouching (medium box).
                     p_w, p_h = bbox[2], bbox[3]
-                    if p_h < 40 or p_w < 30 or (p_w * p_h) < 1500:
+                    if p_h < 22 or p_w < 16 or (p_w * p_h) < 400:
                         continue
 
                     # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px

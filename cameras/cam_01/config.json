@@ -37,7 +37,7 @@
     "enabled": true,
     "model_path": "models/face_recognition_sface_2021dec.onnx",
     "known_faces_dir": "data/known_faces",
-    "cosine_threshold": 0.50
+    "cosine_threshold": 0.58
   },
   "telegram": {
     "enabled": true,

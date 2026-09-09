@@ -118,8 +118,9 @@ class TrackedObject:
         with confidence < 0.42 after initial frames (frame_count >= 5), dismiss as artifact.
         """
         if self.class_label == "person":
-            if self.frame_count >= 5 and self.max_displacement_from_start <= 2.0 and self.confidence < 0.42:
-                return True
+            # Genuine humans sitting at desks do not move their centroid much, but are real persons!
+            # Never dismiss tracked persons as static artifacts so OBJEK TERLACAK counter reflects real occupancy.
+            return False
         return False
 
     @property

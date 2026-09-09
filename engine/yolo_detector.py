@@ -139,7 +139,7 @@ class YOLOOpenVINODetector:
             # seated at desk (wide box), walking (tall box), or crouching (medium box).
             if cid == 0:
                 area = w * h
-                if h < 40 or w < 30 or area < 1500:
+                if h < 22 or w < 16 or area < 400:
                     continue
 
             # Accurate reference point:
