@@ -31,7 +31,7 @@ class FaceRecognizer:
         self,
         model_path: Optional[str] = None,
         known_faces_dir: Optional[str] = None,
-        cosine_threshold: float = 0.60,
+        cosine_threshold: float = 0.50,
         auto_download: bool = True,
         detector: Optional[Any] = None,
     ) -> None:
