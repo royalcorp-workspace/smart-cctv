@@ -18,8 +18,8 @@
       "handbag",
       "suitcase"
     ],
-    "confidence_threshold": 0.20,
-    "base_conf": 0.20,
+    "confidence_threshold": 0.22,
+    "base_conf": 0.22,
     "bag_conf": 0.18
   },
   "face_detector": {

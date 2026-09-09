@@ -425,6 +425,11 @@ class CentroidTracker:
             last_yolo_seen_time=last_yolo_seen_time,
         )
         self.objects[self._next_id] = new_obj
+        if label == "person":
+            logger.info(
+                f"[TRACKER] Person Track #{self._next_id} registered at {centroid} "
+                f"(bbox={bbox}, conf={conf:.2f}, zone='{zone_id}')"
+            )
         self._next_id += 1
         return new_obj
 
@@ -538,18 +543,23 @@ class CentroidTracker:
                 if min(dist_matrix[row, col], d_anchor) > self.max_distance_px and max(box_iou, anchor_iou) < 0.20:
                     continue
             else:
+                # Adaptive person distance scaling: perspective increases step distance in foreground (bottom of frame)
+                py_pos = max(obj.centroid[1], new_centroid[1])
+                adaptive_person_dist = self.max_distance_px + (90.0 * min(1.0, max(0.0, py_pos / 360.0)))
                 box_iou = compute_bbox_iou(obj.bbox, bbox)
-                if dist_matrix[row, col] > self.max_distance_px and box_iou < 0.15:
+                if dist_matrix[row, col] > adaptive_person_dist and box_iou < 0.10:
                     continue
             edge_dist = float(det[5]) if len(det) >= 6 else 20.0
             conf = float(det[6]) if len(det) >= 7 else 0.0
             det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
-            # 1. EMA Centroid Smoothing: centroid = alpha * new_centroid + (1 - alpha) * old_centroid (alpha = 0.3)
+            # 1. Centroid Smoothing: fast responsive tracking for persons (alpha=0.70) to prevent lag during walking,
+            # heavy smoothing for stationary bags (alpha=0.30) to eliminate jitter
             old_cx, old_cy = obj.centroid
             new_cx, new_cy = new_centroid
-            smooth_cx = int(round(self.ema_alpha * float(new_cx) + (1.0 - self.ema_alpha) * float(old_cx)))
-            smooth_cy = int(round(self.ema_alpha * float(new_cy) + (1.0 - self.ema_alpha) * float(old_cy)))
+            alpha_val = 0.70 if obj.class_label == "person" else self.ema_alpha
+            smooth_cx = int(round(alpha_val * float(new_cx) + (1.0 - alpha_val) * float(old_cx)))
+            smooth_cy = int(round(alpha_val * float(new_cy) + (1.0 - alpha_val) * float(old_cy)))
             smoothed_centroid = (smooth_cx, smooth_cy)
 
             # Calculate distance from anchor position using smoothed centroid
@@ -725,7 +735,11 @@ class CentroidTracker:
             det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
             is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
-            max_match_dist = 60.0 if is_det_bag else self.max_distance_px
+            if is_det_bag:
+                max_match_dist = 60.0
+            else:
+                py_pos = det_centroid[1]
+                max_match_dist = self.max_distance_px + (90.0 * min(1.0, max(0.0, py_pos / 360.0)))
 
             matched_existing = None
             min_existing_dist = max_match_dist
@@ -747,7 +761,8 @@ class CentroidTracker:
                     compute_bbox_iou(getattr(ex_obj, "anchor_bbox", ex_obj.bbox), det_bbox),
                 )
 
-                if best_d <= min_existing_dist or box_iou >= 0.15:
+                min_iou = 0.15 if is_det_bag else 0.10
+                if best_d <= min_existing_dist or box_iou >= min_iou:
                     if best_d < min_existing_dist:
                         min_existing_dist = best_d
                         matched_existing = ex_obj
@@ -930,11 +945,18 @@ class CentroidTracker:
             max_limit_sec = getattr(self, "stationary_max_disappeared_sec", 45.0) if (is_bag or obj.is_stationary) else self.max_disappeared_sec
 
             if not is_retrieved:
-                # Diagnostic log: print exact reasons
-                logger.warning(
-                    f"[TRACKER-PURGE] Purging track ID {obj.track_id} (label='{obj.class_label}', is_stationary={obj.is_stationary}, "
-                    f"missed_frames={obj.missed_frames}/{max_limit_frames}, elapsed={elapsed_sec:.2f}s/{max_limit_sec:.2f}s, dwell={obj.dwell_duration:.1f}s)"
-                )
+                if obj.class_label == "person":
+                    total_dur = now - obj.first_seen
+                    logger.info(
+                        f"[TRACKER] Person Track #{obj.track_id} deregistered/left frame "
+                        f"(tracked for {total_dur:.1f}s, last_seen={elapsed_sec:.1f}s ago)"
+                    )
+                else:
+                    # Diagnostic log: print exact reasons
+                    logger.warning(
+                        f"[TRACKER-PURGE] Purging track ID {obj.track_id} (label='{obj.class_label}', is_stationary={obj.is_stationary}, "
+                        f"missed_frames={obj.missed_frames}/{max_limit_frames}, elapsed={elapsed_sec:.2f}s/{max_limit_sec:.2f}s, dwell={obj.dwell_duration:.1f}s)"
+                    )
 
             if not is_retrieved and (is_bag or obj.is_stationary or obj.dwell_duration > 0.0):
                 # Archive stationary bag to Spatial Memory cache

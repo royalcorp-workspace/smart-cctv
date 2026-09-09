@@ -620,10 +620,9 @@ class CameraPipeline:
             # 2. Scaled lightweight inference frame (640x480) for AI models (YOLO11n, MOG2, YuNet)
             infer_frame = cv2.resize(frame, self.infer_resolution, interpolation=cv2.INTER_LINEAR)
 
-            # 1. YOLO11 Nano Object Detection on 640x360 inference frame with adaptive zero-delay stride
-            # Zero delay (stride = 1) when persons are present or recently seen (< 2.0s); 2-frame stride when empty room
-            has_recent_person = (now - self._last_person_seen_time) <= 2.0
-            yolo_interval = 1 if has_recent_person else 2
+            # 1. YOLO11 Nano Object Detection on 640x360 inference frame with zero-delay stride
+            # Zero-delay (stride = 1) whenever persons are active or room is being monitored for passersby
+            yolo_interval = 1
             if (self._yolo_frame_index % yolo_interval) == 0:
                 self._cached_yolo_results = self.detector.detect(infer_frame)
             self._yolo_frame_index += 1
@@ -792,12 +791,11 @@ class CameraPipeline:
                             (bbox, centroid, matched_zone, area, "person", edge_dist, float(conf), "yolo")
                         )
                     else:
-                        # Also track person near any monitored zone (within 150 px) for universal owner proximity
+                        # Full-Frame Person Tracking: Track persons anywhere in the camera view without spatial zone limits
                         dist_to_nearest = self.zone_filter.get_distance_to_nearest_zone(ref_point)
-                        if dist_to_nearest >= -150.0:
-                            formatted_detections.append(
-                                (bbox, centroid, "outside_zone", area, "person", dist_to_nearest, float(conf), "yolo")
-                            )
+                        formatted_detections.append(
+                            (bbox, centroid, "outside_zone", area, "person", dist_to_nearest, float(conf), "yolo")
+                        )
                 elif is_bag:
                     # 3. Filter batas aspek rasio & dimensi tas: h <= 200 px, area >= 250 px
                     if bbox[3] > 200 or (bbox[2] * bbox[3]) < 250:
@@ -1181,11 +1179,24 @@ class CameraPipeline:
                                 if elapsed_p >= 1.0 and frames_p >= 15:
                                     tracks_needing_eval.append((trk, elapsed_p))
 
-                        # Sort candidates: longest un-evaluated first, then by closest person (bbox area)
-                        tracks_needing_eval.sort(
-                            key=lambda item: (item[1], item[0].bbox[2] * item[0].bbox[3]),
-                            reverse=True,
-                        )
+                        # Sort candidates with priority for new passersby and moving persons:
+                        def _person_eval_priority(item: Tuple[Any, float]) -> float:
+                            trk_obj, elapsed_time = item
+                            p_c = self._person_face_recog.get(trk_obj.track_id)
+                            has_face = p_c and p_c.get("has_seen_face", False)
+                            is_moving = getattr(trk_obj, "max_displacement_from_start", 0.0) > 20.0 or getattr(trk_obj, "moved_confirmation_frames", 0) > 5
+                            box_sz = float(trk_obj.bbox[2] * trk_obj.bbox[3])
+                            # Tier 1 (highest): New track or moving passerby with no face yet
+                            if not has_face and is_moving:
+                                return 20000.0 + box_sz
+                            elif not has_face:
+                                return 10000.0 + box_sz
+                            elif is_moving:
+                                return 5000.0 + elapsed_time
+                            else:
+                                return elapsed_time
+
+                        tracks_needing_eval.sort(key=_person_eval_priority, reverse=True)
 
                         # Per-frame budget: evaluate at most 1 person track per frame (preserves 12-15+ FPS)
                         candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:1]]

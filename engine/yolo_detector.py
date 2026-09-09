@@ -22,7 +22,7 @@ class YOLOOpenVINODetector:
     }
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
-        0: 0.33,   # person: lowered for overhead CCTV angle where confidence is naturally suppressed
+        0: 0.25,   # person: calibrated for overhead CCTV and motion-blurred walking
         24: 0.18,  # backpack: calibrated for floor/lying bags
         26: 0.18,  # handbag: calibrated for floor/lying bags
         28: 0.18,  # suitcase: calibrated for floor/lying bags
@@ -89,12 +89,12 @@ class YOLOOpenVINODetector:
         Returns list of tuples:
             ( (x, y, w, h), (cx, cy), (ref_x, ref_y), confidence, class_id, class_name )
         """
-        # Run base inference with low threshold (0.25) and class-agnostic NMS
+        # Run base inference with low threshold (0.22) and class-agnostic NMS
         results = self.model(
             frame,
             device=self.device,
             imgsz=self.imgsz,
-            conf=0.25,
+            conf=0.22,
             classes=list(self.TARGET_CLASSES.keys()),
             agnostic_nms=True,
             verbose=False,
