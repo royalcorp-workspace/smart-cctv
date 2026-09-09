@@ -229,12 +229,19 @@ class FaceRecognizer:
             return False, f"Landmark validation error: {e}"
 
     def _compute_dataset_signature(self, image_files: List[Path]) -> str:
-        """Compute composite SHA-256 hash over sorted image filenames, sizes, and mtimes."""
+        """Compute composite SHA-256 hash over sorted image paths, sizes, and mtimes.
+
+        Accepts a flat list of absolute paths (may span multiple subdirectories),
+        so the signature reflects any addition, deletion, or modification anywhere
+        in the known_faces tree.
+        """
         hasher = hashlib.sha256()
         for p in sorted(image_files):
             try:
                 st = p.stat()
-                hasher.update(p.name.encode("utf-8"))
+                # Include relative path from known_faces root so renames are detected
+                rel = str(p.relative_to(self.known_faces_dir))
+                hasher.update(rel.encode("utf-8"))
                 hasher.update(str(st.st_size).encode("utf-8"))
                 hasher.update(str(st.st_mtime_ns).encode("utf-8"))
             except OSError:
@@ -287,9 +294,23 @@ class FaceRecognizer:
             logger.warning(f"[FaceRecognizer] Failed saving embeddings cache: {e}")
 
     def load_database(self) -> int:
-        """Scan data/known_faces/, extract 128-D embeddings, and cache in memory.
+        """Scan data/known_faces/ recursively, extract 128-D embeddings, and cache in memory.
 
-        Uses fast startup .npz caching when file signatures match.
+        Supports two dataset layouts (can be mixed):
+
+        Subfolder-per-identity (preferred for multi-angle enrollment):
+            data/known_faces/
+                Alghany/
+                    depan.jpg          -> identity = "Alghany"
+                    cctv_overhead.jpg  -> identity = "Alghany"
+                Rizqi Setiawan/
+                    1.jpg              -> identity = "Rizqi Setiawan"
+
+        Flat root (legacy, still supported):
+            data/known_faces/
+                RIAN_HERI.jpg          -> identity = "Rian Heri" (normalize_name)
+
+        Uses fast startup .npz caching when the recursive file signature matches.
         Returns total number of successfully indexed photos.
         """
         self.known_embeddings.clear()
@@ -299,9 +320,15 @@ class FaceRecognizer:
             return 0
 
         valid_extensions = {".jpg", ".jpeg", ".png"}
+
+        # Recursive scan — picks up both root-level files and subfolder files.
+        # Exclude hidden files and the cache file itself.
         image_files = [
-            p for p in self.known_faces_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in valid_extensions
+            p for p in self.known_faces_dir.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in valid_extensions
+            and not p.name.startswith(".")
+            and p != self.cache_path
         ]
 
         if not image_files:
@@ -321,15 +348,31 @@ class FaceRecognizer:
         if self._load_cache(dataset_sig):
             return len(self.known_embeddings)
 
-        logger.info(f"[FaceRecognizer] Indexing {len(image_files)} reference photo(s) from {self.known_faces_dir}...")
+        logger.info(
+            f"[FaceRecognizer] Indexing {len(image_files)} reference photo(s) from "
+            f"{self.known_faces_dir} (including subfolders)..."
+        )
         detector = self._get_detector()
         loaded_count = 0
 
         for img_path in sorted(image_files):
             try:
+                # --- Identity label resolution ---
+                # If image is inside a direct subfolder of known_faces/, use folder name.
+                # If image is directly in known_faces/ root, use filename stem (legacy).
+                parent = img_path.parent
+                if parent == self.known_faces_dir:
+                    # Flat root file: normalize filename stem
+                    raw_label = img_path.stem
+                    identity = self.normalize_name(raw_label)
+                else:
+                    # Subfolder file: use folder name directly (already human-readable)
+                    # Still run through normalize_name to ensure consistent Title Case
+                    identity = self.normalize_name(parent.name)
+
                 img = cv2.imread(str(img_path))
                 if img is None or img.size == 0:
-                    logger.warning(f"[FaceRecognizer] Failed to read image: {img_path.name}")
+                    logger.warning(f"[FaceRecognizer] Failed to read image: {img_path.relative_to(self.known_faces_dir)}")
                     continue
 
                 h, w = img.shape[:2]
@@ -338,7 +381,8 @@ class FaceRecognizer:
 
                 if retval is None or faces is None or len(faces) == 0:
                     logger.warning(
-                        f"[FaceRecognizer] No face detected in reference photo '{img_path.name}'. Skipping."
+                        f"[FaceRecognizer] No face detected in reference photo "
+                        f"'{img_path.relative_to(self.known_faces_dir)}'. Skipping."
                     )
                     continue
 
@@ -349,14 +393,18 @@ class FaceRecognizer:
                     aligned_face = apply_clahe(aligned_face, clip_limit=2.0)
                 feature = self.recognizer.feature(aligned_face)
 
-                clean_name = self.normalize_name(img_path.stem)
-
-                self.known_embeddings.append((clean_name, feature))
+                self.known_embeddings.append((identity, feature))
                 loaded_count += 1
-                logger.info(f"[FaceRecognizer] Loaded reference face: '{clean_name}' (from {img_path.name})")
+                logger.info(
+                    f"[FaceRecognizer] Loaded reference face: '{identity}' "
+                    f"(from {img_path.relative_to(self.known_faces_dir)})"
+                )
 
             except Exception as e:
-                logger.error(f"[FaceRecognizer] Error processing reference photo {img_path.name}: {e}")
+                logger.error(
+                    f"[FaceRecognizer] Error processing reference photo "
+                    f"{img_path.relative_to(self.known_faces_dir)}: {e}"
+                )
 
         logger.info(
             f"[FaceRecognizer] Database indexing complete: {loaded_count}/{len(image_files)} faces loaded."
