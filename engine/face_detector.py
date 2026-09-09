@@ -19,6 +19,22 @@ YUNET_DEFAULT_URL: str = (
 EXPECTED_MIN_BYTES: int = 200_000  # Official file is ~232 KB
 
 
+def apply_clahe(img: np.ndarray, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)) -> np.ndarray:
+    """Enhance local contrast via CLAHE on L-channel in LAB space to eliminate harsh shadow degradation."""
+    if img is None or img.size == 0:
+        return img
+    try:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        cl = clahe.apply(l_channel)
+        merged = cv2.merge((cl, a_channel, b_channel))
+        return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    except Exception as e:
+        logger.debug(f"[apply_clahe] Preprocessing fallback: {e}")
+        return img
+
+
 def _compute_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]) -> float:
     """Compute Intersection-over-Union (IoU) between two bounding boxes (x, y, w, h)."""
     x1, y1, w1, h1 = box1
@@ -51,7 +67,7 @@ class YuNetFaceDetector:
         ema_alpha: float = 0.45,
         alternate_inference: bool = True,
         resize_interpolation: int = cv2.INTER_LINEAR,
-        min_face_size: int = 32,
+        min_face_size: int = 24,
         aspect_ratio_range: Tuple[float, float] = (0.6, 1.4),
     ) -> None:
         self.score_threshold = float(score_threshold)
@@ -238,6 +254,8 @@ class YuNetFaceDetector:
         resized_crop = cv2.resize(
             desk_crop, (target_crop_w, target_crop_h), interpolation=self.resize_interpolation
         )
+        # Enhance local contrast on crop to eliminate harsh overhead lighting shadows
+        resized_crop = apply_clahe(resized_crop, clip_limit=2.0)
 
         # Detect faces on high-resolution crop
         crop_raw_faces = self.detect(resized_crop)
@@ -329,7 +347,7 @@ class YuNetFaceDetector:
                     if len(crop_roi) >= 4:
                         crop_rois_list.append(tuple(int(v) for v in crop_roi[:4]))
                 else:
-                    for r in crop_roi[:2]:  # Process up to 2 priority crops
+                    for r in crop_roi[:3]:  # Process up to 3 priority crops (Safeguard 1)
                         if isinstance(r, (list, tuple)) and len(r) >= 4:
                             crop_rois_list.append(tuple(int(v) for v in r[:4]))
 

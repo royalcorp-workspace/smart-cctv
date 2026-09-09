@@ -49,13 +49,13 @@ def test_base_resolution_detection() -> bool:
     print(f" - Implicit 1080p heuristic detected: {zf_implicit.base_resolution}")
     assert zf_implicit.base_resolution == (1920, 1080)
 
-    # Case C: Implicit 640x480 (all coordinates within 640 and 480)
+    # Case C: Implicit 640x360 (all coordinates within 640 and 360)
     data_implicit_640p = {
         "zone_1_koridor": [[50, 50], [200, 50], [200, 200]],
     }
-    zf_640p = ZoneFilter(zones=data_implicit_640p, frame_shape=(480, 640))
+    zf_640p = ZoneFilter(zones=data_implicit_640p, frame_shape=(360, 640))
     print(f" - Implicit 640p heuristic detected: {zf_640p.base_resolution}")
-    assert zf_640p.base_resolution == (640, 480)
+    assert zf_640p.base_resolution == (640, 360)
 
     print(" -> PASS: Base resolution auto-detection verified.")
     return True

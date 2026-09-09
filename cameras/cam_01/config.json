@@ -30,7 +30,7 @@
     "detect_interval_frames": 3,
     "face_roi_crop": [100, 40, 1250, 520],
     "alternate_inference": true,
-    "min_face_size": 16,
+    "min_face_size": 24,
     "aspect_ratio_range": [0.6, 1.4]
   },
   "face_recognizer": {

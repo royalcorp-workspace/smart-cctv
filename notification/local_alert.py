@@ -154,9 +154,9 @@ class VisualHUD:
 
         active_faces = faces if faces is not None else (outside_faces or [])
 
-        # Dynamic Resolution Decoupling Scaling Ratios for Inference Objects (base 640x480)
+        # Dynamic Resolution Decoupling Scaling Ratios for Inference Objects (base 640x360 native 16:9)
         scale_x = w / 640.0
-        scale_y = h / 480.0
+        scale_y = h / 360.0
         scale_factor = min(scale_x, scale_y)
 
         # Determine Zone Polygon Coordinate Base Resolution
@@ -165,7 +165,7 @@ class VisualHUD:
         elif "base_resolution" in zones and isinstance(zones["base_resolution"], (list, tuple)):
             zone_base_w, zone_base_h = zones["base_resolution"]
         else:
-            # Auto-detect from coordinates: if any x > 640 or y > 480 -> 1080p, else 640p
+            # Auto-detect from coordinates: if any x > 640 or y > 360 -> 1080p, else 640p
             max_zx = 0
             max_zy = 0
             for k, v in zones.items():
@@ -174,10 +174,10 @@ class VisualHUD:
                         if len(pt) >= 2:
                             max_zx = max(max_zx, pt[0])
                             max_zy = max(max_zy, pt[1])
-            if max_zx > 640 or max_zy > 480:
+            if max_zx > 640 or max_zy > 360:
                 zone_base_w, zone_base_h = (1920, 1080)
             else:
-                zone_base_w, zone_base_h = (640, 480)
+                zone_base_w, zone_base_h = (640, 360)
 
         zone_scale_x = w / float(zone_base_w) if zone_base_w > 0 else 1.0
         zone_scale_y = h / float(zone_base_h) if zone_base_h > 0 else 1.0

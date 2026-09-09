@@ -29,7 +29,7 @@ class ZoneFilter:
         elif "base_resolution" in zones and isinstance(zones["base_resolution"], (list, tuple)):
             self.base_resolution = (int(zones["base_resolution"][0]), int(zones["base_resolution"][1]))
         else:
-            # Auto-detect from coordinates: if any x > 640 or y > 480 -> 1080p, else 640p
+            # Auto-detect from coordinates: if any x > 640 or y > 360 -> 1080p, else 640p
             max_x = 0
             max_y = 0
             for pts in self.raw_zones.values():
@@ -37,10 +37,10 @@ class ZoneFilter:
                     if len(pt) >= 2:
                         max_x = max(max_x, pt[0])
                         max_y = max(max_y, pt[1])
-            if max_x > 640 or max_y > 480:
+            if max_x > 640 or max_y > 360:
                 self.base_resolution = (1920, 1080)
             else:
-                self.base_resolution = (640, 480)
+                self.base_resolution = (640, 360)
 
         # Precompute downscaled polygon contours matching frame_shape (inference space, e.g. 640x480)
         self.scaled_zones: Dict[str, List[List[int]]] = {}
@@ -169,7 +169,7 @@ class ZoneFilter:
     def filter_contours(
         self,
         mask: np.ndarray,
-        min_area_default: int = 400,
+        min_area_default: int = 250,
     ) -> List[Tuple[np.ndarray, Tuple[int, int, int, int], Tuple[int, int], str]]:
         """Find contours in mask, validate polygon inclusion, and filter by minimum area.
 

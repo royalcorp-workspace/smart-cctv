@@ -127,8 +127,8 @@ class CameraPipeline:
         if cfg_res and len(cfg_res) == 2:
             self.target_resolution = (int(cfg_res[0]), int(cfg_res[1]))
 
-        # Decoupled AI inference resolution (fixed 640x480 for lightweight CPU performance)
-        self.infer_resolution: Tuple[int, int] = (640, 480)
+        # Decoupled AI inference resolution (native 16:9 aspect 640x360 for zero-distortion CPU inference)
+        self.infer_resolution: Tuple[int, int] = (640, 360)
 
         # Initialize Subcomponents
         self.capture = ThreadedCapture(source=self.config.get("source", 0))
@@ -222,7 +222,7 @@ class CameraPipeline:
                 score_th = float(face_cfg.get("score_threshold", 0.62))
                 nms_th = float(face_cfg.get("nms_threshold", 0.30))
                 alternate_infer = bool(face_cfg.get("alternate_inference", True))
-                min_face_sz = int(face_cfg.get("min_face_size", 32))
+                min_face_sz = int(face_cfg.get("min_face_size", 24))
                 aspect_range = face_cfg.get("aspect_ratio_range", [0.6, 1.4])
                 self.face_detector = YuNetFaceDetector(
                     model_path=face_model,
@@ -617,8 +617,11 @@ class CameraPipeline:
             # 2. Scaled lightweight inference frame (640x480) for AI models (YOLO11n, MOG2, YuNet)
             infer_frame = cv2.resize(frame, self.infer_resolution, interpolation=cv2.INTER_LINEAR)
 
-            # 1. YOLO11 Nano Object Detection on 640x480 inference frame with 2-frame stride (50% CPU savings)
-            if (self._yolo_frame_index % 2) == 0:
+            # 1. YOLO11 Nano Object Detection on 640x360 inference frame with adaptive zero-delay stride
+            # Zero delay (stride = 1) when persons are present or recently seen (< 2.0s); 2-frame stride when empty room
+            has_recent_person = (now - self._last_person_seen_time) <= 2.0
+            yolo_interval = 1 if has_recent_person else 2
+            if (self._yolo_frame_index % yolo_interval) == 0:
                 self._cached_yolo_results = self.detector.detect(infer_frame)
             self._yolo_frame_index += 1
             yolo_results = self._cached_yolo_results
@@ -629,7 +632,7 @@ class CameraPipeline:
                     if trk.bbox not in person_boxes:
                         person_boxes.append(trk.bbox)
 
-            # 2. DualSubtractor for stationary object extraction on 640x480 inference frame
+            # 2. DualSubtractor for stationary object extraction on 640x360 inference frame
             _, _, static_mask = self.subtractor.apply(infer_frame)
             if getattr(self, "_unattended_zones_mask", None) is None or self._unattended_zones_mask.shape != infer_frame.shape[:2]:
                 self._unattended_zones_mask = self.zone_filter.get_unattended_zones_mask(shape=infer_frame.shape[:2])
@@ -653,15 +656,15 @@ class CameraPipeline:
             static_merged = cv2.morphologyEx(static_mask_zoned, cv2.MORPH_CLOSE, self._kernel_close_large)
             static_merged = cv2.dilate(static_merged, self._kernel_dilate, iterations=1)
 
-            static_detections = self.zone_filter.filter_contours(static_merged, min_area_default=400)
+            static_detections = self.zone_filter.filter_contours(static_merged, min_area_default=250)
 
             formatted_detections = []
 
             # 2a. Stationary bags extracted by DualSubtractor across all active ROI zones
             for cnt, (bx, by, bw, bh), (bcx, bcy), bzone in static_detections:
                 # 3. Filter batas aspek rasio & ketinggian tas:
-                # Ambang tinggi maksimal: h <= 120 px, area minimal: w * h >= 400 px
-                if bh > 120 or (bw * bh) < 400:
+                # Ambang tinggi maksimal: h <= 200 px, area minimal: w * h >= 250 px
+                if bh > 200 or (bw * bh) < 250:
                     continue
 
                 # 2. Filter overlap / carried bag suppression:
@@ -671,6 +674,9 @@ class CameraPipeline:
 
                 # Ghost Artifact Elimination (uncovered flat floor verification)
                 crop = infer_frame[by:by+bh, bx:bx+bw]
+                crop_var = 0.0
+                crop_edges = 0
+                edge_density = 0.0
                 if crop.size > 0:
                     crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                     crop_var = float(np.var(crop_gray))
@@ -729,6 +735,17 @@ class CameraPipeline:
                                 has_recent_yolo_track = True
                                 break
 
+                # Safeguard 2: Small contour verification (>= 250 px, < 400 px)
+                # Must pass strict edge density/variance or require confirmed YOLO to prevent tile reflection false alarms
+                is_small_contour = (bw * bh) < 400
+                if is_small_contour and not (has_current_yolo or has_recent_yolo_track):
+                    if crop_var < 55.0 or edge_density < 0.020:
+                        logger.debug(
+                            f"[{self.camera_id}] Discarded small low-texture contour at ({bcx}, {bcy}) "
+                            f"(var={crop_var:.1f}, edge_density={edge_density:.4f})."
+                        )
+                        continue
+
                 if (is_near_retrieved or is_near_active_bag_with_person) and not has_current_yolo:
                     logger.debug(
                         f"[{self.camera_id}] Discarded ghost tile blob at ({bcx}, {bcy}) "
@@ -772,8 +789,8 @@ class CameraPipeline:
                                 (bbox, centroid, "outside_zone", area, "person", dist_to_nearest, float(conf), "yolo")
                             )
                 elif is_bag:
-                    # 3. Filter batas aspek rasio & dimensi tas
-                    if bbox[3] > 120 or (bbox[2] * bbox[3]) < 400:
+                    # 3. Filter batas aspek rasio & dimensi tas: h <= 200 px, area >= 250 px
+                    if bbox[3] > 200 or (bbox[2] * bbox[3]) < 250:
                         continue
 
                     # 2. Filter overlap / carried bag suppression
@@ -1132,57 +1149,32 @@ class CameraPipeline:
 
                 # CONDITIONAL INFERENCE: Skip YuNet & SFace when no person in frame
                 if has_persons:
-                    is_burst_active = (now < self._face_burst_until_time)
-                    current_face_interval = 1 if is_burst_active else self._face_detect_interval
+                    # Adaptive Zero-Delay: evaluate every frame (interval=1) whenever people are in scene
+                    current_face_interval = 1
 
                     if (self._face_frame_index % current_face_interval) == 0:
                         try:
-                            # Zone-Prioritized Hybrid Head RoI: extract up to 2 head ROIs on 1080p canvas
+                            # Dynamic Resolution Scaling for 640x360 native 16:9 canvas
                             disp_h, disp_w = display_frame.shape[:2]
                             scale_disp_x = float(disp_w) / 640.0
-                            scale_disp_y = float(disp_h) / 480.0
+                            scale_disp_y = float(disp_h) / 360.0
 
+                            # Universal Dynamic Head-Crop: capped at max 3 largest/closest persons sorted by bbox area (Safeguard 1)
+                            sorted_persons = sorted(person_boxes, key=lambda b: b[2] * b[3], reverse=True)
                             relevant_head_rois = []
-                            for p_box in person_boxes:
-                                if len(relevant_head_rois) >= 2:
-                                    break
+                            for p_box in sorted_persons[:3]:
                                 px, py, pw, ph = p_box
-                                p_foot = (px + pw // 2, py + ph)
+                                pad_x = int(pw * 0.15)
+                                h_x1 = max(0, px - pad_x)
+                                h_y1 = max(0, py - int(ph * 0.10))
+                                h_x2 = min(640, px + pw + pad_x)
+                                h_y2 = min(360, py + int(ph * 0.50))
 
-                                # Check if near or inside sterile zone
-                                p_zone, _ = self.zone_filter.find_zone_and_distance(p_foot, margin_px=15.0)
-                                is_in_sterile = False
-                                if p_zone:
-                                    z_cfg = zones_cfg.get(p_zone, {})
-                                    if not z_cfg and p_zone.replace("__", "_") in zones_cfg:
-                                        z_cfg = zones_cfg[p_zone.replace("__", "_")]
-                                    is_unattended = z_cfg.get("detect_unattended", None)
-                                    if is_unattended is None:
-                                        is_unattended = ("transit" in p_zone.lower()) and ("koridor" not in p_zone.lower())
-                                    if is_unattended:
-                                        is_in_sterile = True
-
-                                # Check if near/contacting any bag
-                                is_near_bag = False
-                                for trk in active_tracks:
-                                    if trk.class_label in ("tas", "backpack", "handbag", "suitcase"):
-                                        bx, by, bw, bh = trk.bbox
-                                        bag_base = (bx + bw // 2, by + bh)
-                                        if ((p_foot[0] - bag_base[0])**2 + (p_foot[1] - bag_base[1])**2)**0.5 <= max(45.0, float(bh * 2.5)):
-                                            is_near_bag = True
-                                            break
-
-                                if is_in_sterile or is_near_bag:
-                                    pad_x = int(pw * 0.15)
-                                    h_x1 = max(0, px - pad_x)
-                                    h_y1 = max(0, py - int(ph * 0.05))
-                                    h_x2 = min(640, px + pw + pad_x)
-                                    h_y2 = min(480, py + int(ph * 0.45))
-
-                                    disp_x1 = int(round(h_x1 * scale_disp_x))
-                                    disp_y1 = int(round(h_y1 * scale_disp_y))
-                                    disp_x2 = int(round(h_x2 * scale_disp_x))
-                                    disp_y2 = int(round(h_y2 * scale_disp_y))
+                                disp_x1 = int(round(h_x1 * scale_disp_x))
+                                disp_y1 = int(round(h_y1 * scale_disp_y))
+                                disp_x2 = int(round(h_x2 * scale_disp_x))
+                                disp_y2 = int(round(h_y2 * scale_disp_y))
+                                if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
                                     relevant_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
                             target_crop_roi = relevant_head_rois if relevant_head_rois else self.face_roi_crop
@@ -1208,7 +1200,7 @@ class CameraPipeline:
 
                                 face_label = "Unknown"
                                 if self.face_recognition_enabled and self.face_recognizer is not None:
-                                    # Determine 1080p face dimensions for minimum size gating (min 32x32 px)
+                                    # Determine 1080p face dimensions for minimum size gating (min 24x24 px - Safeguard 1)
                                     if raw_face_1080 is not None:
                                         face_w_1080 = float(raw_face_1080[2])
                                         face_h_1080 = float(raw_face_1080[3])
@@ -1216,19 +1208,21 @@ class CameraPipeline:
                                         face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
                                         face_h_1080 = float(bbox[3]) * (1080.0 / 360.0)
 
-                                    if face_w_1080 < 32.0 or face_h_1080 < 32.0:
-                                        # Distant micro-face (< 32x32 px): Immediately classify as Unknown without SFace inference
+                                    if face_w_1080 < 24.0 or face_h_1080 < 24.0:
+                                        # Distant micro-face (< 24x24 px on 1080p): Immediately classify as Unknown without SFace inference
                                         face_label = "Unknown"
                                         if face_id is not None:
                                             self._face_recog_cache[face_id] = {
                                                 "label": "Unknown",
+                                                "score": 0.0,
                                                 "time": now_recog,
                                                 "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
                                             }
                                     else:
-                                        # Prominent face (>= 32x32 px): Check stationary cache
+                                        # Prominent face (>= 24x24 px): Check stationary cache (Safeguard 1)
                                         cached = self._face_recog_cache.get(face_id, {})
                                         cached_label = cached.get("label")
+                                        cached_score = cached.get("score", 0.0)
                                         last_time = cached.get("time", 0.0)
                                         last_pos = cached.get("pos", (0, 0))
 
@@ -1242,22 +1236,28 @@ class CameraPipeline:
                                             face_label = cached_label
                                         else:
                                             # Recognize using 1080p display_frame with raw_face_1080 if available
+                                            best_s = 0.0
                                             if raw_face_1080 is not None and display_frame is not None:
-                                                _, _, face_label = self.face_recognizer.recognize(
-                                                    frame=display_frame, face_data=raw_face_1080, min_size=32
+                                                best_n, best_s, face_label = self.face_recognizer.recognize(
+                                                    frame=display_frame, face_data=raw_face_1080, min_size=24
                                                 )
                                             else:
                                                 face_input = raw_face_640 if raw_face_640 is not None else bbox
-                                                _, _, face_label = self.face_recognizer.recognize(
+                                                best_n, best_s, face_label = self.face_recognizer.recognize(
                                                     frame=infer_frame, face_data=face_input, min_size=10
                                                 )
 
-                                            if face_id is not None:
-                                                self._face_recog_cache[face_id] = {
-                                                    "label": face_label,
-                                                    "time": now_recog,
-                                                    "pos": cur_pos,
-                                                }
+                                            # Multi-frame best-shot score aggregation
+                                            if cached_label and cached_label != "Unknown" and face_label == "Unknown" and dist_moved < 15.0 and elapsed < 5.0:
+                                                face_label = cached_label
+                                            elif best_s >= cached_score or (cached_label == "Unknown" and face_label != "Unknown"):
+                                                if face_id is not None:
+                                                    self._face_recog_cache[face_id] = {
+                                                        "label": face_label,
+                                                        "score": best_s,
+                                                        "time": now_recog,
+                                                        "pos": cur_pos,
+                                                    }
 
                                 recognized_faces.append((bbox, score, face_label))
 

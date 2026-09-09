@@ -194,11 +194,11 @@ class TelegramNotifier:
         fh, fw = frame.shape[:2]
         bx, by, bw, bh = bbox
 
-        # Auto-scale bbox if bbox is in 640x480 inference space and frame is larger (e.g. 1080p)
-        if (fw, fh) != (640, 480):
-            if bx < 640 and by < 480 and bw <= 640 and bh <= 480:
+        # Auto-scale bbox if bbox is in 640x360 inference space and frame is larger (e.g. 1080p)
+        if (fw, fh) != (640, 360):
+            if bx < 640 and by < 360 and bw <= 640 and bh <= 360:
                 scale_x = fw / 640.0
-                scale_y = fh / 480.0
+                scale_y = fh / 360.0
             else:
                 scale_x = 1.0
                 scale_y = 1.0

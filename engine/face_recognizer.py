@@ -12,6 +12,8 @@ import urllib.error
 import cv2
 import numpy as np
 
+from engine.face_detector import apply_clahe
+
 logger = logging.getLogger("smart_cctv")
 
 # Official OpenCV Zoo SFace weights URL (~38.7 MB)
@@ -175,6 +177,8 @@ class FaceRecognizer:
                 # Take highest scoring face
                 best_face = max(faces, key=lambda f: float(f[-1]))
                 aligned_face = self.recognizer.alignCrop(img, best_face)
+                if aligned_face is not None and aligned_face.size > 0:
+                    aligned_face = apply_clahe(aligned_face, clip_limit=2.0)
                 feature = self.recognizer.feature(aligned_face)
 
                 # Format identity name from filename (e.g. "rian.jpeg" -> "Rian", "andi_wijaya_2.png" -> "Andi Wijaya")
@@ -199,7 +203,7 @@ class FaceRecognizer:
         self,
         frame: np.ndarray,
         face_data: Union[np.ndarray, Tuple[int, int, int, int], List],
-        min_size: int = 28,
+        min_size: int = 24,
     ) -> Optional[np.ndarray]:
         """Align crop face and extract 128-D feature embedding vector.
 
@@ -212,7 +216,7 @@ class FaceRecognizer:
             else:
                 face_arr = np.asarray(face_data, dtype=np.float32)
 
-            # Minimum size gating: reject distant micro-faces
+            # Minimum size gating: reject distant micro-faces (< 24px)
             if len(face_arr) >= 4:
                 fw = float(face_arr[2])
                 fh = float(face_arr[3])
@@ -220,6 +224,8 @@ class FaceRecognizer:
                     return None
 
             aligned_face = self.recognizer.alignCrop(frame, face_arr)
+            if aligned_face is not None and aligned_face.size > 0:
+                aligned_face = apply_clahe(aligned_face, clip_limit=2.0)
             feature = self.recognizer.feature(aligned_face)
             return feature
         except Exception as e:
@@ -230,7 +236,7 @@ class FaceRecognizer:
         self,
         frame: np.ndarray,
         face_data: Union[np.ndarray, Tuple[int, int, int, int], List],
-        min_size: int = 28,
+        min_size: int = 24,
     ) -> Tuple[str, float, str]:
         """Match detected face against database embeddings with minimum size gating.
 
@@ -241,7 +247,7 @@ class FaceRecognizer:
         if not self.known_embeddings:
             return ("Unknown", 0.0, "Unknown")
 
-        # Fast dimension gate before array conversion
+        # Fast dimension gate before array conversion (< 24px)
         if isinstance(face_data, (tuple, list)) and len(face_data) >= 4:
             if float(face_data[2]) < float(min_size) or float(face_data[3]) < float(min_size):
                 return ("Unknown", 0.0, "Unknown")
