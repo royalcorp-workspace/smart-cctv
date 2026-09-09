@@ -152,6 +152,82 @@ class FaceRecognizer:
         clean_name = " ".join(clean.split()).title()
         return clean_name if (clean_name and clean_name.strip()) else str(raw_name).strip()
 
+    @staticmethod
+    def is_frontal_face(
+        face_data: Any,
+        min_eye_dist_ratio: float = 0.22,
+        min_symmetry_ratio: float = 0.20,
+        min_score: float = 0.60,
+    ) -> Tuple[bool, str]:
+        """Validate if face pose is sufficiently frontal for reliable SFace recognition.
+
+        YuNet landmarks (15 elements):
+        [0:4] bbox (x, y, w, h)
+        [4:6] right eye (x, y)
+        [6:8] left eye (x, y)
+        [8:10] nose tip (x, y)
+        [10:12] right mouth corner (x, y)
+        [12:14] left mouth corner (x, y)
+        [14] score (confidence)
+
+        Returns:
+            (is_frontal: bool, reason: str)
+        """
+        try:
+            if face_data is None:
+                return False, "Null face data"
+
+            arr = np.asarray(face_data, dtype=np.float32).ravel()
+            if len(arr) < 14:
+                # If only bbox (4 elements) provided, bypass landmark check for backward compatibility
+                return True, "No landmarks available (pass bbox)"
+
+            # Check detection score if present (15th element)
+            if len(arr) >= 15:
+                score = float(arr[14])
+                if score < min_score:
+                    return False, f"Low YuNet confidence ({score:.2f} < {min_score:.2f})"
+
+            w = float(arr[2])
+            h = float(arr[3])
+            if w <= 0.0 or h <= 0.0:
+                return False, "Invalid face dimensions"
+
+            re_x, re_y = float(arr[4]), float(arr[5])
+            le_x, le_y = float(arr[6]), float(arr[7])
+            nt_x, nt_y = float(arr[8]), float(arr[9])
+
+            # 1. Interocular distance check (distance between eyes)
+            d_eyes = float(np.hypot(le_x - re_x, le_y - re_y))
+            eye_ratio = d_eyes / w
+            if eye_ratio < min_eye_dist_ratio:
+                return False, f"Side profile: narrow eye distance ratio ({eye_ratio:.2f} < {min_eye_dist_ratio:.2f})"
+
+            # 2. Horizontal eye span
+            min_eye_x = min(re_x, le_x)
+            max_eye_x = max(re_x, le_x)
+            eye_span = max_eye_x - min_eye_x
+            if eye_span < (0.15 * w):
+                return False, f"Side profile: collapsed horizontal eye span ({eye_span:.1f}px)"
+
+            # 3. Nose horizontal placement between eyes (with 5% width tolerance)
+            if nt_x < (min_eye_x - 0.05 * w) or nt_x > (max_eye_x + 0.05 * w):
+                return False, f"Side profile: nose tip outside eye span (nt_x={nt_x:.1f}, eyes=[{min_eye_x:.1f}, {max_eye_x:.1f}])"
+
+            # 4. Nose-eye horizontal symmetry ratio
+            d_r = abs(nt_x - re_x)
+            d_l = abs(nt_x - le_x)
+            min_d = min(d_r, d_l)
+            max_d = max(d_r, d_l)
+            if max_d > 0.0:
+                sym_ratio = min_d / max_d
+                if sym_ratio < min_symmetry_ratio:
+                    return False, f"Extreme yaw: asymmetric nose position ({sym_ratio:.2f} < {min_symmetry_ratio:.2f})"
+
+            return True, "Frontal face pass"
+        except Exception as e:
+            return False, f"Landmark validation error: {e}"
+
     def _compute_dataset_signature(self, image_files: List[Path]) -> str:
         """Compute composite SHA-256 hash over sorted image filenames, sizes, and mtimes."""
         hasher = hashlib.sha256()
@@ -327,17 +403,25 @@ class FaceRecognizer:
         frame: np.ndarray,
         face_data: Union[np.ndarray, Tuple[int, int, int, int], List],
         min_size: int = 24,
+        check_frontal: bool = False,
     ) -> Tuple[str, float, str]:
-        """Match detected face against database embeddings with minimum size gating.
+        """Match detected face against database embeddings with minimum size & landmark quality gating.
 
         Returns:
             (name: str, confidence_score: float, display_label: str)
-            e.g. ("Rian", 0.78, "Rian (78%)") or ("Unknown", 0.32, "Unknown")
+            e.g. ("Rian", 0.78, "Rian (78%)") or ("Unknown", 0.32, "Unknown") or ("Non-Frontal", 0.0, "Non-Frontal")
         """
         if not self.known_embeddings:
             return ("Unknown", 0.0, "Unknown")
 
-        # Fast dimension gate before array conversion (< 24px)
+        # 1. Landmark-Based Face Quality Gate (Bypass SFace on side-profile / extreme yaw)
+        if check_frontal:
+            is_frontal, reason = self.is_frontal_face(face_data)
+            if not is_frontal:
+                logger.debug(f"[FaceRecognizer] Bypassed non-frontal face: {reason}")
+                return ("Non-Frontal", 0.0, "Non-Frontal")
+
+        # 2. Fast dimension gate before array conversion (< 24px)
         if isinstance(face_data, (tuple, list)) and len(face_data) >= 4:
             if float(face_data[2]) < float(min_size) or float(face_data[3]) < float(min_size):
                 return ("Unknown", 0.0, "Unknown")

@@ -212,6 +212,7 @@ class CameraPipeline:
 
         # Recognition caching for stationary faces (eliminates redundant SFace calls & preserves 8-10 FPS)
         self._face_recog_cache: Dict[int, Dict[str, Any]] = {}
+        self._person_face_recog: Dict[int, Dict[str, Any]] = {}
 
         # Anti-ghost tile suppression tracking for retrieved bags
         self._recently_retrieved_bags: Dict[int, Dict[str, Any]] = {}
@@ -1139,7 +1140,11 @@ class CameraPipeline:
 
             # Universal Face Detection (OpenCV YuNet) and Recognition (OpenCV SFace)
             if self.face_detection_enabled and self.face_detector is not None:
-                has_persons = len(person_boxes) > 0
+                active_person_tracks = [
+                    trk for trk in active_tracks
+                    if getattr(trk, "class_label", "") == "person"
+                ]
+                has_persons = len(active_person_tracks) > 0 or len(person_boxes) > 0
 
                 if has_persons:
                     self._last_person_seen_time = now
@@ -1148,138 +1153,199 @@ class CameraPipeline:
                     if (now - self._last_person_seen_time) >= 1.5:
                         self._cached_faces = []
                         self._face_recog_cache.clear()
+                        self._person_face_recog.clear()
 
-                # CONDITIONAL INFERENCE: Skip YuNet & SFace when no person in frame
                 if has_persons:
-                    # Adaptive Zero-Delay: evaluate every frame (interval=1) whenever people are in scene
-                    current_face_interval = 1
+                    try:
+                        disp_h, disp_w = display_frame.shape[:2]
+                        scale_disp_x = float(disp_w) / 640.0
+                        scale_disp_y = float(disp_h) / 360.0
 
-                    if (self._face_frame_index % current_face_interval) == 0:
-                        try:
-                            # Dynamic Resolution Scaling for 640x360 native 16:9 canvas
-                            disp_h, disp_w = display_frame.shape[:2]
-                            scale_disp_x = float(disp_w) / 640.0
-                            scale_disp_y = float(disp_h) / 360.0
+                        # 1. TRACK-ID BASED EVALUATION GATING (Eliminates FPS drop & CPU spikes)
+                        # Re-evaluation criteria: Track not yet evaluated, OR (elapsed >= 1.0s AND frames >= 15)
+                        tracks_needing_eval = []
+                        for trk in active_person_tracks:
+                            p_cache = self._person_face_recog.get(trk.track_id)
+                            if p_cache is None:
+                                tracks_needing_eval.append((trk, 999.0))
+                            else:
+                                elapsed_p = now - p_cache.get("last_eval_time", 0.0)
+                                frames_p = self._face_frame_index - p_cache.get("last_eval_frame", 0)
+                                if elapsed_p >= 1.0 and frames_p >= 15:
+                                    tracks_needing_eval.append((trk, elapsed_p))
 
-                            # Universal Dynamic Head-Crop: capped at max 3 largest/closest persons sorted by bbox area (Safeguard 1)
-                            sorted_persons = sorted(person_boxes, key=lambda b: b[2] * b[3], reverse=True)
-                            relevant_head_rois = []
-                            for p_box in sorted_persons[:3]:
-                                px, py, pw, ph = p_box
-                                pad_x = int(pw * 0.15)
-                                h_x1 = max(0, px - pad_x)
-                                h_y1 = max(0, py - int(ph * 0.10))
-                                h_x2 = min(640, px + pw + pad_x)
-                                h_y2 = min(360, py + int(ph * 0.50))
+                        # Sort candidates: longest un-evaluated first, then by closest person (bbox area)
+                        tracks_needing_eval.sort(
+                            key=lambda item: (item[1], item[0].bbox[2] * item[0].bbox[3]),
+                            reverse=True,
+                        )
 
-                                disp_x1 = int(round(h_x1 * scale_disp_x))
-                                disp_y1 = int(round(h_y1 * scale_disp_y))
-                                disp_x2 = int(round(h_x2 * scale_disp_x))
-                                disp_y2 = int(round(h_y2 * scale_disp_y))
-                                if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
-                                    relevant_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
+                        # Per-frame budget: evaluate at most 1 person track per frame (preserves 12-15+ FPS)
+                        candidate_tracks_to_eval = [t for t, _ in tracks_needing_eval[:1]]
 
-                            target_crop_roi = relevant_head_rois if relevant_head_rois else self.face_roi_crop
+                        eval_head_rois = []
+                        eval_track = None
+                        if candidate_tracks_to_eval:
+                            eval_track = candidate_tracks_to_eval[0]
+                            px, py, pw, ph = eval_track.bbox
+                            pad_x = int(pw * 0.15)
+                            h_x1 = max(0, px - pad_x)
+                            h_y1 = max(0, py - int(ph * 0.10))
+                            h_x2 = min(640, px + pw + pad_x)
+                            h_y2 = min(360, py + int(ph * 0.50))
+                            disp_x1 = int(round(h_x1 * scale_disp_x))
+                            disp_y1 = int(round(h_y1 * scale_disp_y))
+                            disp_x2 = int(round(h_x2 * scale_disp_x))
+                            disp_y2 = int(round(h_y2 * scale_disp_y))
+                            if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
+                                eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
+                        # Execute YuNet detection only for the single budgeted head crop
+                        if eval_head_rois and eval_track is not None:
                             detected_faces = self.face_detector.detect_faces(
                                 frame=infer_frame,
                                 display_frame=display_frame,
-                                crop_roi=target_crop_roi,
+                                crop_roi=eval_head_rois,
                             )
-                            recognized_faces = []
-                            active_fids = set()
-                            now_recog = time.time()
+                            if detected_faces:
+                                best_item = max(detected_faces, key=lambda it: it[1])
+                                bbox_f, f_det_score = best_item[0], best_item[1]
+                                raw_f_640 = best_item[2] if len(best_item) >= 3 else None
+                                raw_f_1080 = best_item[3] if len(best_item) >= 4 else None
 
-                            for item in detected_faces:
-                                bbox = item[0]
-                                score = item[1]
-                                raw_face_640 = item[2] if len(item) >= 3 else None
-                                raw_face_1080 = item[3] if len(item) >= 4 else None
-                                face_id = item[4] if len(item) >= 5 else None
+                                # 2. FACE QUALITY GATE BERBASIS LANDMARK (Bypass SFace on side-profile/extreme yaw)
+                                face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
+                                is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
+                                    face_landmark_data,
+                                    min_eye_dist_ratio=0.22,
+                                    min_symmetry_ratio=0.20,
+                                    min_score=0.60,
+                                )
 
-                                if face_id is not None:
-                                    active_fids.add(face_id)
+                                prev_cache = self._person_face_recog.get(eval_track.track_id)
+                                prev_known = prev_cache and prev_cache.get("is_known", False)
 
-                                face_label = "Unknown"
-                                if self.face_recognition_enabled and self.face_recognizer is not None:
-                                    # Determine 1080p face dimensions for minimum size gating (min 24x24 px - Safeguard 1)
-                                    if raw_face_1080 is not None:
-                                        face_w_1080 = float(raw_face_1080[2])
-                                        face_h_1080 = float(raw_face_1080[3])
+                                if not is_frontal:
+                                    logger.debug(
+                                        f"[{self.camera_id}] Track #{eval_track.track_id} face quality gate bypass: {quality_reason}"
+                                    )
+                                    if prev_cache:
+                                        prev_cache["last_eval_time"] = now
+                                        prev_cache["last_eval_frame"] = self._face_frame_index
+                                        prev_cache["face_bbox_640"] = bbox_f
                                     else:
-                                        face_w_1080 = float(bbox[2]) * (1920.0 / 640.0)
-                                        face_h_1080 = float(bbox[3]) * (1080.0 / 360.0)
-
-                                    if face_w_1080 < 24.0 or face_h_1080 < 24.0:
-                                        # Distant micro-face (< 24x24 px on 1080p): Immediately classify as Unknown without SFace inference
-                                        face_label = "Unknown"
-                                        if face_id is not None:
-                                            self._face_recog_cache[face_id] = {
-                                                "label": "Unknown",
-                                                "score": 0.0,
-                                                "time": now_recog,
-                                                "pos": (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
-                                            }
-                                    else:
-                                        # Prominent face (>= 24x24 px): Check stationary cache (Safeguard 1)
-                                        cached = self._face_recog_cache.get(face_id, {})
-                                        cached_label = cached.get("label")
-                                        cached_score = cached.get("score", 0.0)
-                                        last_time = cached.get("time", 0.0)
-                                        last_pos = cached.get("pos", (0, 0))
-
-                                        cur_pos = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
-                                        dist_moved = ((cur_pos[0] - last_pos[0]) ** 2 + (cur_pos[1] - last_pos[1]) ** 2) ** 0.5
-                                        elapsed = now_recog - last_time
-
-                                        # Reuse cache if stationary (< 15 px movement) within validity window ONLY for recognized identities.
-                                        # For Unknown faces, never lock out recognition; continuously re-evaluate to capture clear frontal angle.
-                                        is_known_cached = bool(cached_label and cached_label != "Unknown")
-                                        if is_known_cached and dist_moved < 15.0 and elapsed < 2.5:
-                                            face_label = cached_label
-                                            best_n = cached.get("name", cached_label.split(" (")[0])
-                                            best_s = cached_score
+                                        self._person_face_recog[eval_track.track_id] = {
+                                            "label": "Unknown",
+                                            "name": "Unknown",
+                                            "score": 0.0,
+                                            "last_eval_time": now,
+                                            "last_eval_frame": self._face_frame_index,
+                                            "face_bbox_640": bbox_f,
+                                            "face_score": f_det_score,
+                                            "is_known": False,
+                                        }
+                                else:
+                                    # Frontal face: execute SFace feature extraction & identity matching
+                                    best_n = "Unknown"
+                                    best_s = 0.0
+                                    face_lbl = "Unknown"
+                                    if self.face_recognition_enabled and self.face_recognizer is not None:
+                                        if raw_f_1080 is not None and display_frame is not None:
+                                            best_n, best_s, face_lbl = self.face_recognizer.recognize(
+                                                frame=display_frame,
+                                                face_data=raw_f_1080,
+                                                min_size=24,
+                                                check_frontal=False,
+                                            )
                                         else:
-                                            # Recognize using 1080p display_frame with raw_face_1080 if available
-                                            best_s = 0.0
-                                            best_n = "Unknown"
-                                            if raw_face_1080 is not None and display_frame is not None:
-                                                best_n, best_s, face_label = self.face_recognizer.recognize(
-                                                    frame=display_frame, face_data=raw_face_1080, min_size=24
-                                                )
-                                            else:
-                                                face_input = raw_face_640 if raw_face_640 is not None else bbox
-                                                best_n, best_s, face_label = self.face_recognizer.recognize(
-                                                    frame=infer_frame, face_data=face_input, min_size=10
-                                                )
+                                            face_input = raw_f_640 if raw_f_640 is not None else bbox_f
+                                            best_n, best_s, face_lbl = self.face_recognizer.recognize(
+                                                frame=infer_frame,
+                                                face_data=face_input,
+                                                min_size=10,
+                                                check_frontal=False,
+                                            )
 
-                                            # Multi-frame best-shot score aggregation
-                                            if is_known_cached and face_label == "Unknown" and dist_moved < 15.0 and elapsed < 5.0:
-                                                face_label = cached_label
-                                                best_n = cached.get("name", cached_label.split(" (")[0])
-                                                best_s = cached_score
-                                            elif best_s >= cached_score or (not is_known_cached and face_label != "Unknown"):
-                                                if face_id is not None:
-                                                    self._face_recog_cache[face_id] = {
-                                                        "label": face_label,
-                                                        "name": best_n,
-                                                        "score": best_s,
-                                                        "time": now_recog,
-                                                        "pos": cur_pos,
-                                                    }
+                                    if best_n != "Unknown" and face_lbl != "Unknown":
+                                        self._person_face_recog[eval_track.track_id] = {
+                                            "label": face_lbl,
+                                            "name": best_n,
+                                            "score": best_s,
+                                            "last_eval_time": now,
+                                            "last_eval_frame": self._face_frame_index,
+                                            "face_bbox_640": bbox_f,
+                                            "face_score": f_det_score,
+                                            "is_known": True,
+                                        }
+                                    else:
+                                        # Unknown / non-match: retain previous known identity if established
+                                        if prev_known:
+                                            prev_cache["last_eval_time"] = now
+                                            prev_cache["last_eval_frame"] = self._face_frame_index
+                                            prev_cache["face_bbox_640"] = bbox_f
+                                        else:
+                                            self._person_face_recog[eval_track.track_id] = {
+                                                "label": "Unknown",
+                                                "name": "Unknown",
+                                                "score": 0.0,
+                                                "last_eval_time": now,
+                                                "last_eval_frame": self._face_frame_index,
+                                                "face_bbox_640": bbox_f,
+                                                "face_score": f_det_score,
+                                                "is_known": False,
+                                            }
+                            else:
+                                # Head crop yielded no face: set throttle timestamps
+                                px, py, pw, ph = eval_track.bbox
+                                if eval_track.track_id in self._person_face_recog:
+                                    self._person_face_recog[eval_track.track_id]["last_eval_time"] = now
+                                    self._person_face_recog[eval_track.track_id]["last_eval_frame"] = self._face_frame_index
+                                else:
+                                    self._person_face_recog[eval_track.track_id] = {
+                                        "label": "Unknown",
+                                        "name": "Unknown",
+                                        "score": 0.0,
+                                        "last_eval_time": now,
+                                        "last_eval_frame": self._face_frame_index,
+                                        "face_bbox_640": (px + pw // 4, py, pw // 2, ph // 3),
+                                        "face_score": 0.50,
+                                        "is_known": False,
+                                    }
 
-                                recognized_faces.append((bbox, score, face_label, best_n, best_s))
+                        # Synthesize recognized_faces for VisualHUD and telemetry
+                        recognized_faces = []
+                        active_track_ids = {t.track_id for t in active_person_tracks}
 
-                            # Purge stale face recognition caches
-                            if active_fids:
-                                self._face_recog_cache = {
-                                    fid: v for fid, v in self._face_recog_cache.items() if fid in active_fids
-                                }
+                        for trk in active_person_tracks:
+                            p_info = self._person_face_recog.get(trk.track_id)
+                            px, py, pw, ph = trk.bbox
+                            if p_info is not None:
+                                f_box = p_info.get("face_bbox_640")
+                                if not f_box or f_box[2] <= 0 or f_box[3] <= 0 or abs(f_box[0] - px) > (pw * 1.5):
+                                    f_box = (px + pw // 4, py, pw // 2, ph // 3)
+                                f_lbl = p_info.get("label", "Unknown")
+                                f_name = p_info.get("name", "Unknown")
+                                f_score = p_info.get("score", 0.0)
+                                f_det_s = p_info.get("face_score", 0.80)
+                                recognized_faces.append((f_box, f_det_s, f_lbl, f_name, f_score))
+                            else:
+                                f_box = (px + pw // 4, py, pw // 2, ph // 3)
+                                recognized_faces.append((f_box, 0.50, "Unknown", "Unknown", 0.0))
 
-                            self._cached_faces = recognized_faces
-                        except Exception as e:
-                            logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
-                    self._face_frame_index += 1
+                        # Purge stale tracks no longer in active_person_tracks
+                        if active_track_ids:
+                            self._person_face_recog = {
+                                tid: info for tid, info in self._person_face_recog.items()
+                                if tid in active_track_ids
+                            }
+
+                        self._cached_faces = recognized_faces
+                    except Exception as e:
+                        logger.error(f"[{self.camera_id}] Face detection/recognition error: {e}")
+                else:
+                    self._cached_faces = []
+
+                self._face_frame_index += 1
 
             # Refresh bag-to-owner association with latest face detection results
             self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
