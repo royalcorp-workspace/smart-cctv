@@ -155,9 +155,9 @@ class FaceRecognizer:
     @staticmethod
     def is_frontal_face(
         face_data: Any,
-        min_eye_dist_ratio: float = 0.18,
-        min_symmetry_ratio: float = 0.15,
-        min_score: float = 0.45,
+        min_eye_dist_ratio: float = 0.14,
+        min_symmetry_ratio: float = 0.12,
+        min_score: float = 0.35,
     ) -> Tuple[bool, str]:
         """Validate if face pose is sufficiently frontal for reliable SFace recognition.
 
@@ -207,11 +207,11 @@ class FaceRecognizer:
             min_eye_x = min(re_x, le_x)
             max_eye_x = max(re_x, le_x)
             eye_span = max_eye_x - min_eye_x
-            if eye_span < (0.15 * w):
+            if eye_span < (0.12 * w):
                 return False, f"Side profile: collapsed horizontal eye span ({eye_span:.1f}px)"
 
-            # 3. Nose horizontal placement between eyes (with 8% width tolerance for 45-deg semi-frontal)
-            if nt_x < (min_eye_x - 0.08 * w) or nt_x > (max_eye_x + 0.08 * w):
+            # 3. Nose horizontal placement between eyes (with 12% width tolerance for 45-deg semi-frontal/seated)
+            if nt_x < (min_eye_x - 0.12 * w) or nt_x > (max_eye_x + 0.12 * w):
                 return False, f"Side profile: nose tip outside eye span (nt_x={nt_x:.1f}, eyes=[{min_eye_x:.1f}, {max_eye_x:.1f}])"
 
             # 4. Nose-eye horizontal symmetry ratio

@@ -257,15 +257,17 @@ def run(source: str, save_interval: float, score_threshold: float) -> None:
                 fps_frames = 0
                 fps_t0 = now
 
-            # ---- Inference pada downscale 640x360 (hemat CPU) ----
+            # ---- Inference pada native frame (1080p) dengan CLAHE contrast enhancement ----
             h_orig, w_orig = frame.shape[:2]
-            infer_w, infer_h = 640, 360
-            infer = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_LINEAR)
-            faces = detector.detect(infer)
+            # Enhance local contrast to eliminate harsh fluorescent ceiling lighting shadows on small faces
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l_ch, a_ch, b_ch = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = cv2.cvtColor(cv2.merge((clahe.apply(l_ch), a_ch, b_ch)), cv2.COLOR_LAB2BGR)
 
-            # Scale factor kembali ke resolusi asli
-            sx = w_orig / infer_w
-            sy = h_orig / infer_h
+            faces = detector.detect(enhanced)
+            sx = 1.0
+            sy = 1.0
 
             canvas = frame.copy()
             saved_this_frame: List[int] = []
@@ -393,8 +395,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--score", "-t",
         type=float,
-        default=0.45,
-        help="YuNet detection confidence threshold (default: 0.45). Lebih rendah = lebih agresif.",
+        default=0.35,
+        help="YuNet detection confidence threshold (default: 0.35). Lebih rendah = lebih agresif menangkap wajah duduk/menunduk.",
     )
     return p.parse_args()
 

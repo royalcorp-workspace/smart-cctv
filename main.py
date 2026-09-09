@@ -1206,11 +1206,11 @@ class CameraPipeline:
                         if candidate_tracks_to_eval:
                             eval_track = candidate_tracks_to_eval[0]
                             px, py, pw, ph = eval_track.bbox
-                            pad_x = int(pw * 0.15)
+                            pad_x = int(pw * 0.20)
                             h_x1 = max(0, px - pad_x)
-                            h_y1 = max(0, py - int(ph * 0.10))
+                            h_y1 = max(0, py - int(ph * 0.15))
                             h_x2 = min(640, px + pw + pad_x)
-                            h_y2 = min(360, py + int(ph * 0.50))
+                            h_y2 = min(360, py + int(ph * 0.65))
                             disp_x1 = int(round(h_x1 * scale_disp_x))
                             disp_y1 = int(round(h_y1 * scale_disp_y))
                             disp_x2 = int(round(h_x2 * scale_disp_x))
@@ -1242,13 +1242,13 @@ class CameraPipeline:
                                     raw_f_640 = best_item[2] if len(best_item) >= 3 else None
                                     raw_f_1080 = best_item[3] if len(best_item) >= 4 else None
 
-                                    # 2. FACE QUALITY GATE BERBASIS LANDMARK (Bypass SFace on side-profile/extreme yaw)
+                                    # 2. FACE QUALITY GATE BERBASIS LANDMARK (Toleransi sudut menunduk saat duduk di meja)
                                     face_landmark_data = raw_f_1080 if raw_f_1080 is not None else raw_f_640
                                     is_frontal, quality_reason = FaceRecognizer.is_frontal_face(
                                         face_landmark_data,
-                                        min_eye_dist_ratio=0.18,
-                                        min_symmetry_ratio=0.15,
-                                        min_score=0.45,
+                                        min_eye_dist_ratio=0.14,
+                                        min_symmetry_ratio=0.12,
+                                        min_score=0.35,
                                     )
 
                                     prev_cache = self._person_face_recog.get(eval_track.track_id)
@@ -1356,9 +1356,10 @@ class CameraPipeline:
                         for trk in active_person_tracks:
                             p_info = self._person_face_recog.get(trk.track_id)
                             if p_info is not None and p_info.get("has_seen_face", False):
-                                # 2.5s grace period: only render face badge if frontal face was seen within last 2.5 seconds
+                                # 5.0s grace period: only render face badge if frontal/semi-frontal face was seen within last 5.0 seconds
+                                # Prevents flickering when employee looks down to type or read at desk
                                 last_frontal = p_info.get("last_frontal_seen_time", 0.0)
-                                if (now - last_frontal) <= 2.5:
+                                if (now - last_frontal) <= 5.0:
                                     px, py, pw, ph = trk.bbox
                                     f_box = p_info.get("face_bbox_640")
                                     # TOTAL ELIMINATION OF SYNTHETIC FALLBACK BOX:

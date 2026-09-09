@@ -25,7 +25,7 @@
   "face_detector": {
     "enabled": true,
     "model_path": "models/face_detection_yunet_2023mar.onnx",
-    "score_threshold": 0.50,
+    "score_threshold": 0.38,
     "nms_threshold": 0.30,
     "detect_interval_frames": 3,
     "face_roi_crop": [100, 40, 1250, 520],

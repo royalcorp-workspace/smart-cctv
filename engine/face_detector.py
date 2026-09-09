@@ -58,7 +58,7 @@ class YuNetFaceDetector:
     def __init__(
         self,
         model_path: Optional[str] = None,
-        score_threshold: float = 0.62,
+        score_threshold: float = 0.38,
         nms_threshold: float = 0.30,
         top_k: int = 5000,
         input_size: Tuple[int, int] = (640, 360),
