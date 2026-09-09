@@ -453,4 +453,11 @@ class FaceRecognizer:
             label = f"{clean_name} ({pct}%)"
             return (clean_name, best_score, label)
         else:
+            # Telemetry: log closest candidate even if rejected below threshold.
+            # Helps operators calibrate dataset / threshold without touching the HUD.
+            if best_score > 0.0 and best_name != "Unknown":
+                logger.info(
+                    f"[DEBUG-FACE] Wajah mirip dengan '{best_name}' "
+                    f"({best_score:.3f}) tapi ditolak karena < {self.cosine_threshold:.2f}"
+                )
             return ("Unknown", max(0.0, best_score), "Unknown")
