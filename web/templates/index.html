@@ -95,37 +95,61 @@
         <!-- INTERACTIVE ZONE EDITOR CANVAS (NATIVE 1920x1080) -->
         <canvas id="zoneEditorCanvas" width="1920" height="1080"></canvas>
 
-        <!-- FLOATING TOOLBAR KALIBRASI ZONA -->
-        <div class="zone-toolbar" id="zoneToolbar" style="display: none;">
-          <div class="toolbar-header">
-            <span class="toolbar-title">🎯 Editor Zona Poligon</span>
-            <span class="toolbar-badge" id="toolbarZoneCount">2 Zona</span>
+        <!-- FLOATING ENTERPRISE GLASSMORPHISM CALIBRATION BAR -->
+        <div class="zone-glass-toolbar" id="zoneToolbar" style="display: none;">
+          <!-- Left: Zone Selector with Indicator Dot -->
+          <div class="glass-zone-select-wrap">
+            <span class="glass-zone-dot" id="zoneColorDot"></span>
+            <select id="zoneSelector" class="glass-select" onchange="onZoneSelectChange()" title="Pilih Zona untuk Diedit">
+              <!-- Populated dynamically -->
+            </select>
           </div>
-          <div class="toolbar-row">
-            <label for="zoneSelector" class="toolbar-label">Zona Aktif:</label>
-            <select id="zoneSelector" class="toolbar-select" onchange="onZoneSelectChange()"></select>
-          </div>
-          <div class="toolbar-btn-group">
-            <button type="button" id="btnModeDrag" class="btn-tool active" onclick="setZoneMode('drag')" title="Geser Titik Poligon">
+
+          <div class="glass-divider"></div>
+
+          <!-- Center: Tool Actions with Micro-Icons -->
+          <div class="glass-tool-group">
+            <button type="button" id="btnModeDrag" class="glass-btn active" onclick="setZoneMode('drag')" data-tooltip="Mode Geser / Pilih Titik">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
-              <span>Geser Handle</span>
+              <span>Geser</span>
             </button>
-            <button type="button" id="btnModeAdd" class="btn-tool" onclick="setZoneMode('add')" title="Tambah Titik Baru pada Garis Poligon">
+            <button type="button" id="btnModeAdd" class="glass-btn" onclick="setZoneMode('add')" data-tooltip="Mode Tambah Titik">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-              <span>Tambah Titik</span>
+              <span>Tambah</span>
             </button>
-            <button type="button" id="btnModeDelete" class="btn-tool" onclick="setZoneMode('delete')" title="Klik Titik untuk Menghapus">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-              <span>Hapus Titik</span>
+            <button type="button" id="btnDeleteSelected" class="glass-btn" onclick="deleteSelectedPoint()" data-tooltip="Hapus Titik Terpilih (Del / Backspace)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+              <span>Hapus</span>
+            </button>
+            <button type="button" id="btnUndo" class="glass-btn" onclick="undoZoneAction()" data-tooltip="Urungkan (Ctrl+Z)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              <span>Undo</span>
+            </button>
+            <button type="button" id="btnResetZone" class="glass-btn" onclick="resetCurrentZone()" data-tooltip="Kembalikan Titik Awal">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+              <span>Reset</span>
             </button>
           </div>
-          <div class="toolbar-footer">
-            <div class="toolbar-coord" id="zoneCoordDisplay">X: 0, Y: 0 (1080p)</div>
-            <div class="toolbar-actions">
-              <button type="button" class="btn-tool-secondary" onclick="resetCurrentZone()">Reset</button>
-              <button type="button" class="btn-tool-primary" onclick="saveZonesToServer()">Simpan</button>
-              <button type="button" class="btn-tool-danger" onclick="toggleZoneEditor(false)">Tutup</button>
-            </div>
+
+          <div class="glass-divider"></div>
+
+          <!-- Status / Telemetry Badge -->
+          <div class="glass-status-wrap">
+            <span class="glass-coord" id="zoneCoordDisplay">X: --, Y: --</span>
+            <span class="glass-validation-pill valid" id="zoneValidationPill">Poligon Valid</span>
+          </div>
+
+          <div class="glass-divider"></div>
+
+          <!-- Right: Save & Close Buttons -->
+          <div class="glass-action-group">
+            <button type="button" id="btnSaveZones" class="glass-btn-save" onclick="saveZonesToServer()" data-tooltip="Simpan & Terapkan (Atomic Hot-Reload)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Simpan</span>
+            </button>
+            <button type="button" class="glass-btn-close" onclick="toggleZoneEditor(false)" data-tooltip="Keluar Kalibrasi (Esc)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
           </div>
         </div>
       </div>
@@ -272,6 +296,9 @@
       </div>
     </div>
   </div>
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
   <!-- FOOTER -->
   <footer class="dashboard-footer">
