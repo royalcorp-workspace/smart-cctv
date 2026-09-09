@@ -48,6 +48,9 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# Force TCP transport for RTSP (same as rtsp_stream.py and check_camera.py)
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -69,27 +72,21 @@ FONT            = cv2.FONT_HERSHEY_SIMPLEX
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — delegate .env loading and URL expansion to engine.config_loader
 # ---------------------------------------------------------------------------
 
-def _resolve_env(value: str) -> str:
-    """Expand ${VAR} placeholders using environment variables."""
-    def _replace(m: re.Match) -> str:
-        return os.environ.get(m.group(1), m.group(0))
-    return re.sub(r"\$\{([^}]+)\}", _replace, value)
-
-
 def _load_source_from_config() -> Optional[str]:
-    """Read cam_01 source URL from config.json, expanding env vars."""
+    """Read cam_01 source URL using engine.config_loader (loads .env automatically)."""
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
+        from engine.config_loader import load_camera_config
+        cfg = load_camera_config(CONFIG_PATH)
         source = cfg.get("source", None)
         if source:
-            return _resolve_env(str(source))
+            return str(source)
     except Exception as e:
-        print(f"[WARN] Tidak bisa membaca config.json: {e}")
+        print(f"[WARN] Tidak bisa membaca config.json via config_loader: {e}")
     return None
+
 
 
 def _download_yunet(target: Path) -> None:
