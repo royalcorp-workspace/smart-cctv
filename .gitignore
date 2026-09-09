@@ -17,6 +17,7 @@ known_hosts
 # Seluruh foto wajah personil, dataset pengenalan, dan embedding vektor
 data/known_faces/*
 !data/known_faces/.gitkeep
+data/known_faces/.embeddings_cache.npz
 data/face_crops/*
 !data/face_crops/.gitkeep
 *.npy

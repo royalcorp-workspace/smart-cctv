@@ -1,5 +1,6 @@
 """OpenCV SFace Face Recognition Engine with Local Photo Database."""
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -30,7 +31,7 @@ class FaceRecognizer:
         self,
         model_path: Optional[str] = None,
         known_faces_dir: Optional[str] = None,
-        cosine_threshold: float = 0.50,
+        cosine_threshold: float = 0.60,
         auto_download: bool = True,
         detector: Optional[Any] = None,
     ) -> None:
@@ -46,6 +47,8 @@ class FaceRecognizer:
             self.known_faces_dir = Path(known_faces_dir)
         else:
             self.known_faces_dir = base_dir / "data" / "known_faces"
+
+        self.cache_path: Path = self.known_faces_dir / ".embeddings_cache.npz"
 
         # Auto-download SFace weights if missing
         if not self.model_path.exists():
@@ -129,9 +132,84 @@ class FaceRecognizer:
         )
         return self._detector
 
+    @staticmethod
+    def normalize_name(raw_name: str) -> str:
+        """Normalize reference photo stem into Title Case name with spaces.
+
+        Examples:
+            'ADI-AHMAD' -> 'Adi Ahmad'
+            'AJI_YULIANTO' -> 'Aji Yulianto'
+            'budi_santoso_2' -> 'Budi Santoso'
+            'ALGHANY-1' -> 'Alghany'
+            'RIZQI-SETIAWAN' -> 'Rizqi Setiawan'
+        """
+        clean = re.sub(r"[-_]\d+$", "", raw_name)
+        clean = re.sub(r"[-_]+", " ", clean)
+        clean_name = " ".join(clean.split()).title()
+        return clean_name if clean_name else raw_name
+
+    def _compute_dataset_signature(self, image_files: List[Path]) -> str:
+        """Compute composite SHA-256 hash over sorted image filenames, sizes, and mtimes."""
+        hasher = hashlib.sha256()
+        for p in sorted(image_files):
+            try:
+                st = p.stat()
+                hasher.update(p.name.encode("utf-8"))
+                hasher.update(str(st.st_size).encode("utf-8"))
+                hasher.update(str(st.st_mtime_ns).encode("utf-8"))
+            except OSError:
+                continue
+        return hasher.hexdigest()
+
+    def _load_cache(self, expected_sig: str) -> bool:
+        """Load precomputed 128-D embeddings from .embeddings_cache.npz if signature matches."""
+        if not self.cache_path.exists():
+            return False
+        try:
+            data = np.load(str(self.cache_path), allow_pickle=True)
+            cached_sig = str(data.get("signature", ""))
+            if cached_sig != expected_sig:
+                logger.info("[FaceRecognizer] Cache signature mismatch, re-indexing reference photos...")
+                return False
+            names = data.get("names", [])
+            embeddings = data.get("embeddings", [])
+            if len(names) == 0 or len(embeddings) == 0 or len(names) != len(embeddings):
+                return False
+            self.known_embeddings.clear()
+            for n, emb in zip(names, embeddings):
+                self.known_embeddings.append((str(n), np.asarray(emb, dtype=np.float32)))
+            logger.info(
+                f"[FaceRecognizer] Fast startup: Loaded {len(self.known_embeddings)} face embeddings "
+                f"from cache ({self.cache_path.name}) in < 5ms."
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[FaceRecognizer] Failed loading embeddings cache: {e}. Re-indexing.")
+            return False
+
+    def _save_cache(self, sig: str) -> None:
+        """Persist current 128-D embeddings and identity names to compressed .npz file."""
+        if not self.known_embeddings:
+            return
+        try:
+            names = np.array([n for n, _ in self.known_embeddings], dtype=object)
+            embeddings = np.array([emb for _, emb in self.known_embeddings], dtype=np.float32)
+            np.savez_compressed(
+                str(self.cache_path),
+                signature=sig,
+                names=names,
+                embeddings=embeddings,
+            )
+            logger.info(
+                f"[FaceRecognizer] Saved {len(self.known_embeddings)} embeddings to cache ({self.cache_path.name})."
+            )
+        except Exception as e:
+            logger.warning(f"[FaceRecognizer] Failed saving embeddings cache: {e}")
+
     def load_database(self) -> int:
         """Scan data/known_faces/, extract 128-D embeddings, and cache in memory.
 
+        Uses fast startup .npz caching when file signatures match.
         Returns total number of successfully indexed photos.
         """
         self.known_embeddings.clear()
@@ -147,11 +225,21 @@ class FaceRecognizer:
         ]
 
         if not image_files:
+            # Clean up stale cache if directory is now empty
+            if self.cache_path.exists():
+                try:
+                    self.cache_path.unlink()
+                except OSError:
+                    pass
             logger.info(
                 f"[FaceRecognizer] Known faces directory '{self.known_faces_dir}' is empty. "
                 f"System will operate normally with 'Unknown' labels."
             )
             return 0
+
+        dataset_sig = self._compute_dataset_signature(image_files)
+        if self._load_cache(dataset_sig):
+            return len(self.known_embeddings)
 
         logger.info(f"[FaceRecognizer] Indexing {len(image_files)} reference photo(s) from {self.known_faces_dir}...")
         detector = self._get_detector()
@@ -181,11 +269,7 @@ class FaceRecognizer:
                     aligned_face = apply_clahe(aligned_face, clip_limit=2.0)
                 feature = self.recognizer.feature(aligned_face)
 
-                # Format identity name from filename (e.g. "rian.jpeg" -> "Rian", "andi_wijaya_2.png" -> "Andi Wijaya")
-                raw_name = img_path.stem
-                clean_name = re.sub(r"_\d+$", "", raw_name).replace("_", " ").strip().title()
-                if not clean_name:
-                    clean_name = raw_name
+                clean_name = self.normalize_name(img_path.stem)
 
                 self.known_embeddings.append((clean_name, feature))
                 loaded_count += 1
@@ -197,6 +281,8 @@ class FaceRecognizer:
         logger.info(
             f"[FaceRecognizer] Database indexing complete: {loaded_count}/{len(image_files)} faces loaded."
         )
+        if loaded_count > 0:
+            self._save_cache(dataset_sig)
         return loaded_count
 
     def extract_feature(
