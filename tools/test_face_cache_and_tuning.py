@@ -43,11 +43,11 @@ class TestFaceCacheAndTuning(unittest.TestCase):
             self.assertEqual(cleaned, expected, f"Failed for raw input '{raw}': got '{cleaned}'")
 
     def test_02_default_threshold_0_60(self):
-        """Verify default cosine threshold is updated to 0.58."""
+        """Verify default cosine threshold is updated to 0.52."""
         # Using empty temp directory to avoid heavy disk loading
         with tempfile.TemporaryDirectory() as tmp_dir:
             fr = FaceRecognizer(known_faces_dir=tmp_dir)
-            self.assertEqual(fr.cosine_threshold, 0.58, "Default cosine threshold must be 0.58")
+            self.assertEqual(fr.cosine_threshold, 0.52, "Default cosine threshold must be 0.52")
 
     def test_03_npz_caching_roundtrip_and_speedup(self):
         """Verify .npz caching creates valid file, invalidates on change, and loads in < 10ms."""

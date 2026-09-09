@@ -1175,8 +1175,8 @@ class CameraPipeline:
                         tracks_needing_eval = []
                         for trk in active_person_tracks:
                             pw, ph = trk.bbox[2], trk.bbox[3]
-                            # Sanity check: do not attempt face evaluation on tiny noise blobs
-                            if pw < 16 or ph < 25:
+                            # Sanity check: allow back-row seated persons (h>=18, w>=12)
+                            if pw < 12 or ph < 18:
                                 continue
 
                             p_cache = self._person_face_recog.get(trk.track_id)
@@ -1255,7 +1255,7 @@ class CameraPipeline:
                             disp_y1 = int(round(h_y1 * scale_disp_y))
                             disp_x2 = int(round(h_x2 * scale_disp_x))
                             disp_y2 = int(round(h_y2 * scale_disp_y))
-                            if (disp_x2 - disp_x1) >= 20 and (disp_y2 - disp_y1) >= 20:
+                            if (disp_x2 - disp_x1) >= 16 and (disp_y2 - disp_y1) >= 16:
                                 eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
                         # Execute YuNet detection strictly on the targeted head crop
@@ -1326,7 +1326,7 @@ class CameraPipeline:
                                                 best_n, best_s, face_lbl = self.face_recognizer.recognize(
                                                     frame=display_frame,
                                                     face_data=raw_f_1080,
-                                                    min_size=24,
+                                                    min_size=16,
                                                     check_frontal=False,
                                                 )
                                             else:

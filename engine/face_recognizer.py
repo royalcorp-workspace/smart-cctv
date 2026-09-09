@@ -31,7 +31,7 @@ class FaceRecognizer:
         self,
         model_path: Optional[str] = None,
         known_faces_dir: Optional[str] = None,
-        cosine_threshold: float = 0.58,
+        cosine_threshold: float = 0.52,
         auto_download: bool = True,
         detector: Optional[Any] = None,
     ) -> None:
@@ -450,7 +450,7 @@ class FaceRecognizer:
         self,
         frame: np.ndarray,
         face_data: Union[np.ndarray, Tuple[int, int, int, int], List],
-        min_size: int = 24,
+        min_size: int = 16,
         check_frontal: bool = False,
     ) -> Tuple[str, float, str]:
         """Match detected face against database embeddings with minimum size & landmark quality gating.

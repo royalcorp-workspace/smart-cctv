@@ -25,19 +25,19 @@
   "face_detector": {
     "enabled": true,
     "model_path": "models/face_detection_yunet_2023mar.onnx",
-    "score_threshold": 0.38,
+    "score_threshold": 0.32,
     "nms_threshold": 0.30,
     "detect_interval_frames": 3,
     "face_roi_crop": [100, 40, 1250, 520],
     "alternate_inference": true,
-    "min_face_size": 24,
+    "min_face_size": 16,
     "aspect_ratio_range": [0.6, 1.4]
   },
   "face_recognizer": {
     "enabled": true,
     "model_path": "models/face_recognition_sface_2021dec.onnx",
     "known_faces_dir": "data/known_faces",
-    "cosine_threshold": 0.58
+    "cosine_threshold": 0.52
   },
   "telegram": {
     "enabled": true,
