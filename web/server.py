@@ -1,5 +1,4 @@
-"""FastAPI Web Server for Smart CCTV Multi-Camera Streaming and Telemetry."""
-
+import asyncio
 import logging
 from pathlib import Path
 import threading
@@ -46,17 +45,59 @@ async def index_page(request: Request) -> HTMLResponse:
     )
 
 
-@app.get("/video_feed/{camera_id}")
-def video_feed(camera_id: str) -> StreamingResponse:
-    """Stream live MJPEG feed for the requested camera."""
+async def async_stream_mjpeg(camera_id: str, request: Optional[Request] = None):
+    """Asynchronous, non-blocking MJPEG generator with fast client disconnect detection."""
     buffer = MultiCameraBuffer.get_instance()
+    last_seq = -1
+    consecutive_empty = 0
+
+    try:
+        while True:
+            # 1. Detect client disconnection immediately (browser switching cameras or closed tab)
+            if request is not None:
+                try:
+                    if await request.is_disconnected():
+                        break
+                except Exception:
+                    pass
+
+            # 2. Retrieve latest frame without blocking
+            frame_data, cur_seq = buffer.get_latest_frame_and_seq(camera_id)
+
+            if frame_data is not None and cur_seq != last_seq:
+                last_seq = cur_seq
+                consecutive_empty = 0
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame_data + b"\r\n"
+                )
+            elif frame_data is None:
+                consecutive_empty += 1
+                if consecutive_empty <= 1 or consecutive_empty % 25 == 0:
+                    placeholder = buffer.get_or_create_placeholder(camera_id)
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + placeholder + b"\r\n"
+                    )
+
+            # 3. Non-blocking sleep pacing (~25 FPS / 40ms) to yield event loop and keep CPU low
+            await asyncio.sleep(0.04)
+    except (asyncio.CancelledError, GeneratorExit, BaseException):
+        return
+
+
+@app.get("/video_feed/{camera_id}", response_class=StreamingResponse)
+@app.get("/api/stream/{camera_id}", response_class=StreamingResponse)
+def video_feed(camera_id: str, request: Request = Request({"type": "http"})) -> StreamingResponse:
+    """Stream live MJPEG feed for the requested camera with client disconnect termination."""
     return StreamingResponse(
-        buffer.stream_generator(camera_id=camera_id),
+        async_stream_mjpeg(camera_id=camera_id, request=request),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -108,9 +149,9 @@ def is_polygon_self_intersecting(points: List[List[float]]) -> bool:
 
 @app.get("/api/zones")
 @app.get("/api/zones/{camera_id}")
-async def get_zones(camera_id: Optional[str] = None) -> JSONResponse:
+async def get_zones(camera_id: Optional[str] = None, cam: Optional[str] = None) -> JSONResponse:
     """Get current ROI zones configuration for a camera."""
-    cam_id = camera_id or "cam_01"
+    cam_id = cam or camera_id or "cam_01"
     cam_dir = Path(__file__).resolve().parent.parent / "cameras" / cam_id
     roi_file = cam_dir / "roi_zones.json"
 
@@ -224,11 +265,16 @@ async def update_zones(request: Request) -> JSONResponse:
 
 
 @app.get("/api/events")
-async def list_recent_events(camera_id: Optional[str] = None, limit: int = 50) -> JSONResponse:
+async def list_recent_events(
+    camera_id: Optional[str] = None,
+    cam: Optional[str] = None,
+    limit: int = 50,
+) -> JSONResponse:
     """Retrieve recent incident events with clip paths and telemetry info."""
     from storage.db import get_recent_events
+    effective_cam = cam or camera_id
     try:
-        events = get_recent_events(limit=limit, camera_id=camera_id)
+        events = get_recent_events(limit=limit, camera_id=effective_cam)
         return JSONResponse(content={"status": "success", "events": events})
     except Exception as e:
         logger.error(f"[WebServer] Error fetching events: {e}")

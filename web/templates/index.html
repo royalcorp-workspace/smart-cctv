@@ -24,7 +24,18 @@
             <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
           </svg>
           <select id="cameraSelect" class="camera-select" onchange="onCameraChange()">
-            <option value="cam_01">cam_01 (Koridor & Transit)</option>
+            {% if cameras and cameras|length > 0 %}
+              {% for cam in cameras %}
+              <option value="{{ cam.id }}" {% if loop.first %}selected{% endif %}>
+                {{ cam.id }} ({{ cam.name }})
+              </option>
+              {% endfor %}
+            {% else %}
+              <option value="cam_01">cam_01 (Koridor Utama)</option>
+              <option value="cam_02">cam_02 (Area Parkir POS-2)</option>
+              <option value="cam_03">cam_03 (Jalur Logistik Arah POS-1)</option>
+              <option value="cam_04">cam_04 (Area Timbangan Truk)</option>
+            {% endif %}
           </select>
           <svg class="select-chevron" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -158,11 +169,11 @@
       <div class="meta-strip">
         <div class="meta-item">
           <span class="meta-label">Kamera Aktif:</span>
-          <span class="meta-value" id="metaCamName">Koridor & Area Transit Depan</span>
+          <span class="meta-value" id="metaCamName">Koridor Utama</span>
         </div>
         <div class="meta-item">
           <span class="meta-label">Resolusi Feed:</span>
-          <span class="meta-value">1920 &times; 1080 (Crisp 1080p)</span>
+          <span class="meta-value">Sub-Stream 640 &times; 360 (Rendah Latensi / Efisiensi Tinggi)</span>
         </div>
         <div class="meta-item">
           <span class="meta-label">Batas Dwell Steril:</span>
@@ -213,16 +224,16 @@
         </div>
       </div>
 
-      <!-- CARD 3: IDENTIFIED FACES (SFACE) -->
+      <!-- CARD 3: IDENTIFIED FACES (DECOMMISSIONED FOR HIGH PERFORMANCE) -->
       <div class="panel-card panel-card-faces">
         <div class="panel-card-header">
           <div class="panel-card-title">
             <span class="indicator-icon">👤</span> Personil & Biometrik Wajah
           </div>
-          <span class="count-badge" id="faceCount">0 Terdeteksi</span>
+          <span class="count-badge" id="faceCount" style="opacity: 0.7;">Nonaktif (Mode Performa Tinggi)</span>
         </div>
         <div class="faces-scroll" id="facesList">
-          <div class="empty-state">Belum ada wajah terdeteksi pada feed saat ini</div>
+          <div class="empty-state">Modul biometrik dinonaktifkan untuk efisiensi CPU maksimal (Zero-Load Mode)</div>
         </div>
       </div>
     </aside>

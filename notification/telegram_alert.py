@@ -119,12 +119,18 @@ class TelegramNotifier:
             if admin_id not in self.global_admins:
                 self.global_admins.append(admin_id)
 
-        env_cam01 = os.getenv("TELEGRAM_CAM01_CHAT_ID")
-        if env_cam01 and env_cam01.strip() and not env_cam01.startswith("${"):
-            cam01_id = env_cam01.strip()
-            cur_list = self.camera_routing.setdefault("cam_01", [])
-            if cam01_id not in cur_list:
-                cur_list.append(cam01_id)
+        for env_k, env_v in os.environ.items():
+            if env_k.startswith("TELEGRAM_CAM") and env_k.endswith("_CHAT_ID"):
+                cam_suffix = env_k[len("TELEGRAM_"): -len("_CHAT_ID")].lower()  # e.g. cam01 -> cam_01
+                if "_" not in cam_suffix and len(cam_suffix) >= 4:
+                    cam_key = f"{cam_suffix[:3]}_{cam_suffix[3:]}"
+                else:
+                    cam_key = cam_suffix
+                if env_v and env_v.strip() and not env_v.startswith("${"):
+                    c_id = env_v.strip()
+                    c_list = self.camera_routing.setdefault(cam_key, [])
+                    if c_id not in c_list:
+                        c_list.append(c_id)
 
         env_enabled = os.getenv("TELEGRAM_ENABLED")
         if env_enabled is not None:

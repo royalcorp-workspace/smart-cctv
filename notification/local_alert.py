@@ -146,6 +146,7 @@ class VisualHUD:
         faces: Optional[List[Tuple[Tuple[int, int, int, int], float]]] = None,
         outside_faces: Optional[List[Tuple[Tuple[int, int, int, int], float]]] = None,
         zone_base_resolution: Optional[Tuple[int, int]] = None,
+        camera_name: Optional[str] = None,
     ) -> np.ndarray:
         """Render complete CCTV visual indicators onto canvas."""
         h, w = canvas.shape[:2]
@@ -231,22 +232,27 @@ class VisualHUD:
             elif not getattr(obj, "is_active_this_frame", False):
                 continue
 
-            # STRICT ROI FILTER: Never render objects outside active ROI zones
-            if not getattr(obj, "zone_id", None) or obj.zone_id not in zones:
-                continue
-
             x, y, bw, bh = obj.bbox
             track_id = obj.track_id
             dwell = getattr(obj, "dwell_duration", 0.0)
             raw_label = getattr(obj, "class_label", "object")
             is_bag = raw_label in ("tas", "backpack", "handbag", "suitcase")
+            is_person = (raw_label == "person")
+            is_walkway_cam = (camera_id in ("cam_03", "cam_04"))
 
-            # VISUAL CLUTTER REDUCTION: Hide person bounding boxes & badges from screen.
-            # Person detection, tracking, and owner proximity logic continue uninterrupted in background.
-            if not is_bag:
+            if is_person:
+                # On walkway compliance cameras, render person with K3 safety status.
+                # On indoor/other cameras (cam_01, cam_02), hide person bounding boxes to eliminate clutter.
+                if not is_walkway_cam or not hasattr(obj, "walkway_status"):
+                    continue
+            elif not is_bag:
                 continue
+            else:
+                # STRICT ROI FILTER FOR BAGS: Never render bags outside active ROI zones
+                if not getattr(obj, "zone_id", None) or obj.zone_id not in zones:
+                    continue
 
-            # Scale bag coordinates from 640x480 space to canvas
+            # Scale coordinates from inference space to canvas
             sx = int(round(x * scale_x))
             sy = int(round(y * scale_y))
             sbw = int(round(bw * scale_x))
@@ -254,47 +260,64 @@ class VisualHUD:
             scx = int(round(obj.centroid[0] * scale_x))
             scy = int(round(obj.centroid[1] * scale_y))
 
-            is_attended = getattr(obj, "is_attended", False)
-            dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
-            max_mins = max(1, int(round(dwell_max / 60.0)))
-
-            # User-friendly minute-based dwell time format (strictly no raw seconds)
-            dwell_str = f"{dwell / 60.0:.1f}m/{max_mins}m"
-
-            # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT / PRE-ALARM / WARNING)
-            is_alert = (getattr(obj, "is_triggered", False) or dwell >= dwell_max)
-            is_pre_alarm = getattr(obj, "is_pre_alarm", False) or (dwell >= dwell_max * 0.85)
-            is_warning = getattr(obj, "is_warning", False) or (dwell >= dwell_max * 0.50)
-            is_occluded = getattr(obj, "is_occluded", False)
-
-            owner_info = getattr(obj, "last_owner_info", None)
-            owner_name = owner_info.get("name") if owner_info else None
-            owner_suffix = f" [{owner_name}]" if owner_name and owner_name != "Unknown" else ""
-
-            if is_attended:
-                box_color = COLOR_SAFE
-                badge_text = f"ID {track_id} | Objek [AMAN]{owner_suffix}"
-            elif is_occluded:
-                box_color = (0, 215, 255)  # Amber / Soft Gold
-                badge_text = f"ID {track_id} | Objek [TERTUTUP] ({dwell_str}){owner_suffix}"
-            elif is_alert:
-                box_color = (0, 0, 255) if blink_state else (0, 165, 255)
-                badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m){owner_suffix}"
-            elif is_pre_alarm:
-                box_color = (0, 100, 255)  # Deep Orange-Red
-                badge_text = f"ID {track_id} | Objek [PRE-ALARM 85%] ({dwell_str}){owner_suffix}"
-            elif is_warning:
-                box_color = (0, 165, 255)  # Amber / Orange
-                badge_text = f"ID {track_id} | Objek [WARNING 50%] ({dwell_str}){owner_suffix}"
-            elif getattr(obj, "is_stationary", False) or is_bag:
-                if dwell <= (dwell_max * 0.5):
-                    box_color = (0, 255, 255)  # Kuning
-                else:
-                    box_color = (0, 165, 255)  # Oranye Warning
-                badge_text = f"ID {track_id} | Objek ({dwell_str}){owner_suffix}"
+            if is_person:
+                status = getattr(obj, "walkway_status", "SAFE")
+                dwell_sec = getattr(obj, "outside_walkway_duration", 0.0)
+                is_alert = (status == "VIOLATION")
+                if status == "SAFE":
+                    box_color = COLOR_SAFE  # Hijau (Jalur Aman)
+                    badge_text = f"ID {track_id} | [SAFE WALKWAY]"
+                elif status == "NEAR_VEHICLE":
+                    box_color = (255, 200, 0)  # Cyan / Teal (Aktivitas Kendaraan)
+                    badge_text = f"ID {track_id} | [DEKAT KENDARAAN]"
+                elif status == "CROSSING":
+                    box_color = (0, 215, 255)  # Amber / Gold (Menyeberang / Transisi)
+                    badge_text = f"ID {track_id} | [CROSSING] ({dwell_sec:.0f}s/35s)"
+                else:  # VIOLATION
+                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                    badge_text = f"[ALERT K3] PELANGGARAN JALUR ({dwell_sec:.0f}s)"
             else:
-                box_color = COLOR_SAFE
-                badge_text = f"ID {track_id} | Objek{owner_suffix}"
+                is_attended = getattr(obj, "is_attended", False)
+                dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
+                max_mins = max(1, int(round(dwell_max / 60.0)))
+
+                # User-friendly minute-based dwell time format (strictly no raw seconds)
+                dwell_str = f"{dwell / 60.0:.1f}m/{max_mins}m"
+
+                # OBJECT IN STERILE ZONE (ATTENDED / UNATTENDED / ALERT / PRE-ALARM / WARNING)
+                is_alert = (getattr(obj, "is_triggered", False) or dwell >= dwell_max)
+                is_pre_alarm = getattr(obj, "is_pre_alarm", False) or (dwell >= dwell_max * 0.85)
+                is_warning = getattr(obj, "is_warning", False) or (dwell >= dwell_max * 0.50)
+                is_occluded = getattr(obj, "is_occluded", False)
+
+                owner_info = getattr(obj, "last_owner_info", None)
+                owner_name = owner_info.get("name") if owner_info else None
+                owner_suffix = f" [{owner_name}]" if owner_name and owner_name != "Unknown" else ""
+
+                if is_attended:
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Objek [AMAN]{owner_suffix}"
+                elif is_occluded:
+                    box_color = (0, 215, 255)  # Amber / Soft Gold
+                    badge_text = f"ID {track_id} | Objek [TERTUTUP] ({dwell_str}){owner_suffix}"
+                elif is_alert:
+                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                    badge_text = f"[ALERT] CLEAR AREA ({dwell / 60.0:.0f}m){owner_suffix}"
+                elif is_pre_alarm:
+                    box_color = (0, 100, 255)  # Deep Orange-Red
+                    badge_text = f"ID {track_id} | Objek [PRE-ALARM 85%] ({dwell_str}){owner_suffix}"
+                elif is_warning:
+                    box_color = (0, 165, 255)  # Amber / Orange
+                    badge_text = f"ID {track_id} | Objek [WARNING 50%] ({dwell_str}){owner_suffix}"
+                elif getattr(obj, "is_stationary", False) or is_bag:
+                    if dwell <= (dwell_max * 0.5):
+                        box_color = (0, 255, 255)  # Kuning
+                    else:
+                        box_color = (0, 165, 255)  # Oranye Warning
+                    badge_text = f"ID {track_id} | Objek ({dwell_str}){owner_suffix}"
+                else:
+                    box_color = COLOR_SAFE
+                    badge_text = f"ID {track_id} | Objek{owner_suffix}"
 
             # Draw crisp thin bounding rectangle and centroid (1px normal, max 2px alert)
             cur_box_thick = box_thickness_alert if is_alert else box_thickness_normal
@@ -346,15 +369,20 @@ class VisualHUD:
             for item in active_faces:
                 face_label = None
                 f_score = 0.0
-                if len(item) >= 3:
-                    (fx, fy, fw_f, fh_f), f_score, face_label = item[0], item[1], item[2]
-                elif len(item) == 2:
-                    (fx, fy, fw_f, fh_f), f_score_or_label = item[0], item[1]
-                    if isinstance(f_score_or_label, str):
-                        face_label = f_score_or_label
+                try:
+                    if len(item) >= 4 and isinstance(item[3], str) and item[3] not in ("", "Unknown"):
+                        (fx, fy, fw_f, fh_f), f_score, face_label = item[0], float(item[1]), str(item[3])
+                    elif len(item) >= 3:
+                        (fx, fy, fw_f, fh_f), f_score, face_label = item[0], float(item[1]), str(item[2])
+                    elif len(item) == 2:
+                        (fx, fy, fw_f, fh_f), f_score_or_label = item[0], item[1]
+                        if isinstance(f_score_or_label, str):
+                            face_label = f_score_or_label
+                        else:
+                            f_score = float(f_score_or_label)
                     else:
-                        f_score = float(f_score_or_label)
-                else:
+                        continue
+                except Exception:
                     continue
 
                 if isinstance(face_label, str) and face_label and face_label != "Unknown":
@@ -430,15 +458,24 @@ class VisualHUD:
         conn_color = (0, 255, 0) if is_connected else (0, 0, 255)
         text_color_main = (255, 255, 255)
         bag_count = len([
-            o for o in tracked_objects
+            o for o in (tracked_objects or [])
             if getattr(o, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
-            and getattr(o, "zone_id", None) in zones
+            and getattr(o, "zone_id", None) in (zones or {})
             and (not hasattr(o, "should_render") or o.should_render)
         ])
-        face_count = len(active_faces)
-
-        line_1 = f"CAM: {camera_id} | {w}x{h} | FPS: {fps:.1f}"
-        line_2 = f"CLEAR AREA: {bag_count} | FACES: {face_count} | RTSP: {conn_text}"
+        walkway_vios = len([
+            o for o in (tracked_objects or [])
+            if getattr(o, "class_label", "") == "person"
+            and getattr(o, "walkway_status", "") == "VIOLATION"
+        ])
+        face_count = len(active_faces) if active_faces else 0
+        cam_display = f"{camera_name} ({camera_id})" if camera_name else (camera_id or "CAM")
+        line_1 = f"CAM: {cam_display} | {w}x{h} | FPS: {fps:.1f}"
+        if camera_id in ("cam_03", "cam_04"):
+            k3_status = f"ALERT ({walkway_vios})" if walkway_vios > 0 else "COMPLIANT"
+            line_2 = f"K3 WALKWAY: {k3_status} | CLEAR: {bag_count} | RTSP: {conn_text}"
+        else:
+            line_2 = f"CLEAR AREA: {bag_count} | FACES: {face_count} | RTSP: {conn_text}"
 
         font_scale_hud = 0.38 * scale_factor
         font_thick_hud = max(1, int(round(1.2 * scale_factor)))

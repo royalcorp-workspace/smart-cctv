@@ -1,6 +1,7 @@
 """Comprehensive test suite for Interactive Web Zone Editor and DVR Ring Buffer Playback."""
 
 import json
+import sys
 from pathlib import Path
 import shutil
 import tempfile
@@ -8,6 +9,11 @@ import time
 import cv2
 import numpy as np
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from fastapi.testclient import TestClient
 
 from engine.zone_filter import ZoneFilter

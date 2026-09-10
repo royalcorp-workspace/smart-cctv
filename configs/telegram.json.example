@@ -11,7 +11,15 @@
       "cam_01": [
         "YOUR_CAM01_CHAT_ID"
       ],
-      "cam_02": []
+      "cam_02": [
+        "YOUR_CAM02_CHAT_ID"
+      ],
+      "cam_03": [
+        "YOUR_CAM03_CHAT_ID"
+      ],
+      "cam_04": [
+        "YOUR_CAM04_CHAT_ID"
+      ]
     }
   }
 }

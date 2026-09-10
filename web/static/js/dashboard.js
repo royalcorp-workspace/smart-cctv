@@ -88,18 +88,24 @@ async function loadCameraList() {
     const cameras = await resp.json();
     const select = document.getElementById("cameraSelect");
     if (select && cameras && cameras.length > 0) {
-      const currentVal = select.value;
+      const currentVal = select.value || activeCamera;
+      
+      // Update options dynamically while preserving active selection
       select.innerHTML = "";
       cameras.forEach((cam) => {
         const opt = document.createElement("option");
         opt.value = cam.id;
-        opt.textContent = `${cam.id} (${cam.name || "Kamera"})`;
-        if (cam.id === currentVal || cam.id === activeCamera) {
+        const statusIcon = cam.online ? "🟢" : "🔴";
+        const fpsText = cam.online && cam.fps ? ` (${cam.fps.toFixed(1)} FPS)` : "";
+        opt.textContent = `${statusIcon} ${cam.id} - ${cam.name || "Kamera"}${fpsText}`;
+        if (cam.id === currentVal) {
           opt.selected = true;
         }
         select.appendChild(opt);
       });
-      if (!cameras.some((c) => c.id === activeCamera)) {
+      if (select.value !== currentVal && cameras.some((c) => c.id === currentVal)) {
+        select.value = currentVal;
+      } else if (!cameras.some((c) => c.id === activeCamera)) {
         activeCamera = cameras[0].id;
         select.value = activeCamera;
       }
@@ -124,13 +130,23 @@ function onCameraChange() {
     badgeCam.textContent = activeCamera;
   }
 
-  // Instantly swap MJPEG stream src without page reload
-  const feedImg = document.getElementById("streamFeed");
-  if (feedImg) {
-    feedImg.src = `/video_feed/${activeCamera}?t=${Date.now()}`;
+  // Update descriptive camera name label immediately
+  const metaCam = document.getElementById("metaCamName");
+  if (metaCam && select.selectedOptions && select.selectedOptions[0]) {
+    const optText = select.selectedOptions[0].textContent || "";
+    const match = optText.match(/-\s*([^(]+)/) || optText.match(/\(([^)]+)\)/);
+    if (match && match[1]) {
+      metaCam.textContent = match[1].trim();
+    }
   }
 
-  // Reset telemetry display immediately
+  // 1. Explicitly terminate old stream by emptying src attribute
+  const feedImg = document.getElementById("streamFeed");
+  if (feedImg) {
+    feedImg.src = "";
+  }
+
+  // 2. Reset telemetry displays immediately
   const fpsEl = document.getElementById("statFps");
   if (fpsEl) fpsEl.textContent = "--";
   const tracksEl = document.getElementById("statTracks");
@@ -138,7 +154,30 @@ function onCameraChange() {
   const violEl = document.getElementById("statViolations");
   if (violEl) violEl.textContent = "0";
 
-  pollTelemetry();
+  // 3. Short pause (50ms) before binding new camera stream URL to allow socket clean-up
+  if (window._camSwitchTimer) {
+    clearTimeout(window._camSwitchTimer);
+  }
+  window._camSwitchTimer = setTimeout(() => {
+    if (feedImg) {
+      feedImg.src = `/api/stream/${activeCamera}?t=${Date.now()}`;
+    }
+  }, 50);
+
+  // If Zone Editor canvas is open, reload zones for newly selected camera
+  if (typeof zoneEditorActive !== "undefined" && zoneEditorActive) {
+    fetchCameraZones().then(() => {
+      if (typeof renderZoneCanvas === "function") {
+        renderZoneCanvas();
+      }
+    });
+  }
+
+  // 4. Asynchronously poll telemetry and events with slight offset
+  setTimeout(() => {
+    pollTelemetry();
+    loadRecentEvents();
+  }, 100);
 }
 
 function onStreamError() {
@@ -161,13 +200,23 @@ function onStreamLoad() {
    4. PERIODIC TELEMETRY POLLING
    ========================================================================== */
 
+let _isTelemetryPolling = false;
+
 /**
  * Poll camera telemetry every 1000ms and update KPI cards.
  */
 async function pollTelemetry() {
+  if (_isTelemetryPolling) return;
+  _isTelemetryPolling = true;
+
   try {
-    const resp = await fetch(`/api/status/${activeCamera}`);
-    if (!resp.ok) return;
+    let resp;
+    if (window.AbortSignal && AbortSignal.timeout) {
+      resp = await fetch(`/api/status/${activeCamera}`, { signal: AbortSignal.timeout(2000) });
+    } else {
+      resp = await fetch(`/api/status/${activeCamera}`);
+    }
+    if (!resp || !resp.ok) return;
     const data = await resp.json();
 
     // 1. Update camera metadata name
@@ -216,45 +265,63 @@ async function pollTelemetry() {
       }
     }
 
-    // 5. Update Biometric Identified Faces List (SFace)
+    // 5. Update Biometric Identified Faces / K3 Walkway Compliance Status
     const facesList = document.getElementById("facesList");
     const faces = data.identified_faces || [];
     const faceCount = document.getElementById("faceCount");
-    if (faceCount) {
-      faceCount.textContent = `${faces.length} Terdeteksi`;
-    }
 
-    if (facesList) {
-      if (faces.length === 0) {
-        facesList.innerHTML = '<div class="empty-state">Belum ada wajah terdeteksi pada feed saat ini</div>';
-      } else {
-        facesList.innerHTML = faces.map((face) => {
-          const rawName = face.name || "Unknown";
-          const isKnown = rawName.toLowerCase() !== "unknown";
-          const initials = isKnown ? rawName.substring(0, 2).toUpperCase() : "??";
-          const tagClass = isKnown ? "tag-badge authorized" : "tag-badge unknown";
-          const tagText = isKnown ? "Terdaftar" : "Tamu / Unknown";
-          const conf = (isKnown && face.confidence) ? `(${(face.confidence * 100).toFixed(0)}%)` : "";
-          const zoneText = face.zone || "Area Pantau";
+    if (activeCamera === "cam_03" || activeCamera === "cam_04") {
+      const wVios = data.walkway_violations || 0;
+      if (faceCount) {
+        faceCount.textContent = wVios > 0 ? `${wVios} Pelanggaran K3` : "K3 Walkway Aman";
+        faceCount.style.backgroundColor = wVios > 0 ? "rgba(239, 68, 68, 0.2)" : "rgba(34, 197, 94, 0.2)";
+        faceCount.style.color = wVios > 0 ? "#ef4444" : "#22c55e";
+      }
+      if (facesList) {
+        facesList.innerHTML = `<div class="empty-state" style="color: ${wVios > 0 ? '#ef4444' : '#22c55e'}; font-size: 0.85rem; line-height: 1.4;">
+          ${wVios > 0 ? '⚠ Terdeteksi pejalan kaki berada di luar jalur aman tanpa aktivitas kendaraan!' : '✔ Monitoring K3: Seluruh pejalan kaki patuh di jalur aman atau beraktivitas dekat kendaraan.'}
+        </div>`;
+      }
+    } else {
+      if (faceCount) {
+        faceCount.textContent = faces.length > 0 ? `${faces.length} Terdeteksi` : "Nonaktif (Mode Performa)";
+        faceCount.style.backgroundColor = "";
+        faceCount.style.color = "";
+      }
 
-          return `
-            <div class="person-card">
-              <div class="person-profile">
-                <div class="person-avatar ${isKnown ? "" : "unknown"}">${initials}</div>
-                <div class="person-meta">
-                  <span class="person-name">${rawName} ${conf}</span>
-                  <span class="person-zone">${zoneText}</span>
+      if (facesList) {
+        if (faces.length === 0) {
+          facesList.innerHTML = '<div class="empty-state">Modul biometrik dinonaktifkan untuk efisiensi CPU maksimal (Zero-Load Mode)</div>';
+        } else {
+          facesList.innerHTML = faces.map((face) => {
+            const rawName = face.name || "Unknown";
+            const isKnown = rawName.toLowerCase() !== "unknown";
+            const initials = isKnown ? rawName.substring(0, 2).toUpperCase() : "??";
+            const tagClass = isKnown ? "tag-badge authorized" : "tag-badge unknown";
+            const tagText = isKnown ? "Terdaftar" : "Tamu / Unknown";
+            const conf = (isKnown && face.confidence) ? `(${(face.confidence * 100).toFixed(0)}%)` : "";
+            const zoneText = face.zone || "Area Pantau";
+
+            return `
+              <div class="person-card">
+                <div class="person-profile">
+                  <div class="person-avatar ${isKnown ? "" : "unknown"}">${initials}</div>
+                  <div class="person-meta">
+                    <span class="person-name">${rawName} ${conf}</span>
+                    <span class="person-zone">${zoneText}</span>
+                  </div>
                 </div>
+                <span class="${tagClass}">${tagText}</span>
               </div>
-              <span class="${tagClass}">${tagText}</span>
-            </div>
-          `;
-        }).join("");
+            `;
+          }).join("");
+        }
       }
     }
-
   } catch (err) {
     console.warn("Telemetry polling warning:", err);
+  } finally {
+    _isTelemetryPolling = false;
   }
 }
 
@@ -1086,4 +1153,25 @@ window.addEventListener("DOMContentLoaded", () => {
   setInterval(loadCameraList, 8000);
   setInterval(loadRecentEvents, 10000);
 });
+
+/* ==========================================================================
+   9. GLOBAL WINDOW EXPORTS (Ensure inline HTML events always resolve)
+   ========================================================================== */
+
+window.onCameraChange = onCameraChange;
+window.toggleFullscreen = toggleFullscreen;
+window.onStreamLoad = onStreamLoad;
+window.onStreamError = onStreamError;
+window.toggleTheme = toggleTheme;
+window.toggleZoneEditor = toggleZoneEditor;
+window.onZoneSelectChange = onZoneSelectChange;
+window.setZoneMode = setZoneMode;
+window.deleteSelectedPoint = deleteSelectedPoint;
+window.undoZoneAction = undoZoneAction;
+window.resetCurrentZone = resetCurrentZone;
+window.saveZonesToServer = saveZonesToServer;
+window.loadRecentEvents = loadRecentEvents;
+window.openVideoModal = openVideoModal;
+window.closeVideoModal = closeVideoModal;
+
 

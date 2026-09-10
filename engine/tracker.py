@@ -99,6 +99,11 @@ class TrackedObject:
     associated_face_crop: Optional[Any] = None
     associated_face_meta: Optional[Dict[str, Any]] = None
     associated_person_crop: Optional[Any] = None
+    walkway_status: str = "SAFE"
+    outside_walkway_start: float = 0.0
+    outside_walkway_duration: float = 0.0
+    is_near_vehicle: bool = False
+    nearest_vehicle_dist: float = 999.0
 
     def __post_init__(self) -> None:
         if self.associated_face_meta is not None and self.last_owner_info is None:

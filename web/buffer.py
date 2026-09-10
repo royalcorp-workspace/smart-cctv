@@ -27,6 +27,7 @@ class MultiCameraBuffer:
         self._camera_names: Dict[str, str] = {}
         self._last_update_times: Dict[str, float] = {}
         self._pipelines: Dict[str, Any] = {}
+        self._placeholders: Dict[str, bytes] = {}
 
     @classmethod
     def get_instance(cls) -> "MultiCameraBuffer":
@@ -125,6 +126,11 @@ class MultiCameraBuffer:
         with self._lock:
             return self._frames.get(camera_id)
 
+    def get_latest_frame_and_seq(self, camera_id: str) -> Tuple[Optional[bytes], int]:
+        """Non-blocking retrieval of latest frame bytes and monotonic sequence number."""
+        with self._lock:
+            return self._frames.get(camera_id), self._frame_seqs.get(camera_id, 0)
+
     def get_telemetry(self, camera_id: str) -> Dict[str, Any]:
         """Return the current telemetry dictionary for a camera."""
         now = time.time()
@@ -154,17 +160,27 @@ class MultiCameraBuffer:
             return telem
 
     def get_cameras(self) -> List[Dict[str, Any]]:
-        """Return a list of all registered cameras and basic online statuses."""
+        """Return a list of all registered cameras with live telemetry statuses."""
         now = time.time()
         cameras: List[Dict[str, Any]] = []
         with self._lock:
             for cam_id, name in self._camera_names.items():
                 last_up = self._last_update_times.get(cam_id, 0.0)
                 is_online = (now - last_up) <= 4.0 if last_up > 0 else False
+                telem = self._telemetries.get(cam_id, {})
+                fps = telem.get("fps", 0.0) if is_online else 0.0
+                rtsp_status = telem.get("rtsp_status", "Connected") if is_online else "Signal Lost / Reconnecting"
+                violations = telem.get("violations", 0) if is_online else 0
+                active_tracks = telem.get("active_tracks", 0) if is_online else 0
+
                 cameras.append({
                     "id": cam_id,
                     "name": name,
                     "online": is_online,
+                    "fps": round(float(fps), 1),
+                    "rtsp_status": rtsp_status,
+                    "violations": violations,
+                    "active_tracks": active_tracks,
                 })
         return sorted(cameras, key=lambda c: c["id"])
 
@@ -208,33 +224,47 @@ class MultiCameraBuffer:
         _, enc = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 75])
         return enc.tobytes()
 
+    def get_or_create_placeholder(self, camera_id: str, message: str = "") -> bytes:
+        """Fetch or generate cached standby JPEG frame without repeated OpenCV encoding."""
+        cam_name = self._camera_names.get(camera_id, camera_id)
+        msg = message or f"{cam_name}: Menghubungkan feed kamera..."
+        cache_key = f"{camera_id}_{msg}"
+        with self._lock:
+            if cache_key in self._placeholders:
+                return self._placeholders[cache_key]
+
+        frame_bytes = self.create_placeholder_frame(msg)
+        with self._lock:
+            self._placeholders[cache_key] = frame_bytes
+        return frame_bytes
+
     def stream_generator(self, camera_id: str):
         """Yield multipart/x-mixed-replace MJPEG byte stream for HTTP response."""
         last_seq = -1
-        standby_bytes = self.create_placeholder_frame(f"Kamera '{camera_id}' belum aktif...")
 
-        while True:
-            frame_data: Optional[bytes] = None
-            with self._lock:
-                cond = self._conditions.setdefault(camera_id, threading.Condition(self._lock))
-                cur_seq = self._frame_seqs.get(camera_id, 0)
+        try:
+            while True:
+                frame_data: Optional[bytes] = None
+                with self._lock:
+                    cond = self._conditions.setdefault(camera_id, threading.Condition(self._lock))
+                    cur_seq = self._frame_seqs.get(camera_id, 0)
 
-                # Wait for next frame if current frame was already yielded
-                if cur_seq == last_seq or camera_id not in self._frames:
-                    # Timeout after 0.5s to permit periodic keep-alive and responsiveness
-                    cond.wait(timeout=0.5)
+                    # Non-blocking short timeout (max 0.15s) to guarantee responsiveness
+                    if cur_seq == last_seq or camera_id not in self._frames:
+                        cond.wait(timeout=0.15)
 
-                cur_seq = self._frame_seqs.get(camera_id, 0)
-                if cur_seq != last_seq and camera_id in self._frames:
-                    frame_data = self._frames[camera_id]
-                    last_seq = cur_seq
+                    cur_seq = self._frame_seqs.get(camera_id, 0)
+                    if cur_seq != last_seq and camera_id in self._frames:
+                        frame_data = self._frames[camera_id]
+                        last_seq = cur_seq
 
-            if frame_data is None:
-                # If no frame received yet, send standby frame occasionally
-                frame_data = standby_bytes
-                time.sleep(0.1)
+                if frame_data is None:
+                    frame_data = self.get_or_create_placeholder(camera_id)
+                    time.sleep(0.04)
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame_data + b"\r\n"
-            )
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame_data + b"\r\n"
+                )
+        except (GeneratorExit, ConnectionResetError, BrokenPipeError, OSError):
+            return

@@ -1,6 +1,12 @@
 """YOLO11 Nano Object Detection Engine accelerated with Intel OpenVINO."""
 
 import os
+# Cap OpenVINO and BLAS CPU threads to 4 to leave 2 threads for RTSP I/O and web server
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OV_CPU_THREADS_NUM", "4")
+
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -16,6 +22,9 @@ class YOLOOpenVINODetector:
 
     TARGET_CLASSES: Dict[int, str] = {
         0: "person",
+        2: "car",
+        5: "bus",
+        7: "truck",
         24: "backpack",
         26: "handbag",
         28: "suitcase",
@@ -23,6 +32,9 @@ class YOLOOpenVINODetector:
 
     CLASS_CONFIDENCE_THRESHOLDS: Dict[int, float] = {
         0: 0.25,   # person: calibrated for overhead CCTV and motion-blurred walking
+        2: 0.25,   # car: vehicle proximity latch
+        5: 0.25,   # bus: vehicle proximity latch
+        7: 0.25,   # truck: vehicle proximity latch
         24: 0.18,  # backpack: calibrated for floor/lying bags
         26: 0.18,  # handbag: calibrated for floor/lying bags
         28: 0.18,  # suitcase: calibrated for floor/lying bags
@@ -134,22 +146,25 @@ class YOLOOpenVINODetector:
             cy = y1 + h // 2
             cname = self.TARGET_CLASSES.get(cid, "object")
 
-            # Geometric sanity filter: discard tiny blobs that cannot be human.
+            # Geometric sanity filter: discard tiny blobs that cannot be human or vehicle.
             # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
             # seated at desk (wide box), walking (tall box), or crouching (medium box).
             # Thresholds lowered to detect persons far from camera (e.g. back row desks at 640x360)
+            area = w * h
             if cid == 0:
-                area = w * h
                 if h < 18 or w < 12 or area < 300:
                     logger.debug(
                         f"[YOLODetector] Person blob filtered (too small): "
                         f"w={w}px h={h}px area={area}px² (min: w>=12, h>=18, area>=300)"
                     )
                     continue
+            elif cid in (2, 5, 7):  # vehicles: car, bus, truck
+                if w < 25 or h < 20 or area < 600:
+                    continue
 
             # Accurate reference point:
             # Person: center-bottom / feet (contact point with floor)
-            # Bag: center of mass
+            # Vehicle / Bag: center of mass
             if cid == 0:  # person
                 ref_point = (cx, min(orig_h - 1, y2 - 2))
             else:
@@ -157,18 +172,36 @@ class YOLOOpenVINODetector:
 
             detections.append(((x1, y1, w, h), (cx, cy), ref_point, cconf, cid, cname))
 
-        # Enforce Class-Agnostic NMS to eliminate overlapping duplicate boxes (e.g. backpack vs handbag)
+        # Enforce Category-Aware NMS to eliminate overlapping duplicate boxes within same category
+        # (e.g. backpack vs handbag, or car vs truck) without suppressing nearby persons
         if len(detections) > 1:
-            boxes_xywh = [[d[0][0], d[0][1], d[0][2], d[0][3]] for d in detections]
-            scores = [float(d[3]) for d in detections]
-            indices = cv2.dnn.NMSBoxes(
-                bboxes=boxes_xywh,
-                scores=scores,
-                score_threshold=0.20,
-                nms_threshold=0.45,
-            )
-            if len(indices) > 0:
-                indices_flat = indices.flatten()
-                detections = [detections[i] for i in indices_flat]
+            filtered_detections = []
+            category_map = {
+                0: "person",
+                2: "vehicle", 5: "vehicle", 7: "vehicle",
+                24: "bag", 26: "bag", 28: "bag",
+            }
+            groups: Dict[str, List[int]] = {}
+            for idx, d in enumerate(detections):
+                cat = category_map.get(d[4], "other")
+                groups.setdefault(cat, []).append(idx)
+
+            for cat, indices_group in groups.items():
+                if len(indices_group) == 1:
+                    filtered_detections.append(detections[indices_group[0]])
+                else:
+                    boxes_xywh = [[detections[i][0][0], detections[i][0][1], detections[i][0][2], detections[i][0][3]] for i in indices_group]
+                    scores = [float(detections[i][3]) for i in indices_group]
+                    nms_idx = cv2.dnn.NMSBoxes(
+                        bboxes=boxes_xywh,
+                        scores=scores,
+                        score_threshold=0.20,
+                        nms_threshold=0.45,
+                    )
+                    if len(nms_idx) > 0:
+                        for kept_i in nms_idx.flatten():
+                            filtered_detections.append(detections[indices_group[kept_i]])
+
+            detections = filtered_detections
 
         return detections

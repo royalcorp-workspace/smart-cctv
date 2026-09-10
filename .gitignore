@@ -1,6 +1,11 @@
-# 1. Environment & Credential Secrets (CRITICAL)
+# ==============================================================================
+# SMART-CCTV GITIGNORE CONFIGURATION (BRANCH V2 / PRODUCTION READY)
+# ==============================================================================
+
+# 1. KREDENSIAL & ENVIRONMENT SECRETS (CRITICAL)
 .env
 .env.*
+.env.local
 !.env.example
 *.pem
 *.key
@@ -12,71 +17,73 @@ id_ed25519
 id_ed25519.pub
 *.ppk
 known_hosts
-
-# 2. Biometric Data & Personally Identifiable Information (PII) (CRITICAL)
-# Seluruh foto wajah personil, dataset pengenalan, dan embedding vektor
-data/known_faces/*
-!data/known_faces/.gitkeep
-data/known_faces/.embeddings_cache.npz
-data/face_crops/*
-!data/face_crops/.gitkeep
-*.npy
-*.npz
-
-# 3. Telegram Local Config Overrides
 configs/telegram.json
 !configs/telegram.json.example
 
-# 4. Storage, SQLite Databases & Media Captures
+# 2. BASIS DATA, LOGS, & MEDIA BUKTI OPERASIONAL
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 storage/*.db*
 storage/*.jpg
 storage/*.png
+storage/snapshots/*
+!storage/snapshots/.gitkeep
+storage/clips/*
+!storage/clips/.gitkeep
 cameras/**/snapshots/*
 !cameras/**/snapshots/.gitkeep
+logs/*.log
+*.log
+!logs/.gitkeep
+reports/*.csv
 reports/*
 !reports/.gitkeep
 
-# 5. Application Logs & System Output
-logs/*.log
-!logs/.gitkeep
-*.log
+# 3. DATA PRIVASI & BIOMETRIK (PII - CRITICAL)
+data/known_faces/*
+!data/known_faces/.gitkeep
+data/face_crops/*
+!data/face_crops/.gitkeep
+data/known_faces/.embeddings_cache.npz
+*.npy
+*.npz
 
-# 6. Python Runtime & Cache
+# 4. MODEL BOBOT AI (UKURAN BESAR / BINARY WEIGHTS)
+models/*.onnx
+models/*.xml
+models/*.bin
+!models/.gitkeep
+*.pt
+*.onnx
+*.xml
+*.bin
+*_openvino_model/
+yolo11n_openvino_model/
+
+# 5. RUNTIME, VIRTUAL ENVIRONMENT, & OS ARTIFACTS
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .pytest_cache/
 .mypy_cache/
-
-# 7. Virtual Environments
 .venv/
 venv/
 env/
 ENV/
-
-# 8. Temporary Test Media, Artifacts & Screencasts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.bak
 *.mp4
 *.avi
 *.mkv
 *.mov
 scratch/
 runs/
-
-# 9. AI Model Weights & Export Caches (Prevent accidental large binary commits)
-*.pt
-*.onnx
-*_openvino_model/
-
-# 10. IDE & OS Metadata
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-*.swp
-*.bak
-storage/clips/*
-!storage/clips/.gitkeep

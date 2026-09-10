@@ -1,7 +1,7 @@
 {
-  "camera_id": "cam_01",
-  "name": "Koridor Utama",
-  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@${CAM01_IP}:${CAM01_PORT}/Streaming/Channels/${CAM01_CHANNEL}",
+  "camera_id": "cam_02",
+  "name": "Area Parkir POS-2",
+  "source": "rtsp://${CAM02_USER}:${CAM02_PASS}@${CAM02_IP}:${CAM02_PORT}/Streaming/Channels/${CAM02_CHANNEL}",
   "target_resolution": null,
   "detector": {
     "enabled_classes": [
@@ -47,7 +47,7 @@
   "telegram": {
     "enabled": true,
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
-    "chat_id": "${TELEGRAM_CAM01_CHAT_ID}"
+    "chat_id": "${TELEGRAM_CAM02_CHAT_ID}"
   },
   "web_dashboard": {
     "enabled": true,
@@ -57,15 +57,7 @@
   },
   "zones": {
     "zone_1_koridor": {
-      "name": "Koridor Utama (Walkway)",
-      "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 300
-    },
-    "zone_1__koridor": {
-      "name": "Koridor Utama (Walkway)",
+      "name": "Area Parkir Utama (Walkway)",
       "detect_unattended": false,
       "dwell_threshold_sec": 3600,
       "dwell_time_threshold": 3600.0,
@@ -73,20 +65,7 @@
       "min_contour_area": 300
     },
     "zone_2_transit": {
-      "name": "Area Transit Depan (Penitipan)",
-      "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 250,
-      "target_classes": [
-        "backpack",
-        "handbag",
-        "suitcase"
-      ]
-    },
-    "zone_2__transit": {
-      "name": "Area Transit Depan (Penitipan)",
+      "name": "Area Parkir POS-2",
       "detect_unattended": true,
       "dwell_threshold_sec": 3600,
       "dwell_time_threshold": 3600.0,

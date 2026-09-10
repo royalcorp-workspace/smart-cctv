@@ -31,6 +31,9 @@ from storage.db import init_db, log_event, resolve_event, update_event_clip
 from web.buffer import MultiCameraBuffer
 from web.server import DashboardServer
 
+# Global AI inference semaphore (1-slot) to serialize OpenVINO inference across multi-camera pipelines
+_GLOBAL_AI_SEMAPHORE = threading.Semaphore(1)
+
 
 class RingBufferRecorder:
     """Maintains an in-memory circular buffer of JPEG-compressed frames (~15-25 MB RAM).
@@ -52,7 +55,7 @@ class RingBufferRecorder:
         if frame is None or frame.size == 0:
             return
         try:
-            if frame.shape[1] != self.target_size[0] or frame.shape[0] != self.target_size[1]:
+            if frame.shape[1] > self.target_size[0] or frame.shape[0] > self.target_size[1]:
                 scaled = cv2.resize(frame, self.target_size, interpolation=cv2.INTER_AREA)
             else:
                 scaled = frame
@@ -73,7 +76,12 @@ class RingBufferRecorder:
             return False
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        w, h = self.target_size
+        # Auto-detect native frame dimensions from stored buffer
+        first_frame = cv2.imdecode(np.frombuffer(frames_to_write[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+        if first_frame is not None:
+            h, w = first_frame.shape[:2]
+        else:
+            w, h = self.target_size
 
         # Codec selection: try avc1 first (standard HTML5 H.264), fallback to mp4v if needed
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
@@ -106,8 +114,9 @@ class RingBufferRecorder:
 class CameraPipeline:
     """Encapsulates autonomous capture, processing, tracking, and alerting for a single camera workspace."""
 
-    def __init__(self, camera_dir: Path) -> None:
+    def __init__(self, camera_dir: Path, ai_offset: int = 0) -> None:
         self.camera_dir: Path = camera_dir
+        self.ai_offset: int = ai_offset
         self.config_path: Path = camera_dir / "config.json"
         self.roi_path: Path = camera_dir / "roi_zones.json"
         self.snapshots_dir: Path = camera_dir / "snapshots"
@@ -148,6 +157,23 @@ class CameraPipeline:
         # YOLO 2-frame inference stride state (cuts object detector CPU load in half)
         self._yolo_frame_index: int = 0
         self._cached_yolo_results: List[Any] = []
+        self._yolo_base_stride: int = int(detector_cfg.get("stride", 2))
+
+        # Motion-Triggered Inference Gating (Zero-load idle bypass on outdoor/driveway cameras)
+        motion_cfg = self.config.get("motion_gating", {})
+        self.motion_gating_enabled: bool = bool(motion_cfg.get("enabled", False))
+        self.motion_threshold_px: int = int(motion_cfg.get("threshold_px", 120))
+        self.motion_diff_thresh: int = int(motion_cfg.get("diff_threshold", 25))
+        self.motion_hangover_sec: float = float(motion_cfg.get("hangover_sec", 2.0))
+        self.motion_quiescent_interval: int = int(motion_cfg.get("quiescent_interval", 30))
+        self._prev_micro_gray: Optional[np.ndarray] = None
+        self._motion_active_until: float = 0.0
+        if self.motion_gating_enabled:
+            logger.info(
+                f"[{self.camera_id}] Motion-Triggered Inference Gating ACTIVE "
+                f"(thresh_px={self.motion_threshold_px}, diff_th={self.motion_diff_thresh}, "
+                f"hangover={self.motion_hangover_sec}s, quiescent_interval={self.motion_quiescent_interval}f)"
+            )
 
         self.subtractor = DualSubtractor(
             slow_history=5000,
@@ -180,6 +206,20 @@ class CameraPipeline:
         self.telegram_notifier: TelegramNotifier = TelegramNotifier.get_instance()
         self.io_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._last_dwell_log_time: float = 0.0
+
+        # Pedestrian Walkway Compliance (K3/HSE monitoring on cam_03 & cam_04)
+        walkway_cfg = self.config.get("walkway_compliance", {})
+        self.walkway_compliance_enabled: bool = bool(walkway_cfg.get("enabled", False))
+        self.walkway_safe_zone_id: str = walkway_cfg.get("safe_zone_id", "zone_1_koridor")
+        self.walkway_dwell_threshold: float = float(walkway_cfg.get("dwell_threshold_sec", 35.0))
+        self.vehicle_proximity_px: float = float(walkway_cfg.get("vehicle_proximity_px", 75.0))
+        self.vehicle_classes: List[str] = walkway_cfg.get("vehicle_classes", ["car", "bus", "truck"])
+        if self.walkway_compliance_enabled:
+            logger.info(
+                f"[{self.camera_id}] Pedestrian Walkway Compliance ACTIVE "
+                f"(safe_zone='{self.walkway_safe_zone_id}', dwell={self.walkway_dwell_threshold}s, "
+                f"proximity={self.vehicle_proximity_px}px)"
+            )
 
         # Threading state
         self._stopped = threading.Event()
@@ -544,8 +584,8 @@ class CameraPipeline:
             now = time.time()
 
             if not ret or frame is None:
-                # Only enter offline state if actually disconnected or timeout exceeded (>2.5s)
-                if not self.capture.is_connected or (now - last_valid_frame_time > 2.5):
+                # Only enter offline state if actually disconnected AND no frame received for > 6.0s
+                if not self.capture.is_connected and (now - last_valid_frame_time > 6.0):
                     # Evaluate tracker timeout during stream idle/disconnection
                     _, purged_tracks = self.tracker.update([], timestamp=now)
                     for purged in purged_tracks:
@@ -555,9 +595,9 @@ class CameraPipeline:
                             o_name = purged.last_owner_info.get("name") if getattr(purged, "last_owner_info", None) else None
                             self._resolve_event_async(eid, zone_name=z_name, track_id=purged.track_id, dwell_duration=purged.dwell_duration, owner_name=o_name)
 
-                    # Render offline canvas using target resolution dimensions
-                    target_w = self.target_resolution[0] if self.target_resolution else 1920
-                    target_h = self.target_resolution[1] if self.target_resolution else 1080
+                    # Render offline canvas using target resolution dimensions (Sub-Stream 640x360 fallback)
+                    target_w = self.target_resolution[0] if self.target_resolution else 640
+                    target_h = self.target_resolution[1] if self.target_resolution else 360
                     placeholder = np.zeros((target_h, target_w, 3), dtype=np.uint8)
                     VisualHUD.render(
                         canvas=placeholder,
@@ -567,6 +607,7 @@ class CameraPipeline:
                         fps=self.current_fps,
                         is_connected=False,
                         faces=[],
+                        camera_name=self.config.get("name", self.camera_id),
                     )
                     with self._display_lock:
                         self._latest_display_frame = placeholder
@@ -579,7 +620,7 @@ class CameraPipeline:
                             "fps": 0.0,
                             "online": False,
                             "is_connected": False,
-                            "rtsp_status": "Reconnecting" if (now - last_valid_frame_time > 2.5) else "Connecting",
+                            "rtsp_status": "Reconnecting" if (now - last_valid_frame_time > 6.0) else "Connecting",
                             "violations": 0,
                             "clear_area_count": 0,
                             "active_tracks": 0,
@@ -589,7 +630,7 @@ class CameraPipeline:
                     )
                     time.sleep(0.05)
                 else:
-                    # Transient inter-frame delay on low FPS cameras
+                    # Transient inter-frame delay or frame pacing
                     time.sleep(0.01)
                 continue
 
@@ -613,21 +654,66 @@ class CameraPipeline:
             display_frame = frame.copy()
             raw_clean_frame = frame.copy()
 
-            # Push clean frame into memory ring buffer (compressed to 720p JPEG in memory)
-            self.ring_buffer.push_frame(raw_clean_frame)
+            # Push clean frame into memory ring buffer on even frames (cuts JPEG encode overhead in half)
+            if (self._frame_count % 2) == 0:
+                self.ring_buffer.push_frame(raw_clean_frame)
 
-            # 2. Scaled lightweight inference frame (640x480) for AI models (YOLO11n, MOG2, YuNet)
+            # 2. Scaled lightweight inference frame (640x360) for AI models (YOLO11n, MOG2, YuNet)
             infer_frame = cv2.resize(frame, self.infer_resolution, interpolation=cv2.INTER_LINEAR)
 
-            # 1. YOLO11 Nano Object Detection on 640x360 inference frame with zero-delay stride
-            # Zero-delay (stride = 1) whenever persons are active or room is being monitored for passersby
-            yolo_interval = 1
-            if (self._yolo_frame_index % yolo_interval) == 0:
-                self._cached_yolo_results = self.detector.detect(infer_frame)
+            # Motion Pre-Filter (ultra-lightweight 160x90 grayscale diff, < 0.04ms)
+            if self.motion_gating_enabled:
+                micro_gray = cv2.cvtColor(
+                    cv2.resize(infer_frame, (160, 90), interpolation=cv2.INTER_NEAREST),
+                    cv2.COLOR_BGR2GRAY,
+                )
+                if self._prev_micro_gray is not None:
+                    diff = cv2.absdiff(micro_gray, self._prev_micro_gray)
+                    _, diff_thresh = cv2.threshold(diff, self.motion_diff_thresh, 255, cv2.THRESH_BINARY)
+                    motion_px = cv2.countNonZero(diff_thresh)
+                    if motion_px >= self.motion_threshold_px:
+                        self._motion_active_until = now + self.motion_hangover_sec
+                self._prev_micro_gray = micro_gray
+
+            # 1. YOLO11 Nano Object Detection on 640x360 inference frame with Staggered Round-Robin
+            has_moving_track = any(
+                getattr(t, "class_label", "") == "person" and getattr(t, "is_active_this_frame", False)
+                for t in self.tracker.objects.values()
+            )
+            has_moving_activity = (
+                getattr(self, "_face_burst_until_time", 0.0) > now
+                or has_moving_track
+            )
+
+            if self.motion_gating_enabled:
+                # Active mode: stride 2 when scene has pixel motion or moving tracker objects
+                # Quiescent mode: stride 30 (~2.5s interval) as heartbeat check, bypassing 93% of YOLO calls
+                is_motion_active = has_moving_activity or (now < self._motion_active_until)
+                yolo_interval = 2 if is_motion_active else self.motion_quiescent_interval
+            else:
+                # Standard rotation (Base stride = 4; burst stride = 2 during person activity)
+                yolo_interval = 2 if has_moving_activity else 4
+
+            should_run_yolo = ((self._yolo_frame_index + self.ai_offset) % yolo_interval) == 0
+
+            if should_run_yolo:
+                # Acquire global AI semaphore with 40ms timeout to serialize OpenVINO and eliminate CPU thrashing
+                acquired = _GLOBAL_AI_SEMAPHORE.acquire(timeout=0.04)
+                if acquired:
+                    try:
+                        self._cached_yolo_results = self.detector.detect(infer_frame)
+                    finally:
+                        _GLOBAL_AI_SEMAPHORE.release()
+
             self._yolo_frame_index += 1
             yolo_results = self._cached_yolo_results
             person_boxes = [bbox for bbox, _, _, _, cid, _ in yolo_results if cid == 0]
-            # Also include any active person tracks to bridge single-frame detection drops
+            vehicle_boxes = [
+                (bbox, centroid, cname)
+                for bbox, centroid, _, _, cid, cname in yolo_results
+                if cid in (2, 5, 7)
+            ]
+            # Tracker coasting: also include active person tracks to bridge non-inferenced frames seamlessly
             for trk in self.tracker.objects.values():
                 if trk.class_label == "person" and getattr(trk, "is_active_this_frame", False):
                     if trk.bbox not in person_boxes:
@@ -939,16 +1025,125 @@ class CameraPipeline:
             # 3. Handle Violation Triggers & Exit Zone Auto-Reset
             pending_telegram_alerts = []
             for track in active_tracks:
-                # 1. PERSON LOITERING DISABLED: Person never triggers violations or dwell alarms
+                # 1. PERSON HANDLING: Pedestrian Walkway Compliance (cam_03 & cam_04) OR Bypass Loitering (cam_01 & cam_02)
                 if getattr(track, "class_label", "") == "person":
-                    if track.is_triggered:
-                        track.is_triggered = False
-                        track.alert_sent = False
-                        track.dwell_duration = 0.0
-                        eid = self.active_db_events.pop(track.track_id, track.db_event_id)
-                        if eid is not None:
-                            self._resolve_event_async(eid)
-                    continue
+                    if self.walkway_compliance_enabled:
+                        # 1a. Evaluate Foot Point (contact point with ground)
+                        bx, by, bw, bh = track.bbox
+                        cx = bx + bw // 2
+                        foot_y = min(self.infer_resolution[1] - 1, by + bh - 2)
+                        foot_point = (cx, foot_y)
+
+                        in_safe_walkway = self.zone_filter.check_point_in_zone(
+                            foot_point, self.walkway_safe_zone_id, margin_px=6.0
+                        )
+
+                        if in_safe_walkway:
+                            track.walkway_status = "SAFE"
+                            track.outside_walkway_start = 0.0
+                            track.outside_walkway_duration = 0.0
+                            track.is_near_vehicle = False
+                            track.dwell_duration = 0.0
+                            if track.is_triggered:
+                                track.is_triggered = False
+                                track.alert_sent = False
+                                eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                                if eid is not None:
+                                    self._resolve_event_async(eid, zone_name="Jalur Aman Pejalan Kaki", track_id=track.track_id, dwell_duration=track.outside_walkway_duration)
+                            continue
+
+                        # 1b. Person is OUTSIDE safe walkway. Evaluate Vehicle Proximity Latch
+                        min_veh_dist = 999.0
+                        for (vx, vy, vvw, vvh), (vcx, vcy), vcname in vehicle_boxes:
+                            clamped_x = max(vx, min(cx, vx + vvw))
+                            clamped_y = max(vy, min(foot_y, vy + vvh))
+                            dist = float(np.hypot(cx - clamped_x, foot_y - clamped_y))
+                            if dist < min_veh_dist:
+                                min_veh_dist = dist
+
+                        track.nearest_vehicle_dist = min_veh_dist
+
+                        # If near vehicle (overlap or within proximity threshold px):
+                        if min_veh_dist <= self.vehicle_proximity_px:
+                            track.is_near_vehicle = True
+                            track.walkway_status = "NEAR_VEHICLE"
+                            track.outside_walkway_start = now
+                            track.outside_walkway_duration = 0.0
+                            track.dwell_duration = 0.0
+                            if track.is_triggered:
+                                track.is_triggered = False
+                                track.alert_sent = False
+                                eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                                if eid is not None:
+                                    self._resolve_event_async(eid, zone_name="Aktivitas Kendaraan", track_id=track.track_id, dwell_duration=track.outside_walkway_duration)
+                            continue
+
+                        # 1c. Person is OUTSIDE safe walkway and FAR from any vehicle
+                        track.is_near_vehicle = False
+                        if track.outside_walkway_start <= 0.0:
+                            track.outside_walkway_start = now
+                        track.outside_walkway_duration = now - track.outside_walkway_start
+                        track.dwell_duration = track.outside_walkway_duration
+                        track.dwell_threshold = self.walkway_dwell_threshold
+
+                        if track.outside_walkway_duration < self.walkway_dwell_threshold:
+                            track.walkway_status = "CROSSING"
+                            if track.is_triggered:
+                                track.is_triggered = False
+                        else:
+                            track.walkway_status = "VIOLATION"
+                            if not track.is_triggered:
+                                track.is_triggered = True
+                                self.audio_worker.request_pre_alarm_chime()
+                                trigger_iso = datetime.datetime.now().isoformat()
+                                start_iso = datetime.datetime.fromtimestamp(track.outside_walkway_start).isoformat()
+                                
+                                alert_msg = (
+                                    f"[ALERT K3] PELANGGARAN JALUR PEJALAN KAKI #{track.track_id} pada "
+                                    f"'{self.config.get('name', self.camera_id)}' (Durasi: {track.outside_walkway_duration:.0f}s >= {self.walkway_dwell_threshold:.0f}s)"
+                                )
+                                print(f"\n{alert_msg}\n")
+                                logger.warning(alert_msg)
+
+                                try:
+                                    event_type = "WALKWAY_VIOLATION"
+                                    event_id = log_event(
+                                        camera_id=self.camera_id,
+                                        zone_id="outside_walkway",
+                                        track_id=track.track_id,
+                                        event_type=event_type,
+                                        dwell_duration=track.outside_walkway_duration,
+                                        start_time=start_iso,
+                                        trigger_time=trigger_iso,
+                                    )
+                                    track.db_event_id = event_id
+                                    self.active_db_events[track.track_id] = event_id
+                                except Exception as e:
+                                    logger.error(f"[{self.camera_id}] Error logging walkway DB event: {e}")
+
+                                if not track.alert_sent:
+                                    track.alert_sent = True
+                                    try:
+                                        self.telegram_notifier.dispatch_composite_alert(
+                                            camera_id=self.camera_id,
+                                            zone_id="outside_walkway",
+                                            track=track,
+                                            stage="VIOLATION",
+                                            frame=raw_clean_frame,
+                                            zone_name=f"{self.config.get('name', self.camera_id)} (Luar Jalur Aman)",
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"[Telegram] Error sending walkway alert: {e}")
+                        continue
+                    else:
+                        if track.is_triggered:
+                            track.is_triggered = False
+                            track.alert_sent = False
+                            track.dwell_duration = 0.0
+                            eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                            if eid is not None:
+                                self._resolve_event_async(eid)
+                        continue
 
                 # 2. EXIT ZONE / NON-UNATTENDED ZONE RESET:
                 # If track is not in a valid unattended monitoring zone (e.g. corridor or outside), immediately disarm and clear
@@ -1258,13 +1453,19 @@ class CameraPipeline:
                             if (disp_x2 - disp_x1) >= 16 and (disp_y2 - disp_y1) >= 16:
                                 eval_head_rois.append((disp_x1, disp_y1, disp_x2, disp_y2))
 
-                        # Execute YuNet detection strictly on the targeted head crop
+                        # Execute YuNet detection strictly on the targeted head crop with AI concurrency lock
                         if eval_head_rois and eval_track is not None:
-                            detected_faces = self.face_detector.detect_faces(
-                                frame=infer_frame,
-                                display_frame=display_frame,
-                                crop_roi=eval_head_rois,
-                            )
+                            detected_faces = []
+                            acquired_face = _GLOBAL_AI_SEMAPHORE.acquire(timeout=0.03)
+                            if acquired_face:
+                                try:
+                                    detected_faces = self.face_detector.detect_faces(
+                                        frame=infer_frame,
+                                        display_frame=display_frame,
+                                        crop_roi=eval_head_rois,
+                                    )
+                                finally:
+                                    _GLOBAL_AI_SEMAPHORE.release()
                             if detected_faces:
                                 # Strict Top 70% Person Containment (Anti-Ghost Face)
                                 px, py, pw, ph = eval_track.bbox
@@ -1521,6 +1722,7 @@ class CameraPipeline:
                 is_connected=self.capture.is_connected,
                 faces=self._cached_faces,
                 zone_base_resolution=self.roi_base_resolution,
+                camera_name=self.config.get("name", self.camera_id),
             )
 
             # Process pending alerts with synchronized VisualHUD annotated display_frame
@@ -1569,11 +1771,16 @@ class CameraPipeline:
                 if getattr(obj, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
                 and (not hasattr(obj, "should_render") or obj.should_render)
             ]
+            walkway_violations = [
+                obj for obj in active_tracks
+                if getattr(obj, "class_label", "") == "person"
+                and getattr(obj, "walkway_status", "") == "VIOLATION"
+            ]
             violations_count = sum(
                 1 for obj in rendering_bags
                 if getattr(obj, "is_triggered", False)
                 or (getattr(obj, "dwell_duration", 0.0) >= getattr(obj, "dwell_threshold", 3600.0) and getattr(obj, "is_stationary", False))
-            )
+            ) + len(walkway_violations)
             rendering_tracks = [
                 obj for obj in active_tracks
                 if not hasattr(obj, "should_render") or obj.should_render
@@ -1615,6 +1822,7 @@ class CameraPipeline:
                 "rtsp_status": "Connected" if self.capture.is_connected else "Reconnecting",
                 "violations": violations_count,
                 "clear_area_count": len(rendering_bags),
+                "walkway_violations": len(walkway_violations),
                 "active_tracks": len(rendering_tracks),
                 "identified_faces": face_telemetry,
             }
@@ -1701,6 +1909,18 @@ def main() -> None:
 
     logger.info(f"Discovered {len(camera_dirs)} camera workspace(s): {[c.name for c in camera_dirs]}")
 
+    # Pre-register all discovered cameras into MultiCameraBuffer for immediate web API availability
+    for c_dir in camera_dirs:
+        try:
+            cfg_path = c_dir / "config.json"
+            cam_name = c_dir.name
+            if cfg_path.exists():
+                c_cfg = load_camera_config(cfg_path)
+                cam_name = c_cfg.get("name", c_dir.name)
+            MultiCameraBuffer.get_instance().register_camera(c_dir.name, cam_name)
+        except Exception as e:
+            logger.warning(f"Failed pre-registering camera {c_dir.name}: {e}")
+
     # Determine Web Dashboard & GUI Configuration
     dashboard_enabled = True
     dashboard_host = args.host or os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1")
@@ -1736,14 +1956,14 @@ def main() -> None:
     else:
         enable_gui = cfg_enable_gui
 
-    # Instantiate and start all camera pipelines
+    # Instantiate and start all camera pipelines with staggered AI offsets
     pipelines: List[CameraPipeline] = []
-    for c_dir in camera_dirs:
+    for idx, c_dir in enumerate(camera_dirs):
         try:
-            pipe = CameraPipeline(camera_dir=c_dir)
+            pipe = CameraPipeline(camera_dir=c_dir, ai_offset=idx % 4)
             pipe.start()
             pipelines.append(pipe)
-            logger.info(f"Pipeline started for camera: {pipe.camera_id}")
+            logger.info(f"Pipeline started for camera: {pipe.camera_id} (ai_offset={pipe.ai_offset})")
         except Exception as e:
             logger.error(f"Failed to start pipeline for {c_dir.name}: {e}")
 

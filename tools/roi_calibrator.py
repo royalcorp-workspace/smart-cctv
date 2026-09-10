@@ -20,6 +20,10 @@ if str(_WORKSPACE_DIR) not in sys.path:
 
 from engine.config_loader import load_camera_config
 
+import os
+# Force TCP transport for RTSP streaming
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
 COLOR_ZONE_1: Tuple[int, int, int] = (0, 255, 0)      # Green
 COLOR_ZONE_2: Tuple[int, int, int] = (0, 215, 255)    # Gold / Amber
 COLOR_PREVIEW: Tuple[int, int, int] = (200, 200, 200) # Gray / White guide
@@ -132,28 +136,64 @@ class ROICalibrator:
                 sys.exit(1)
         else:
             source: Union[int, str] = self.config.get("source", 0)
+            target_w = self.target_resolution[0] if self.target_resolution else 1920
+            target_h = self.target_resolution[1] if self.target_resolution else 1080
 
-            print(f"[INFO] Connecting to video source: {source}...")
-            cap = cv2.VideoCapture(source)
-            if not cap.isOpened():
-                print(f"[ERROR] Cannot open video source: {source}. Fallback to synthetic frame.")
-                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+            def _build_fallback_canvas(reason_msg: str) -> np.ndarray:
+                fb = np.full((target_h, target_w, 3), (25, 18, 14), dtype=np.uint8)
+                # Draw grid lines
+                for gx in range(0, target_w, 160):
+                    cv2.line(fb, (gx, 0), (gx, target_h), (40, 30, 24), 1)
+                for gy in range(0, target_h, 90):
+                    cv2.line(fb, (0, gy), (target_w, gy), (40, 30, 24), 1)
+
                 cv2.putText(
-                    frame,
-                    f"Camera [{self.camera_id}] Feed Offline - Test Canvas",
-                    (100, 360),
+                    fb,
+                    f"Camera [{self.camera_id}] Feed Offline / Auth Pending",
+                    (100, target_h // 2 - 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1.0,
-                    (255, 255, 255),
+                    (0, 215, 255),
                     2,
+                    cv2.LINE_AA,
                 )
+                cv2.putText(
+                    fb,
+                    reason_msg,
+                    (100, target_h // 2 + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (200, 200, 200),
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    fb,
+                    f"Kanvas Kalibrasi 1080p Aktif ({target_w}x{target_h}). Anda tetap dapat menandai zona.",
+                    (100, target_h // 2 + 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.60,
+                    (0, 255, 180),
+                    1,
+                    cv2.LINE_AA,
+                )
+                return fb
+
+            print(f"[INFO] Connecting to video source: {source}...")
+            backend = cv2.CAP_FFMPEG if isinstance(source, str) and source.startswith("rtsp://") else cv2.CAP_ANY
+            cap = cv2.VideoCapture(source, backend)
+            if not cap.isOpened():
+                print(f"[WARN] Cannot open video source: {source}. Fallback to 1080p calibration canvas.")
+                frame = _build_fallback_canvas("Stream RTSP offline atau autentikasi belum berhasil.")
             else:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 ret, captured = cap.read()
                 cap.release()
                 if not ret or captured is None:
-                    print("[ERROR] Failed to read frame from capture device.")
-                    sys.exit(1)
-                frame = captured
+                    print(f"[WARN] Failed to decode frame from capture device. Fallback to 1080p calibration canvas.")
+                    frame = _build_fallback_canvas("Terkoneksi ke stream, namun decoding frame gagal.")
+                else:
+                    frame = captured
 
         # Apply target resolution resizing to maintain coordinate consistency
         if self.target_resolution is not None:

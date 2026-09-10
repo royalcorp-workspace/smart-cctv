@@ -1,8 +1,19 @@
 {
-  "camera_id": "cam_01",
-  "name": "Koridor Utama",
-  "source": "rtsp://${CAM01_USER}:${CAM01_PASS}@${CAM01_IP}:${CAM01_PORT}/Streaming/Channels/${CAM01_CHANNEL}",
+  "camera_id": "cam_04",
+  "name": "Area Timbangan Truk",
+  "source": "rtsp://${CAM04_USER}:${CAM04_PASS}@${CAM04_IP}:${CAM04_PORT}/Streaming/Channels/${CAM04_CHANNEL}",
   "target_resolution": null,
+  "walkway_compliance": {
+    "enabled": true,
+    "safe_zone_id": "zone_1_koridor",
+    "dwell_threshold_sec": 35.0,
+    "vehicle_proximity_px": 75.0,
+    "vehicle_classes": [
+      "car",
+      "bus",
+      "truck"
+    ]
+  },
   "detector": {
     "enabled_classes": [
       "person",
@@ -47,7 +58,7 @@
   "telegram": {
     "enabled": true,
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
-    "chat_id": "${TELEGRAM_CAM01_CHAT_ID}"
+    "chat_id": "${TELEGRAM_CAM04_CHAT_ID}"
   },
   "web_dashboard": {
     "enabled": true,
@@ -57,15 +68,7 @@
   },
   "zones": {
     "zone_1_koridor": {
-      "name": "Koridor Utama (Walkway)",
-      "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 300
-    },
-    "zone_1__koridor": {
-      "name": "Koridor Utama (Walkway)",
+      "name": "Jalur Timbangan Truk (Walkway)",
       "detect_unattended": false,
       "dwell_threshold_sec": 3600,
       "dwell_time_threshold": 3600.0,
@@ -73,20 +76,7 @@
       "min_contour_area": 300
     },
     "zone_2_transit": {
-      "name": "Area Transit Depan (Penitipan)",
-      "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 250,
-      "target_classes": [
-        "backpack",
-        "handbag",
-        "suitcase"
-      ]
-    },
-    "zone_2__transit": {
-      "name": "Area Transit Depan (Penitipan)",
+      "name": "Area Timbangan Truk",
       "detect_unattended": true,
       "dwell_threshold_sec": 3600,
       "dwell_time_threshold": 3600.0,
