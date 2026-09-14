@@ -162,6 +162,7 @@ class VisualHUD:
         camera_name: Optional[str] = None,
         lines: Optional[Dict[str, Any]] = None,
         flashing_lines: Optional[Set[str]] = None,
+        occluded_lines: Optional[Set[str]] = None,
     ) -> np.ndarray:
         """Render complete CCTV visual indicators onto canvas."""
         h, w = canvas.shape[:2]
@@ -258,10 +259,13 @@ class VisualHUD:
 
         if all_lines and isinstance(all_lines, dict):
             active_flash = set(flashing_lines) if flashing_lines else set()
+            active_occluded = set(occluded_lines) if occluded_lines else set()
             overlay_trip_safe = canvas.copy()
             overlay_trip_alert = canvas.copy()
+            overlay_trip_occluded = canvas.copy()
             has_safe_trip = False
             has_alert_trip = False
+            has_occluded_trip = False
             badge_items = []
 
             for line_id, l_data in all_lines.items():
@@ -277,6 +281,7 @@ class VisualHUD:
                 l_name = l_data.get("name", line_id)
                 direction = str(l_data.get("direction", "both")).lower()
                 is_flashing = (line_id in active_flash)
+                is_occluded = (line_id in active_occluded)
 
                 dx = sp2[0] - sp1[0]
                 dy = sp2[1] - sp1[1]
@@ -289,26 +294,43 @@ class VisualHUD:
                     line_color = (0, 0, 255) if blink_state else (255, 255, 255)
                     line_thick = 2
                     target_layer = overlay_trip_alert
+                    badge_text = f"[BREACH] {l_name}"
+                elif is_occluded:
+                    has_occluded_trip = True
+                    line_color = (120, 120, 120)  # Dim gray
+                    line_thick = 1
+                    target_layer = overlay_trip_occluded
+                    badge_text = f"{l_name} [OCCLUDED]"
                 else:
                     has_safe_trip = True
                     line_color = (255, 200, 0)  # Neon Cyan
                     line_thick = 1  # Ultra-thin crisp line
                     target_layer = overlay_trip_safe
+                    badge_text = l_name
 
                 # Draw hairline tripwire line on target layer
                 cv2.line(target_layer, sp1, sp2, line_color, line_thick, lineType=cv2.LINE_AA)
 
                 # Refined small endpoint markers (radius 3)
                 endpoint_r = 3
-                cv2.circle(target_layer, sp1, endpoint_r, (0, 255, 255), -1, lineType=cv2.LINE_AA)
-                cv2.circle(target_layer, sp2, endpoint_r, (0, 165, 255), -1, lineType=cv2.LINE_AA)
+                if is_occluded:
+                    cv2.circle(target_layer, sp1, endpoint_r, (120, 120, 120), -1, lineType=cv2.LINE_AA)
+                    cv2.circle(target_layer, sp2, endpoint_r, (120, 120, 120), -1, lineType=cv2.LINE_AA)
+                else:
+                    cv2.circle(target_layer, sp1, endpoint_r, (0, 255, 255), -1, lineType=cv2.LINE_AA)
+                    cv2.circle(target_layer, sp2, endpoint_r, (0, 165, 255), -1, lineType=cv2.LINE_AA)
 
                 # Direction Arrow on target layer
                 if length > 20:
                     ux = dx / length
                     uy = dy / length
                     arrow_len = min(14.0, length * 0.20)
-                    arrow_color = (0, 0, 255) if is_flashing else (0, 255, 255)
+                    if is_flashing:
+                        arrow_color = (0, 0, 255)
+                    elif is_occluded:
+                        arrow_color = (120, 120, 120)
+                    else:
+                        arrow_color = (0, 255, 255)
 
                     if direction == "a_to_b":
                         a_tip = (int(mx + ux * arrow_len), int(my + uy * arrow_len))
@@ -324,23 +346,26 @@ class VisualHUD:
                         cv2.arrowedLine(target_layer, (mx, my), a_tip1, arrow_color, 1, cv2.LINE_AA, 0, 0.45)
                         cv2.arrowedLine(target_layer, (mx, my), a_tip2, arrow_color, 1, cv2.LINE_AA, 0, 0.45)
 
-                badge_text = f"[BREACH] {l_name}" if is_flashing else l_name
-                badge_items.append((mx, my, badge_text, is_flashing, line_color, sp1, sp2))
+                badge_items.append((mx, my, badge_text, is_flashing, is_occluded, line_color, sp1, sp2))
 
-            # Blend tripwires (~0.5px optical equivalent with alpha=0.35 for safe, 0.85 for breach)
+            # Blend tripwires (~0.5px optical equivalent with alpha=0.35 for safe/occluded, 0.85 for breach)
             if has_safe_trip:
                 cv2.addWeighted(overlay_trip_safe, 0.35, canvas, 0.65, 0, canvas)
+            if has_occluded_trip:
+                cv2.addWeighted(overlay_trip_occluded, 0.35, canvas, 0.65, 0, canvas)
             if has_alert_trip:
                 cv2.addWeighted(overlay_trip_alert, 0.85, canvas, 0.15, 0, canvas)
 
             # Draw compact badges with 50% translucent background
             if badge_items:
                 badge_overlay = canvas.copy()
-                for mx, my, badge_text, is_flashing, line_color, sp1, sp2 in badge_items:
+                for mx, my, badge_text, is_flashing, is_occluded, line_color, sp1, sp2 in badge_items:
                     # Endpoint labels P1 and P2
                     f_scale = 0.34
-                    cv2.putText(canvas, "P1", (sp1[0] + 5, sp1[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, (0, 255, 255), 1, cv2.LINE_AA)
-                    cv2.putText(canvas, "P2", (sp2[0] + 5, sp2[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, (0, 165, 255), 1, cv2.LINE_AA)
+                    p1_col = (140, 140, 140) if is_occluded else (0, 255, 255)
+                    p2_col = (140, 140, 140) if is_occluded else (0, 165, 255)
+                    cv2.putText(canvas, "P1", (sp1[0] + 5, sp1[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, p1_col, 1, cv2.LINE_AA)
+                    cv2.putText(canvas, "P2", (sp2[0] + 5, sp2[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, p2_col, 1, cv2.LINE_AA)
 
                     (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
                     bx = max(4, mx - tw // 2)
@@ -354,11 +379,16 @@ class VisualHUD:
                 cv2.addWeighted(badge_overlay, 0.50, canvas, 0.50, 0, canvas)
 
                 # Foreground crisp text
-                for mx, my, badge_text, is_flashing, line_color, _, _ in badge_items:
+                for mx, my, badge_text, is_flashing, is_occluded, line_color, _, _ in badge_items:
                     (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
                     bx = max(4, mx - tw // 2)
                     by = max(th + 4, my - 8)
-                    txt_col = (255, 255, 255) if is_flashing else (210, 210, 210)
+                    if is_flashing:
+                        txt_col = (255, 255, 255)
+                    elif is_occluded:
+                        txt_col = (160, 160, 160)
+                    else:
+                        txt_col = (210, 210, 210)
                     cv2.putText(canvas, badge_text, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.35, txt_col, 1, cv2.LINE_AA)
 
         # 2. Draw Bounding Boxes and Status Badges
@@ -489,8 +519,8 @@ class VisualHUD:
                     dwell_sec = getattr(obj, "outside_walkway_duration", 0.0)
                     is_alert = (status == "VIOLATION")
                     if status == "SAFE":
-                        box_color = COLOR_SAFE  # Hijau (Jalur Aman)
-                        badge_text = f"ID {track_id} | [SAFE WALKWAY]"
+                        box_color = (0, 255, 127)  # Emerald Green
+                        badge_text = f"PERSON [ID #{track_id}]"
                     elif status == "NEAR_VEHICLE":
                         box_color = (255, 200, 0)  # Cyan / Teal (Aktivitas Kendaraan)
                         badge_text = f"ID {track_id} | [DEKAT KENDARAAN]"
@@ -767,3 +797,6 @@ class VisualHUD:
         )
 
         return canvas
+
+    # Class-level alias for draw() to allow interchangeable usage
+    draw = render

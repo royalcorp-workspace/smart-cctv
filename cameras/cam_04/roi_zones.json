@@ -45,37 +45,31 @@
     "line_1": {
       "name": "Tripwire 1",
       "p1": [
-        88,
-        217
+        107,
+        197
       ],
       "p2": [
-        219,
-        101
+        210,
+        111
       ],
       "direction": "both",
       "target_classes": [
-        "person",
-        "car",
-        "bus",
-        "truck"
+        "person"
       ]
     },
     "line_2": {
       "name": "Tripwire 2",
       "p1": [
-        456,
-        159
+        454,
+        176
       ],
       "p2": [
-        438,
-        238
+        456,
+        262
       ],
       "direction": "both",
       "target_classes": [
-        "person",
-        "car",
-        "bus",
-        "truck"
+        "person"
       ]
     }
   },

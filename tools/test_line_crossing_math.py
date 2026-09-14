@@ -18,11 +18,15 @@ from engine.line_crossing import (
 
 class MockTrack:
     """Mock TrackedObject for headless unit testing."""
-    def __init__(self, track_id: int, centroid: tuple, bbox: tuple, class_label: str = "person"):
+    def __init__(self, track_id: int, centroid: tuple, bbox: tuple, class_label: str = "person", confidence: float = 0.85, frame_count: int = 5):
         self.track_id = track_id
         self.centroid = centroid
         self.bbox = bbox
         self.class_label = class_label
+        self.confidence = confidence
+        self.frame_count = frame_count
+        self.missed_frames = 0
+        self.is_active_this_frame = True
 
 
 def test_cross_product_orientation():
@@ -48,24 +52,30 @@ def test_cross_product_orientation():
 
 
 def test_segments_intersect():
-    """Verify segment intersection detection."""
-    # Two crossing line segments forming an X
-    # Segment 1: (0, 0) -> (10, 10)
-    # Segment 2: (0, 10) -> (10, 0)
-    assert segments_intersect((0, 0), (10, 10), (0, 10), (10, 0)) is True
-
-    # Horizontal and vertical crossing: +
+    """Verify 2D line segment intersection logic."""
+    # Intersecting cross: (0, 5) to (10, 5) and (5, 0) to (5, 10)
     assert segments_intersect((0, 5), (10, 5), (5, 0), (5, 10)) is True
 
-    # Parallel non-intersecting lines
+    # Parallel lines: (0, 0) to (10, 0) and (0, 5) to (10, 5)
     assert segments_intersect((0, 0), (10, 0), (0, 5), (10, 5)) is False
 
-    # Disjoint non-crossing lines
-    assert segments_intersect((0, 0), (2, 2), (5, 5), (10, 10)) is False
+    # Disjoint segments (would intersect if infinite, but segments do not meet)
+    assert segments_intersect((0, 0), (4, 4), (5, 5), (10, 10)) is False
 
-    # T-junction touching endpoint
+    # Collinear overlapping segments: (0, 0) to (5, 0) and (3, 0) to (8, 0)
+    assert segments_intersect((0, 0), (5, 0), (3, 0), (8, 0)) is True
+
+    # Segments sharing an endpoint: (0, 0) to (5, 5) and (5, 5) to (10, 0)
+    assert segments_intersect((0, 0), (5, 5), (5, 5), (10, 0)) is True
+
+    # T-junction: segment touches the middle of another segment
     assert segments_intersect((0, 5), (10, 5), (5, 5), (5, 10)) is True
 
+    # Zero-length point segment on the line
+    assert segments_intersect((5, 5), (5, 5), (0, 5), (10, 5)) is True
+
+    # Zero-length point segment off the line
+    assert segments_intersect((5, 6), (5, 6), (0, 5), (10, 5)) is False
     print("  [PASS] test_segments_intersect")
 
 
@@ -81,7 +91,7 @@ def test_tripwire_engine_crossing_and_direction():
             "target_classes": ["person", "car"],
         }
     }
-    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=5.0)
+    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=5.0, min_track_frames=1, max_step_px=150.0)
 
     # Frame 1: Person at (300, 150) -> foot_y = 150 + 40 - 2 = 188 (Above line)
     t0 = 1000.0
@@ -128,7 +138,7 @@ def test_tripwire_directional_filter():
             "target_classes": ["car"],
         }
     }
-    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=1.0)
+    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=1.0, min_track_frames=1, max_step_px=250.0)
 
     # Move vehicle from A to B (bottom to top: y=300 -> y=100)
     v_track = MockTrack(track_id=10, centroid=(300, 300), bbox=(250, 250, 100, 100), class_label="car")
@@ -162,7 +172,7 @@ def test_visual_flash_timer():
             "direction": "both",
         }
     }
-    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=1.0)
+    engine = TripwireEngine(lines=lines_cfg, cooldown_sec=1.0, min_track_frames=1, max_step_px=150.0)
     track = MockTrack(track_id=5, centroid=(100, 20), bbox=(80, 0, 40, 40), class_label="person")
     engine.update([track], timestamp=100.0)
 

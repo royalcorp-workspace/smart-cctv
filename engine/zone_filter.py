@@ -221,6 +221,56 @@ class ZoneFilter:
         zone, _ = self.find_zone_and_distance(point, margin_px=margin_px)
         return zone
 
+    def find_best_zone_for_points(
+        self,
+        points: List[Tuple[int, int]],
+        margin_px: float = 8.0,
+        priority_order: Optional[List[str]] = None,
+    ) -> Tuple[Optional[str], float]:
+        """Find the matching zone for multiple contact points based on zone priority.
+
+        Prioritizes candidate zones by:
+        1. Explicit priority_order if provided, OR
+        2. Shortest dwell_threshold_sec (e.g. 60s Zebra Cross > 1800s Parking),
+        3. Deepest positive penetration distance into the polygon contour.
+        """
+        if not points or not self.polygon_contours:
+            return None, -999.0
+
+        candidate_zones: Dict[str, float] = {}
+        all_max_dist = -999.0
+
+        for pt in points:
+            px, py = float(pt[0]), float(pt[1])
+            for zone_id, contour in self.polygon_contours.items():
+                dist = float(cv2.pointPolygonTest(contour, (px, py), True))
+                if dist > all_max_dist:
+                    all_max_dist = dist
+                if dist >= -margin_px:
+                    if zone_id not in candidate_zones or dist > candidate_zones[zone_id]:
+                        candidate_zones[zone_id] = dist
+
+        if not candidate_zones:
+            return None, all_max_dist
+
+        def get_zone_dwell_limit(zid: str) -> float:
+            cfg = self.zone_configs.get(zid, {})
+            if not cfg and zid.replace("__", "_") in self.zone_configs:
+                cfg = self.zone_configs[zid.replace("__", "_")]
+            return float(cfg.get("dwell_threshold_sec", cfg.get("dwell_time_threshold", 3600.0)))
+
+        if priority_order:
+            for p_zid in priority_order:
+                if p_zid in candidate_zones:
+                    return p_zid, candidate_zones[p_zid]
+
+        sorted_candidates = sorted(
+            candidate_zones.items(),
+            key=lambda item: (get_zone_dwell_limit(item[0]), -item[1]),
+        )
+        best_zone, best_dist = sorted_candidates[0]
+        return best_zone, best_dist
+
     def filter_contours(
         self,
         mask: np.ndarray,

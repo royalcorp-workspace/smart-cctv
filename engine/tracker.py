@@ -105,6 +105,7 @@ class TrackedObject:
     is_near_vehicle: bool = False
     nearest_vehicle_dist: float = 999.0
     stationary_frames: int = 0
+    anchor_time: float = 0.0
 
     def __post_init__(self) -> None:
         if self.associated_face_meta is not None and self.last_owner_info is None:
@@ -174,6 +175,7 @@ class CentroidTracker:
         spatial_match_distance_px: float = 60.0,
         stationary_max_age_frames: int = 600,
         stationary_max_disappeared_sec: float = 45.0,
+        zone_configs: Optional[Dict[str, dict]] = None,
     ) -> None:
         self.max_distance_px: float = max_distance_px
         self.movement_threshold_px: float = movement_threshold_px
@@ -186,10 +188,20 @@ class CentroidTracker:
         self.spatial_match_distance_px: float = spatial_match_distance_px
         self.stationary_max_age_frames: int = stationary_max_age_frames
         self.stationary_max_disappeared_sec: float = stationary_max_disappeared_sec
+        self.zone_configs: Dict[str, dict] = zone_configs or {}
 
         self._next_id: int = 1
         self.objects: Dict[int, TrackedObject] = {}
         self.spatial_memory: Dict[int, SpatialMemoryEntry] = {}
+
+    def _get_zone_dwell_limit(self, zid: str) -> float:
+        """Return configured dwell threshold for a zone, defaulting to 3600.0s."""
+        if not zid or "outside" in zid or "unassigned" in zid:
+            return 999999.0
+        cfg = self.zone_configs.get(zid, {})
+        if not cfg and zid.replace("__", "_") in self.zone_configs:
+            cfg = self.zone_configs[zid.replace("__", "_")]
+        return float(cfg.get("dwell_threshold_sec", cfg.get("dwell_time_threshold", 3600.0)))
 
     def _is_person_near_obj(
         self,
@@ -430,6 +442,7 @@ class CentroidTracker:
             moved_confirmation_frames=0,
             last_moved_time=0.0,
             last_yolo_seen_time=last_yolo_seen_time,
+            anchor_time=timestamp,
         )
         self.objects[self._next_id] = new_obj
         if label in ("person", "car", "bus", "truck"):
@@ -585,6 +598,7 @@ class CentroidTracker:
             smooth_cx = int(round(alpha_val * float(new_cx) + (1.0 - alpha_val) * float(old_cx)))
             smooth_cy = int(round(alpha_val * float(new_cy) + (1.0 - alpha_val) * float(old_cy)))
             smoothed_centroid = (smooth_cx, smooth_cy)
+            frame_shift = float(np.hypot(smoothed_centroid[0] - old_cx, smoothed_centroid[1] - old_cy))
 
             # Calculate distance from anchor position using smoothed centroid
             anchor_dist = float(
@@ -670,11 +684,26 @@ class CentroidTracker:
                 # Vehicle is stationary if centroid shift <= 15 px across consecutive frames.
                 # Dwell time accumulates only if stationary inside a monitored polygon zone.
                 # If moving normally (speed > 15 px/frame), timer resets immediately.
-                is_in_zone = bool(zone_id and "outside" not in zone_id and "unassigned" not in zone_id)
-                frame_shift = float(np.hypot(smoothed_centroid[0] - old_cx, smoothed_centroid[1] - old_cy))
-                anchor_shift = float(np.hypot(smoothed_centroid[0] - obj.anchor_centroid[0], smoothed_centroid[1] - obj.anchor_centroid[1]))
+                anchor_shift = anchor_dist
+                is_physically_still = (frame_shift <= 15.0 and anchor_shift <= 30.0)
 
-                if is_in_zone and frame_shift <= 15.0 and anchor_shift <= 30.0:
+                # ANTI-FLAPPING HYSTERESIS & STATIONARY ZONE LOCK
+                effective_zone = zone_id
+                cur_limit = self._get_zone_dwell_limit(obj.zone_id)
+                new_limit = self._get_zone_dwell_limit(zone_id)
+
+                if is_physically_still and obj.zone_id and "outside" not in obj.zone_id:
+                    # Vehicle is still. Protect active zone from boundary jitter (outside_zone or weaker zone)
+                    if new_limit >= cur_limit:
+                        effective_zone = obj.zone_id
+                    else:
+                        # Stricter zone reached (e.g. encroached into Zebra Cross): upgrade zone!
+                        effective_zone = zone_id
+
+                zone_id = effective_zone
+                is_in_zone = bool(zone_id and "outside" not in zone_id and "unassigned" not in zone_id)
+
+                if is_in_zone and is_physically_still:
                     obj.stationary_frames += 1
                     if obj.stationary_frames >= 4:  # Confirmed stationary after consecutive quiet frames
                         if not obj.is_stationary:
@@ -704,6 +733,18 @@ class CentroidTracker:
                 obj.alert_sent = False
 
             if zone_id and zone_id != obj.zone_id:
+                # Reset dwell and timer state when a vehicle changes its active zone
+                if getattr(obj, "class_label", "") in ("car", "bus", "truck"):
+                    cur_lim = self._get_zone_dwell_limit(obj.zone_id)
+                    new_lim = self._get_zone_dwell_limit(zone_id)
+                    has_moved = (frame_shift > 15.0 or anchor_dist > 30.0)
+                    is_stricter_upgrade = (new_lim < cur_lim)
+                    if has_moved or is_stricter_upgrade:
+                        obj.dwell_duration = 0.0
+                        obj.anchor_time = now
+                        obj.stationary_start = now
+                        obj.is_triggered = False
+                        obj.alert_sent = False
                 obj.zone_id = zone_id
 
             obj.centroid = smoothed_centroid

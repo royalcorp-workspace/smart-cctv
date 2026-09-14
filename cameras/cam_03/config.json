@@ -68,6 +68,15 @@
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
     "chat_id": "${TELEGRAM_CAM03_CHAT_ID}"
   },
+  "buzzer": {
+    "enabled": true,
+    "cooldown_sec": 15,
+    "timeout_ms": 3000,
+    "trigger_events": [
+      "tripwire_crossing",
+      "vehicle_dwell"
+    ]
+  },
   "web_dashboard": {
     "enabled": true,
     "host": "127.0.0.1",

@@ -35,8 +35,8 @@ storage/clips/*
 !storage/clips/.gitkeep
 cameras/**/snapshots/*
 !cameras/**/snapshots/.gitkeep
-logs/*.log
-*.log
+logs/*.log*
+*.log*
 !logs/.gitkeep
 reports/*.csv
 reports/*

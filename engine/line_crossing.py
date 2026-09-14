@@ -1,8 +1,9 @@
 """Tripwire (Line Crossing Detection) Engine for Smart CCTV 2.0."""
 
-from dataclasses import dataclass, field
+import math
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from engine.logger import logger
 
@@ -77,19 +78,92 @@ def segments_intersect(
     return False
 
 
+def compute_line_box_overlap(
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    bbox: Union[Tuple[int, int, int, int], List[int]],
+) -> float:
+    """Compute parametric overlap fraction [0.0, 1.0] of line segment p1-p2 inside bbox.
+
+    Uses Liang-Barsky parametric line clipping algorithm.
+    Returns the fraction of the line segment length that lies inside the axis-aligned bounding box.
+    """
+    if not bbox or len(bbox) < 4:
+        return 0.0
+
+    x_min = float(bbox[0])
+    y_min = float(bbox[1])
+    x_max = float(bbox[0] + bbox[2])
+    y_max = float(bbox[1] + bbox[3])
+
+    dx = float(p2[0] - p1[0])
+    dy = float(p2[1] - p1[1])
+
+    # Zero length segment handling
+    if dx == 0.0 and dy == 0.0:
+        if x_min <= p1[0] <= x_max and y_min <= p1[1] <= y_max:
+            return 1.0
+        return 0.0
+
+    t0 = 0.0
+    t1 = 1.0
+
+    p = [-dx, dx, -dy, dy]
+    q = [p1[0] - x_min, x_max - p1[0], p1[1] - y_min, y_max - p1[1]]
+
+    for pk, qk in zip(p, q):
+        if pk == 0.0:
+            if qk < 0.0:
+                # Parallel and outside
+                return 0.0
+        else:
+            r = qk / pk
+            if pk < 0.0:
+                if r > t1:
+                    return 0.0
+                if r > t0:
+                    t0 = r
+            else:
+                if r < t0:
+                    return 0.0
+                if r < t1:
+                    t1 = r
+
+    if t0 > t1:
+        return 0.0
+
+    overlap = max(0.0, min(1.0, t1 - t0))
+    return overlap
+
+
 class TripwireEngine:
-    """Real-time tripwire line crossing detector with trajectory tracking and cooldown."""
+    """Real-time tripwire line crossing detector with trajectory tracking, occlusion guard, and cooldown."""
 
     def __init__(
         self,
         lines: Optional[Dict[str, dict]] = None,
         cooldown_sec: float = 5.0,
+        occlusion_overlap_threshold: float = 0.50,
+        occlusion_duration_sec: float = 15.0,
+        min_track_frames: int = 4,
+        min_confidence: float = 0.40,
+        min_bbox_area: float = 400.0,
+        max_step_px: float = 65.0,
     ) -> None:
         self.lines: Dict[str, TripwireLine] = {}
         self.cooldown_sec: float = cooldown_sec
+        self.occlusion_overlap_threshold: float = occlusion_overlap_threshold
+        self.occlusion_duration_sec: float = occlusion_duration_sec
+        self.min_track_frames: int = min_track_frames
+        self.min_confidence: float = min_confidence
+        self.min_bbox_area: float = min_bbox_area
+        self.max_step_px: float = max_step_px
         self._prev_positions: Dict[int, Tuple[float, float]] = {}
         self._last_triggered: Dict[Tuple[int, str], float] = {}
         self._recent_crossings: Dict[str, float] = {}  # line_id -> timestamp for visual flash
+        self._occlusion_start: Dict[Tuple[str, int], float] = {}  # (line_id, track_id) -> start timestamp
+        self._occluded_lines: Set[str] = set()
+        self._vehicle_anchors: Dict[int, Tuple[float, float]] = {}  # track_id -> initial stationary centroid
 
         if lines:
             self.load_lines(lines)
@@ -141,6 +215,10 @@ class TripwireEngine:
             if (curr_time - last_t) <= 2.0
         }
 
+    def get_occluded_lines(self) -> Set[str]:
+        """Return set of line_ids currently occluded by stationary vehicles."""
+        return set(self._occluded_lines)
+
     def update(
         self,
         active_tracks: list,
@@ -148,20 +226,94 @@ class TripwireEngine:
     ) -> List[LineCrossingEvent]:
         """Evaluate active tracked objects against virtual tripwires.
 
+        Incorporates Liang-Barsky line occlusion guard and foot ground filtering.
         Returns list of LineCrossingEvent for objects crossing lines in valid direction.
         """
-        if not self.lines or not active_tracks:
+        if not self.lines:
             return []
 
         now = timestamp if timestamp is not None else time.time()
+
+        if not active_tracks:
+            # When active_tracks is empty (all objects have left the frame),
+            # clear occlusion states, vehicle anchors, and previous track positions
+            self._occlusion_start.clear()
+            self._occluded_lines.clear()
+            self._vehicle_anchors.clear()
+            self._prev_positions.clear()
+            return []
+
         events: List[LineCrossingEvent] = []
         current_track_ids = set()
 
+        # 1. Identify stationary trucks and buses for line occlusion evaluation and foot ground filtering
+        stationary_vehicles = []
+        active_veh_ids = set()
+        for track in active_tracks:
+            t_id = getattr(track, "track_id", None)
+            if t_id is not None:
+                current_track_ids.add(t_id)
+
+            c_label = getattr(track, "class_label", "")
+            if c_label in ("truck", "bus"):
+                if t_id is not None:
+                    active_veh_ids.add(t_id)
+                is_stat = getattr(track, "is_stationary", False)
+                if is_stat and hasattr(track, "bbox") and track.bbox and len(track.bbox) == 4:
+                    # Verify spatial movement threshold (shift <= 15.0 px)
+                    t_cent = getattr(
+                        track,
+                        "centroid",
+                        (track.bbox[0] + track.bbox[2] / 2.0, track.bbox[1] + track.bbox[3] / 2.0),
+                    )
+                    anchor = self._vehicle_anchors.setdefault(t_id, t_cent)
+                    shift = math.hypot(t_cent[0] - anchor[0], t_cent[1] - anchor[1])
+                    if shift <= 15.0:
+                        stationary_vehicles.append(track)
+                    else:
+                        # Vehicle shifted > 15px, update anchor and consider non-stationary
+                        self._vehicle_anchors[t_id] = t_cent
+
+        # Purge stale vehicle anchors
+        stale_anchors = [vid for vid in self._vehicle_anchors if vid not in active_veh_ids]
+        for vid in stale_anchors:
+            del self._vehicle_anchors[vid]
+
+        # 2. Evaluate Line Occlusion States
+        current_occluding_pairs = set()
+        for line_id, line in self.lines.items():
+            l_p1 = (float(line.p1[0]), float(line.p1[1]))
+            l_p2 = (float(line.p2[0]), float(line.p2[1]))
+            for veh in stationary_vehicles:
+                v_id = getattr(veh, "track_id", None)
+                if v_id is None:
+                    continue
+                overlap = compute_line_box_overlap(l_p1, l_p2, veh.bbox)
+                if overlap >= self.occlusion_overlap_threshold:
+                    current_occluding_pairs.add((line_id, v_id))
+
+        # Register or maintain occlusion start timers
+        for pair in current_occluding_pairs:
+            if pair not in self._occlusion_start:
+                self._occlusion_start[pair] = now
+
+        # Purge pairs that are no longer occluding (vehicle moved > 15px, left frame, or overlap < 50%)
+        stale_pairs = [pair for pair in self._occlusion_start if pair not in current_occluding_pairs]
+        for pair in stale_pairs:
+            del self._occlusion_start[pair]
+
+        # Update active occluded lines (overlap >= 50% for >= 15.0s)
+        new_occluded_lines = set()
+        for (l_id, _), start_t in self._occlusion_start.items():
+            if (now - start_t) >= self.occlusion_duration_sec:
+                new_occluded_lines.add(l_id)
+        self._occluded_lines = new_occluded_lines
+
+        # 3. Evaluate Crossings
         for track in active_tracks:
             track_id = getattr(track, "track_id", None)
             if track_id is None:
                 continue
-            current_track_ids.add(track_id)
 
             class_label = getattr(track, "class_label", "object")
 
@@ -197,8 +349,62 @@ class TripwireEngine:
             if prev_pt[0] == curr_pt[0] and prev_pt[1] == curr_pt[1]:
                 continue
 
+            # Anti-Ghost Gate 1: Track must be actively detected in the current frame (not coasting)
+            missed = getattr(track, "missed_frames", 0)
+            is_active = getattr(track, "is_active_this_frame", True)
+            if missed > 0 or not is_active:
+                continue
+
+            # Anti-Ghost Gate 2: Track maturity check (must be confirmed across multiple frames)
+            frame_cnt = getattr(track, "frame_count", 1)
+            if frame_cnt < self.min_track_frames:
+                continue
+
+            # Anti-Ghost Gate 3: Pedestrian Confidence & Micro-Bbox Guard
+            if class_label == "person":
+                track_conf = getattr(track, "confidence", 1.0)
+                if track_conf < self.min_confidence:
+                    continue
+
+                if hasattr(track, "bbox") and track.bbox and len(track.bbox) == 4:
+                    box_area = float(track.bbox[2] * track.bbox[3])
+                    if box_area < self.min_bbox_area:
+                        continue
+
+            # Anti-Ghost Gate 4: Bound maximum single-frame step displacement (suppress tracker ID/noise jumps)
+            step_dx = curr_pt[0] - prev_pt[0]
+            step_dy = curr_pt[1] - prev_pt[1]
+            step_dist = math.hypot(step_dx, step_dy)
+            if step_dist > self.max_step_px:
+                logger.debug(
+                    f"[TripwireEngine] Suppressed jump crossing for Track #{track_id} ({class_label}): "
+                    f"step={step_dist:.1f}px > max={self.max_step_px}px"
+                )
+                continue
+
+            # Foot Ground Filter: ignore pedestrian crossings if foot_pt falls within
+            # the upper/middle body of a stationary truck (by <= foot_y <= by + 0.85 * bh)
+            # and (bx <= foot_x <= bx + bw)
+            if class_label == "person" and stationary_vehicles:
+                is_phantom = False
+                for veh in stationary_vehicles:
+                    v_bx, v_by, v_bw, v_bh = veh.bbox
+                    if (v_bx <= curr_pt[0] <= v_bx + v_bw) and (v_by <= curr_pt[1] <= v_by + 0.85 * v_bh):
+                        is_phantom = True
+                        break
+                if is_phantom:
+                    logger.debug(
+                        f"[TripwireEngine] Suppressed phantom pedestrian #{track_id}: "
+                        f"foot within stationary vehicle body."
+                    )
+                    continue
+
             # Evaluate against all tripwire lines
             for line_id, line in self.lines.items():
+                # Suppress crossing trigger events for lines currently in OCCLUDED state
+                if line_id in self._occluded_lines:
+                    continue
+
                 # Filter by target class
                 if line.target_classes and class_label not in line.target_classes:
                     continue
@@ -259,3 +465,4 @@ class TripwireEngine:
             del self._last_triggered[sk]
 
         return events
+

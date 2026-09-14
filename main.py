@@ -28,6 +28,7 @@ from engine.line_crossing import TripwireEngine
 from engine.zone_filter import ZoneFilter, load_roi_data
 from notification.local_alert import GlobalAudioWorker, VisualHUD
 from notification.telegram_alert import TelegramNotifier
+from notification.buzzer_alert import BuzzerNotifier
 from storage.db import init_db, log_event, resolve_event, update_event_clip
 from web.buffer import MultiCameraBuffer
 from web.server import DashboardServer
@@ -189,9 +190,14 @@ class CameraPipeline:
             frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
             base_resolution=self.roi_base_resolution,
         )
+        tripwire_cfg = self.config.get("tripwire", {})
         self.tripwire_engine = TripwireEngine(
             lines=self.zone_filter.scaled_lines,
-            cooldown_sec=5.0,
+            cooldown_sec=float(tripwire_cfg.get("cooldown_sec", 5.0)),
+            min_track_frames=int(tripwire_cfg.get("min_track_frames", 4)),
+            min_confidence=float(tripwire_cfg.get("min_confidence", 0.40)),
+            min_bbox_area=float(tripwire_cfg.get("min_bbox_area", 400.0)),
+            max_step_px=float(tripwire_cfg.get("max_step_px", 65.0)),
         )
         self.tracker = CentroidTracker(
             max_distance_px=100.0,                  # Increased from 80 -> 100px for faster-moving persons
@@ -205,11 +211,13 @@ class CameraPipeline:
             spatial_match_distance_px=60.0,
             stationary_max_age_frames=900,          # ~67s latching at 13fps before purge
             stationary_max_disappeared_sec=75.0,    # sync with 900 frames at ~13fps
+            zone_configs=self.config.get("zones", {}),
         )
         self._kernel_close_large = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
         self._kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         self.audio_worker = GlobalAudioWorker()
         self.telegram_notifier: TelegramNotifier = TelegramNotifier.get_instance()
+        self.buzzer_notifier: BuzzerNotifier = BuzzerNotifier.get_instance()
         self.io_executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._last_dwell_log_time: float = 0.0
 
@@ -925,22 +933,21 @@ class CameraPipeline:
                     if v_w < 25 or v_h < 20 or area < 600:
                         continue
 
-                    # Dynamic vehicle zone matching: evaluate bottom-center or centroid with 15px step margin
-                    bottom_center = (centroid[0], bbox[1] + bbox[3] - 2)
-                    matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
-                        bottom_center, margin_px=15.0
+                    # Multi-point wheel contact evaluation clamped within frame canvas [0, H - 1]
+                    wheel_y = min(max(0, bbox[1] + bbox[3] - 5), self.infer_resolution[1] - 1)
+                    left_wheel = (bbox[0] + int(bbox[2] * 0.25), wheel_y)
+                    center_wheel = (centroid[0], wheel_y)
+                    right_wheel = (bbox[0] + int(bbox[2] * 0.75), wheel_y)
+                    matched_zone, edge_dist = self.zone_filter.find_best_zone_for_points(
+                        [left_wheel, center_wheel, right_wheel], margin_px=8.0
                     )
-                    if matched_zone is None:
-                        matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
-                            centroid, margin_px=15.0
-                        )
 
                     if matched_zone is not None:
                         formatted_detections.append(
                             (bbox, centroid, matched_zone, area, cname, edge_dist, float(conf), "yolo")
                         )
                     else:
-                        dist_to_nearest = self.zone_filter.get_distance_to_nearest_zone(bottom_center)
+                        dist_to_nearest = edge_dist if edge_dist > -900 else self.zone_filter.get_distance_to_nearest_zone(center_wheel)
                         formatted_detections.append(
                             (bbox, centroid, "outside_zone", area, cname, dist_to_nearest, float(conf), "yolo")
                         )
@@ -1069,6 +1076,21 @@ class CameraPipeline:
                     # 1. Local audio alarm chime
                     self.audio_worker.request_alarm()
 
+                    # 1b. Hardware Buzzer Trigger (confirmed pedestrian tripwire crossing)
+                    if c_label == "person" and hasattr(self, "buzzer_notifier") and self.buzzer_notifier:
+                        self.buzzer_notifier.trigger(
+                            event_type="tripwire_crossing",
+                            camera_id=self.camera_id,
+                            metadata={
+                                "line_id": cross_ev.line_id,
+                                "line_name": cross_ev.line_name,
+                                "track_id": t_track.track_id,
+                                "class_label": c_label,
+                                "direction": cross_ev.direction,
+                                "timestamp": timestamp_str,
+                            },
+                        )
+
                     # 2. SQLite Event Log (event_type="LINE_CROSSING", dwell_duration=0.0)
                     try:
                         log_event(
@@ -1113,7 +1135,7 @@ class CameraPipeline:
                         foot_point = (cx, foot_y)
 
                         in_safe_walkway = self.zone_filter.check_point_in_zone(
-                            foot_point, self.walkway_safe_zone_id, margin_px=6.0
+                            foot_point, self.walkway_safe_zone_id, margin_px=12.0
                         )
 
                         if in_safe_walkway:
@@ -1227,6 +1249,23 @@ class CameraPipeline:
                         if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                             track.is_triggered = True
                             self.audio_worker.request_alarm()
+
+                            # Trigger Hardware Buzzer Webhook for Vehicle Zone Dwell Breach
+                            buzzer_events = self.config.get("buzzer", {}).get("trigger_events", ["tripwire_crossing", "vehicle_dwell"])
+                            if "vehicle_dwell" in buzzer_events and hasattr(self, "buzzer_notifier") and self.buzzer_notifier:
+                                self.buzzer_notifier.trigger(
+                                    event_type="vehicle_dwell",
+                                    camera_id=self.camera_id,
+                                    metadata={
+                                        "track_id": track.track_id,
+                                        "class_label": track.class_label,
+                                        "zone_id": track.zone_id,
+                                        "zone_name": zone_info.get("name", track.zone_id),
+                                        "dwell_duration": track.dwell_duration,
+                                        "dwell_threshold": dwell_thresh,
+                                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    },
+                                )
 
                             alert_label = zone_info.get("alert_label", "PARKIR / HALANGAN KENDARAAN")
                             zone_name = zone_info.get("name", track.zone_id)
@@ -1852,6 +1891,7 @@ class CameraPipeline:
                 camera_name=self.config.get("name", self.camera_id),
                 lines=getattr(self, "roi_lines", {}),
                 flashing_lines=self.tripwire_engine.get_flashing_lines(now=now) if hasattr(self, "tripwire_engine") else None,
+                occluded_lines=self.tripwire_engine.get_occluded_lines() if hasattr(self, "tripwire_engine") else None,
             )
 
             # Process pending alerts with synchronized VisualHUD annotated display_frame
@@ -1958,6 +1998,7 @@ class CameraPipeline:
                 "clear_area_count": len(rendering_bags),
                 "walkway_violations": len(walkway_violations),
                 "active_tracks": len(rendering_tracks),
+                "occluded_lines": list(self.tripwire_engine.get_occluded_lines()) if hasattr(self, "tripwire_engine") else [],
                 "identified_faces": face_telemetry,
             }
             try:

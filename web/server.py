@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 
 from web.buffer import MultiCameraBuffer
+from notification.buzzer_alert import BuzzerNotifier
 
 logger = logging.getLogger("smart_cctv")
 
@@ -341,6 +342,21 @@ async def stream_incident_clip(filename: str, request: Request):
         },
     )
 
+
+@app.post("/api/buzzer/test")
+async def trigger_buzzer_test() -> JSONResponse:
+    """Trigger a manual buzzer test webhook and verify device response."""
+    notifier = BuzzerNotifier.get_instance()
+    result = notifier.test_connection()
+    status_code = 200 if result.get("success") else 502 if result.get("status") == "UNREACHABLE" else 400
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.get("/api/buzzer/status")
+async def get_buzzer_status() -> JSONResponse:
+    """Retrieve operational status, telemetry, and queue metrics for hardware buzzer."""
+    notifier = BuzzerNotifier.get_instance()
+    return JSONResponse(status_code=200, content=notifier.get_status())
 
 
 class DashboardServer:
