@@ -4,7 +4,7 @@
   "source": "rtsp://${CAM03_USER}:${CAM03_PASS}@${CAM03_IP}:${CAM03_PORT}/Streaming/Channels/${CAM03_CHANNEL}",
   "target_resolution": null,
   "walkway_compliance": {
-    "enabled": true,
+    "enabled": false,
     "safe_zone_id": "zone_1_koridor",
     "dwell_threshold_sec": 35.0,
     "vehicle_proximity_px": 75.0,
@@ -17,17 +17,25 @@
   "detector": {
     "enabled_classes": [
       "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "target_classes": [
+      "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "confidence_threshold": 0.22,
     "base_conf": 0.22,
+    "vehicle_conf": 0.28,
     "bag_conf": 0.18,
     "stride": 2
   },
@@ -68,11 +76,17 @@
   },
   "zones": {
     "zone_1_koridor": {
-      "name": "Jalur Logistik Utama",
+      "name": "Jalur Logistik POS-1",
+      "target_classes": [
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 1200.0,
+      "alert_label": "PARKIR MELEBIHI BATAS (20M)",
       "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_time_threshold": 1200.0,
+      "unattended_threshold": 1200.0,
       "min_contour_area": 300
     },
     "zone_2_transit": {

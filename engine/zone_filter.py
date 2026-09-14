@@ -1,8 +1,36 @@
-"""Multi-Zone ROI filtering and spatial polygon validation."""
+"""Multi-Zone ROI filtering, tripwire scaling, and spatial polygon validation."""
 
-from typing import Dict, List, Optional, Tuple
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
+
+
+def load_roi_data(roi_path: Union[str, Path]) -> Tuple[Tuple[int, int], Dict[str, List[List[int]]], Dict[str, dict]]:
+    """Backward-compatible loader for ROI zones and tripwire lines."""
+    p = Path(roi_path)
+    if not p.exists():
+        return (1920, 1080), {}, {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return (1920, 1080), {}, {}
+
+    if not isinstance(data, dict):
+        return (1920, 1080), {}, {}
+
+    base_res = tuple(data.get("base_resolution", [1920, 1080]))
+    if "zones" in data and isinstance(data["zones"], dict):
+        zones = data["zones"]
+    else:
+        zones = {
+            k: v for k, v in data.items()
+            if isinstance(v, list) and not k.startswith("_") and k not in ("base_resolution", "lines")
+        }
+    lines = data.get("lines", {}) if isinstance(data.get("lines"), dict) else {}
+    return (int(base_res[0]), int(base_res[1])), zones, lines
 
 
 class ZoneFilter:
@@ -10,15 +38,22 @@ class ZoneFilter:
 
     def __init__(
         self,
-        zones: Dict[str, List[List[int]]],
+        zones: Dict[str, Any],
         zone_configs: Optional[Dict[str, dict]] = None,
         frame_shape: Optional[Tuple[int, int]] = None,
         base_resolution: Optional[Tuple[int, int]] = None,
+        lines: Optional[Dict[str, dict]] = None,
     ) -> None:
-        # Filter out non-polygon keys (such as 'base_resolution' or metadata keys)
+        # Backward-compatible zone dictionary unpacking
+        if "zones" in zones and isinstance(zones["zones"], dict):
+            source_zones = zones["zones"]
+        else:
+            source_zones = zones
+
+        # Filter out non-polygon keys (such as 'base_resolution', 'lines', or metadata keys)
         self.raw_zones: Dict[str, List[List[int]]] = {
-            k: v for k, v in zones.items()
-            if isinstance(v, list) and not k.startswith("_") and k != "base_resolution"
+            k: v for k, v in source_zones.items()
+            if isinstance(v, list) and not k.startswith("_") and k not in ("base_resolution", "lines")
         }
         self.zone_configs: Dict[str, dict] = zone_configs or {}
         self.frame_shape: Optional[Tuple[int, int]] = frame_shape
@@ -42,7 +77,7 @@ class ZoneFilter:
             else:
                 self.base_resolution = (640, 360)
 
-        # Precompute downscaled polygon contours matching frame_shape (inference space, e.g. 640x480)
+        # Precompute downscaled polygon contours matching frame_shape (inference space, e.g. 640x360)
         self.scaled_zones: Dict[str, List[List[int]]] = {}
         self.polygon_contours: Dict[str, np.ndarray] = {}
 
@@ -63,6 +98,26 @@ class ZoneFilter:
                 ]
                 self.scaled_zones[zone_id] = scaled_pts
                 self.polygon_contours[zone_id] = np.array(scaled_pts, dtype=np.int32).reshape((-1, 1, 2))
+
+        # Parse and scale tripwire lines
+        if lines is not None and isinstance(lines, dict):
+            raw_lines = lines
+        elif isinstance(zones, dict) and "lines" in zones and isinstance(zones["lines"], dict):
+            raw_lines = zones["lines"]
+        else:
+            raw_lines = {}
+        self.raw_lines: Dict[str, dict] = raw_lines
+        self.scaled_lines: Dict[str, dict] = {}
+        for l_id, l_data in raw_lines.items():
+            if isinstance(l_data, dict) and "p1" in l_data and "p2" in l_data:
+                p1 = l_data["p1"]
+                p2 = l_data["p2"]
+                sc_p1 = [int(round(p1[0] * downscale_x)), int(round(p1[1] * downscale_y))]
+                sc_p2 = [int(round(p2[0] * downscale_x)), int(round(p2[1] * downscale_y))]
+                sc_line = dict(l_data)
+                sc_line["p1"] = sc_p1
+                sc_line["p2"] = sc_p2
+                self.scaled_lines[l_id] = sc_line
 
     def get_zone_mask(self, zone_id: str, shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
         """Generate binary mask for a specific polygon zone."""

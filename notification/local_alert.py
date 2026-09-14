@@ -7,7 +7,7 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -24,6 +24,19 @@ COLOR_VIOLATION: Tuple[int, int, int] = (0, 0, 255)    # Red
 COLOR_FACE_OUTSIDE: Tuple[int, int, int] = (255, 200, 0)  # Cyan / Sky Blue (BGR: 255, 200, 0)
 COLOR_HUD_BG: Tuple[int, int, int] = (20, 20, 20)      # Dark gray HUD
 COLOR_TEXT_MAIN: Tuple[int, int, int] = (240, 240, 240)
+
+# Multi-Zone Dynamic Palette (BGR)
+ZONE_PALETTE: List[Tuple[int, int, int]] = [
+    (0, 255, 0),     # Zone 1: Neon Green
+    (255, 191, 0),   # Zone 2: Deep Sky Blue
+    (255, 105, 180), # Zone 3: Hot Pink / Purple
+    (0, 215, 255),   # Zone 4: Amber / Yellow
+    (255, 140, 0),   # Zone 5: Dark Orange
+    (208, 224, 64),  # Zone 6: Teal
+    (147, 20, 255),  # Zone 7: Deep Violet
+    (50, 205, 50),   # Zone 8: Lime Green
+    (180, 105, 255), # Zone 9: Pink
+]
 
 
 def generate_fallback_wav(target_path: Path, frequency_hz: float = 660.0, duration_sec: float = 1.0) -> None:
@@ -138,7 +151,7 @@ class VisualHUD:
     @staticmethod
     def render(
         canvas: np.ndarray,
-        zones: Dict[str, List[List[int]]],
+        zones: Dict[str, Any],
         tracked_objects: list,
         camera_id: str,
         fps: float,
@@ -147,6 +160,8 @@ class VisualHUD:
         outside_faces: Optional[List[Tuple[Tuple[int, int, int, int], float]]] = None,
         zone_base_resolution: Optional[Tuple[int, int]] = None,
         camera_name: Optional[str] = None,
+        lines: Optional[Dict[str, Any]] = None,
+        flashing_lines: Optional[Set[str]] = None,
     ) -> np.ndarray:
         """Render complete CCTV visual indicators onto canvas."""
         h, w = canvas.shape[:2]
@@ -170,7 +185,7 @@ class VisualHUD:
             max_zx = 0
             max_zy = 0
             for k, v in zones.items():
-                if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
+                if isinstance(v, list) and not k.startswith("_") and k not in ("base_resolution", "lines"):
                     for pt in v:
                         if len(pt) >= 2:
                             max_zx = max(max_zx, pt[0])
@@ -203,9 +218,15 @@ class VisualHUD:
             and getattr(obj, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
         }
 
-        # 1. Draw ROI Zones (Dynamically scaled from zone_base_resolution to canvas)
+        # 1. Draw ROI Zones (Ultra-thin crisp perimeter outline via alpha blending ~0.5px optical effect, zero floor clutter)
+        overlay_zones_safe = canvas.copy()
+        overlay_zones_alert = canvas.copy()
+        has_safe_poly = False
+        has_alert_poly = False
+
+        poly_idx = 0
         for zone_id, pts in zones.items():
-            if not isinstance(pts, list) or zone_id.startswith("_") or zone_id == "base_resolution":
+            if not isinstance(pts, list) or zone_id.startswith("_") or zone_id in ("base_resolution", "lines"):
                 continue
             if len(pts) < 3:
                 continue
@@ -215,12 +236,130 @@ class VisualHUD:
 
             if is_violated:
                 zone_color = COLOR_VIOLATION if blink_state else COLOR_WARNING
-                thickness = zone_thickness_violation
+                cv2.polylines(overlay_zones_alert, [np_pts], isClosed=True, color=zone_color, thickness=2, lineType=cv2.LINE_AA)
+                has_alert_poly = True
             else:
-                zone_color = COLOR_SAFE
-                thickness = zone_thickness_safe
+                zone_color = ZONE_PALETTE[poly_idx % len(ZONE_PALETTE)]
+                # Ultra-thin crisp perimeter line (thickness=1, no floor fill)
+                cv2.polylines(overlay_zones_safe, [np_pts], isClosed=True, color=zone_color, thickness=1, lineType=cv2.LINE_AA)
+                has_safe_poly = True
+            poly_idx += 1
 
-            cv2.polylines(canvas, [np_pts], isClosed=True, color=zone_color, thickness=thickness, lineType=cv2.LINE_AA)
+        # Blend safe zones with soft alpha=0.35 (~0.5px optical equivalent)
+        if has_safe_poly:
+            cv2.addWeighted(overlay_zones_safe, 0.35, canvas, 0.65, 0, canvas)
+        if has_alert_poly:
+            cv2.addWeighted(overlay_zones_alert, 0.85, canvas, 0.15, 0, canvas)
+
+        # 1b. Draw Virtual Tripwire Lines (Ultra-thin crisp hairline with 50% translucent badges)
+        all_lines = lines
+        if all_lines is None and isinstance(zones, dict) and "lines" in zones:
+            all_lines = zones["lines"]
+
+        if all_lines and isinstance(all_lines, dict):
+            active_flash = set(flashing_lines) if flashing_lines else set()
+            overlay_trip_safe = canvas.copy()
+            overlay_trip_alert = canvas.copy()
+            has_safe_trip = False
+            has_alert_trip = False
+            badge_items = []
+
+            for line_id, l_data in all_lines.items():
+                if not isinstance(l_data, dict):
+                    continue
+                p1_raw = l_data.get("p1")
+                p2_raw = l_data.get("p2")
+                if not p1_raw or not p2_raw or len(p1_raw) < 2 or len(p2_raw) < 2:
+                    continue
+
+                sp1 = (int(round(p1_raw[0] * zone_scale_x)), int(round(p1_raw[1] * zone_scale_y)))
+                sp2 = (int(round(p2_raw[0] * zone_scale_x)), int(round(p2_raw[1] * zone_scale_y)))
+                l_name = l_data.get("name", line_id)
+                direction = str(l_data.get("direction", "both")).lower()
+                is_flashing = (line_id in active_flash)
+
+                dx = sp2[0] - sp1[0]
+                dy = sp2[1] - sp1[1]
+                length = math.hypot(dx, dy)
+                mx = (sp1[0] + sp2[0]) // 2
+                my = (sp1[1] + sp2[1]) // 2
+
+                if is_flashing:
+                    has_alert_trip = True
+                    line_color = (0, 0, 255) if blink_state else (255, 255, 255)
+                    line_thick = 2
+                    target_layer = overlay_trip_alert
+                else:
+                    has_safe_trip = True
+                    line_color = (255, 200, 0)  # Neon Cyan
+                    line_thick = 1  # Ultra-thin crisp line
+                    target_layer = overlay_trip_safe
+
+                # Draw hairline tripwire line on target layer
+                cv2.line(target_layer, sp1, sp2, line_color, line_thick, lineType=cv2.LINE_AA)
+
+                # Refined small endpoint markers (radius 3)
+                endpoint_r = 3
+                cv2.circle(target_layer, sp1, endpoint_r, (0, 255, 255), -1, lineType=cv2.LINE_AA)
+                cv2.circle(target_layer, sp2, endpoint_r, (0, 165, 255), -1, lineType=cv2.LINE_AA)
+
+                # Direction Arrow on target layer
+                if length > 20:
+                    ux = dx / length
+                    uy = dy / length
+                    arrow_len = min(14.0, length * 0.20)
+                    arrow_color = (0, 0, 255) if is_flashing else (0, 255, 255)
+
+                    if direction == "a_to_b":
+                        a_tip = (int(mx + ux * arrow_len), int(my + uy * arrow_len))
+                        a_tail = (int(mx - ux * arrow_len), int(my - uy * arrow_len))
+                        cv2.arrowedLine(target_layer, a_tail, a_tip, arrow_color, 1, cv2.LINE_AA, 0, 0.35)
+                    elif direction == "b_to_a":
+                        a_tip = (int(mx - ux * arrow_len), int(my - uy * arrow_len))
+                        a_tail = (int(mx + ux * arrow_len), int(my + uy * arrow_len))
+                        cv2.arrowedLine(target_layer, a_tail, a_tip, arrow_color, 1, cv2.LINE_AA, 0, 0.35)
+                    else:  # both
+                        a_tip1 = (int(mx + ux * arrow_len), int(my + uy * arrow_len))
+                        a_tip2 = (int(mx - ux * arrow_len), int(my - uy * arrow_len))
+                        cv2.arrowedLine(target_layer, (mx, my), a_tip1, arrow_color, 1, cv2.LINE_AA, 0, 0.45)
+                        cv2.arrowedLine(target_layer, (mx, my), a_tip2, arrow_color, 1, cv2.LINE_AA, 0, 0.45)
+
+                badge_text = f"[BREACH] {l_name}" if is_flashing else l_name
+                badge_items.append((mx, my, badge_text, is_flashing, line_color, sp1, sp2))
+
+            # Blend tripwires (~0.5px optical equivalent with alpha=0.35 for safe, 0.85 for breach)
+            if has_safe_trip:
+                cv2.addWeighted(overlay_trip_safe, 0.35, canvas, 0.65, 0, canvas)
+            if has_alert_trip:
+                cv2.addWeighted(overlay_trip_alert, 0.85, canvas, 0.15, 0, canvas)
+
+            # Draw compact badges with 50% translucent background
+            if badge_items:
+                badge_overlay = canvas.copy()
+                for mx, my, badge_text, is_flashing, line_color, sp1, sp2 in badge_items:
+                    # Endpoint labels P1 and P2
+                    f_scale = 0.34
+                    cv2.putText(canvas, "P1", (sp1[0] + 5, sp1[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, (0, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(canvas, "P2", (sp2[0] + 5, sp2[1] - 3), cv2.FONT_HERSHEY_SIMPLEX, f_scale, (0, 165, 255), 1, cv2.LINE_AA)
+
+                    (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                    bx = max(4, mx - tw // 2)
+                    by = max(th + 4, my - 8)
+                    # Minimal padding: vertical 1-2px, horizontal 3-4px
+                    bg_col = (0, 0, 160) if is_flashing else (15, 15, 15)
+                    cv2.rectangle(badge_overlay, (bx - 3, by - th - 2), (bx + tw + 3, by + 2), bg_col, -1)
+                    cv2.rectangle(badge_overlay, (bx - 3, by - th - 2), (bx + tw + 3, by + 2), line_color, 1)
+
+                # 50% opacity background
+                cv2.addWeighted(badge_overlay, 0.50, canvas, 0.50, 0, canvas)
+
+                # Foreground crisp text
+                for mx, my, badge_text, is_flashing, line_color, _, _ in badge_items:
+                    (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                    bx = max(4, mx - tw // 2)
+                    by = max(th + 4, my - 8)
+                    txt_col = (255, 255, 255) if is_flashing else (210, 210, 210)
+                    cv2.putText(canvas, badge_text, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.35, txt_col, 1, cv2.LINE_AA)
 
         # 2. Draw Bounding Boxes and Status Badges
         for obj in tracked_objects:
@@ -238,12 +377,20 @@ class VisualHUD:
             raw_label = getattr(obj, "class_label", "object")
             is_bag = raw_label in ("tas", "backpack", "handbag", "suitcase")
             is_person = (raw_label == "person")
-            is_walkway_cam = (camera_id in ("cam_03", "cam_04"))
+            is_vehicle = raw_label in ("car", "bus", "truck")
+            is_walkway_cam = (camera_id == "cam_04")
+            is_traffic_cam = (camera_id in ("cam_02", "cam_03"))
 
             if is_person:
-                # On walkway compliance cameras, render person with K3 safety status.
-                # On indoor/other cameras (cam_01, cam_02), hide person bounding boxes to eliminate clutter.
-                if not is_walkway_cam or not hasattr(obj, "walkway_status"):
+                # On walkway compliance camera (cam_04), render person with K3 safety status.
+                # On traffic corridor cameras (cam_02, cam_03), render pedestrian bounding boxes without dwell alarm.
+                # On cam_01 (indoor corridor), hide person bounding boxes to eliminate clutter.
+                if not (is_walkway_cam or is_traffic_cam):
+                    continue
+            elif is_vehicle:
+                # On cam_02, cam_03 (traffic) or walkway cams with vehicle monitoring, render vehicles.
+                # On cam_01, hide vehicles.
+                if not (is_traffic_cam or is_walkway_cam):
                     continue
             elif not is_bag:
                 continue
@@ -260,22 +407,103 @@ class VisualHUD:
             scx = int(round(obj.centroid[0] * scale_x))
             scy = int(round(obj.centroid[1] * scale_y))
 
-            if is_person:
-                status = getattr(obj, "walkway_status", "SAFE")
-                dwell_sec = getattr(obj, "outside_walkway_duration", 0.0)
-                is_alert = (status == "VIOLATION")
-                if status == "SAFE":
-                    box_color = COLOR_SAFE  # Hijau (Jalur Aman)
-                    badge_text = f"ID {track_id} | [SAFE WALKWAY]"
-                elif status == "NEAR_VEHICLE":
-                    box_color = (255, 200, 0)  # Cyan / Teal (Aktivitas Kendaraan)
-                    badge_text = f"ID {track_id} | [DEKAT KENDARAAN]"
-                elif status == "CROSSING":
-                    box_color = (0, 215, 255)  # Amber / Gold (Menyeberang / Transisi)
-                    badge_text = f"ID {track_id} | [CROSSING] ({dwell_sec:.0f}s/35s)"
-                else:  # VIOLATION
-                    box_color = (0, 0, 255) if blink_state else (0, 165, 255)
-                    badge_text = f"[ALERT K3] PELANGGARAN JALUR ({dwell_sec:.0f}s)"
+            is_alert = False
+            if is_vehicle:
+                v_label = raw_label.upper()
+                v_zone = str(getattr(obj, "zone_id", ""))
+                is_stationary = getattr(obj, "is_stationary", False)
+                dwell_sec = getattr(obj, "dwell_duration", 0.0)
+                dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
+                is_triggered = getattr(obj, "is_triggered", False) or (dwell_sec >= dwell_max and is_stationary)
+
+                if camera_id == "cam_04":
+                    # cam_04: Area Timbangan Truk (Zebra Cross: 10m / 600s, Antrean Samping: 30m / 1800s)
+                    is_zebra = ("zone_1" in v_zone.lower() or "koridor" in v_zone.lower() or "zebra" in v_zone.lower())
+                    if is_zebra:
+                        alert_lbl = "HALANGAN ZEBRA CROSS"
+                        if is_triggered or (is_stationary and dwell_sec >= 600.0):
+                            is_alert = True
+                            box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                            badge_text = f"[ALERT] {alert_lbl} ({dwell_sec / 60.0:.0f}m)"
+                        elif is_stationary and dwell_sec > 0:
+                            box_color = (0, 215, 255)  # Amber / Warning
+                            badge_text = f"{v_label} [ID #{track_id}] ({dwell_sec / 60.0:.1f}m/10m)"
+                        else:
+                            box_color = (255, 200, 0)  # Cool Cyan
+                            badge_text = f"{v_label} [ID #{track_id}]"
+                    else:
+                        alert_lbl = "ANTREAN TIMBANGAN MELEBIHI BATAS"
+                        if is_triggered or (is_stationary and dwell_sec >= 1800.0):
+                            is_alert = True
+                            box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                            badge_text = f"[ALERT] {alert_lbl} ({dwell_sec / 60.0:.0f}m)"
+                        elif is_stationary and dwell_sec > 0:
+                            box_color = (0, 215, 255)  # Amber / Warning
+                            badge_text = f"{v_label} [ID #{track_id}] ({dwell_sec / 60.0:.1f}m/30m)"
+                        else:
+                            box_color = (255, 200, 0)  # Cool Cyan
+                            badge_text = f"{v_label} [ID #{track_id}]"
+                elif camera_id == "cam_03":
+                    # cam_03: Jalur Logistik POS-1 (20m / 1200s limit)
+                    alert_lbl = "PARKIR MELEBIHI BATAS (20M)"
+                    if is_triggered or (is_stationary and dwell_sec >= 1200.0):
+                        is_alert = True
+                        box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                        badge_text = f"[ALERT] {alert_lbl} ({dwell_sec / 60.0:.0f}m)"
+                    elif is_stationary and dwell_sec > 0:
+                        box_color = (0, 215, 255)  # Amber / Warning
+                        badge_text = f"{v_label} [ID #{track_id}] ({dwell_sec / 60.0:.1f}m/20m)"
+                    else:
+                        box_color = (255, 200, 0)  # Cool Cyan
+                        badge_text = f"{v_label} [ID #{track_id}]"
+                else:
+                    # cam_02 and other cameras
+                    is_zebra = ("zone_1" in v_zone.lower() or "koridor" in v_zone.lower() or "zebra" in v_zone.lower())
+                    if is_zebra:
+                        alert_lbl = "HALANGAN ZEBRA CROSS"
+                        if is_triggered or (is_stationary and dwell_sec >= 60.0):
+                            is_alert = True
+                            box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                            badge_text = f"[ALERT] {alert_lbl} ({dwell_sec / 60.0:.1f}m)"
+                        elif is_stationary and dwell_sec > 0:
+                            box_color = (0, 215, 255)  # Amber / Warning
+                            badge_text = f"{v_label} [ID #{track_id}] ({dwell_sec:.0f}s/1m)"
+                        else:
+                            box_color = (255, 200, 0)  # Cool Cyan
+                            badge_text = f"{v_label} [ID #{track_id}]"
+                    else:
+                        alert_lbl = "PARKIR MELEBIHI BATAS (30M)"
+                        if is_triggered or (is_stationary and dwell_sec >= 1800.0):
+                            is_alert = True
+                            box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                            badge_text = f"[ALERT] {alert_lbl} ({dwell_sec / 60.0:.0f}m)"
+                        elif is_stationary and dwell_sec > 0:
+                            box_color = (0, 215, 255)  # Amber / Warning
+                            badge_text = f"{v_label} [ID #{track_id}] ({dwell_sec / 60.0:.1f}m/30m)"
+                        else:
+                            box_color = (255, 200, 0)  # Cool Cyan
+                            badge_text = f"{v_label} [ID #{track_id}]"
+            elif is_person:
+                if is_walkway_cam and hasattr(obj, "walkway_status"):
+                    status = getattr(obj, "walkway_status", "SAFE")
+                    dwell_sec = getattr(obj, "outside_walkway_duration", 0.0)
+                    is_alert = (status == "VIOLATION")
+                    if status == "SAFE":
+                        box_color = COLOR_SAFE  # Hijau (Jalur Aman)
+                        badge_text = f"ID {track_id} | [SAFE WALKWAY]"
+                    elif status == "NEAR_VEHICLE":
+                        box_color = (255, 200, 0)  # Cyan / Teal (Aktivitas Kendaraan)
+                        badge_text = f"ID {track_id} | [DEKAT KENDARAAN]"
+                    elif status == "CROSSING":
+                        box_color = (0, 215, 255)  # Amber / Gold (Menyeberang / Transisi)
+                        badge_text = f"ID {track_id} | [CROSSING] ({dwell_sec:.0f}s/35s)"
+                    else:  # VIOLATION
+                        box_color = (0, 0, 255) if blink_state else (0, 165, 255)
+                        badge_text = f"[ALERT K3] PELANGGARAN JALUR ({dwell_sec:.0f}s)"
+                else:
+                    # cam_02 or general pedestrian: Emerald Green (0, 255, 127)
+                    box_color = (0, 255, 127)  # Emerald Green
+                    badge_text = f"PERSON [ID #{track_id}]"
             else:
                 is_attended = getattr(obj, "is_attended", False)
                 dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))
@@ -471,9 +699,18 @@ class VisualHUD:
         face_count = len(active_faces) if active_faces else 0
         cam_display = f"{camera_name} ({camera_id})" if camera_name else (camera_id or "CAM")
         line_1 = f"CAM: {cam_display} | {w}x{h} | FPS: {fps:.1f}"
-        if camera_id in ("cam_03", "cam_04"):
-            k3_status = f"ALERT ({walkway_vios})" if walkway_vios > 0 else "COMPLIANT"
-            line_2 = f"K3 WALKWAY: {k3_status} | CLEAR: {bag_count} | RTSP: {conn_text}"
+        if camera_id in ("cam_02", "cam_03", "cam_04"):
+            vehicle_count = len([
+                o for o in (tracked_objects or [])
+                if getattr(o, "class_label", "") in ("car", "bus", "truck")
+                and (not hasattr(o, "should_render") or o.should_render)
+            ])
+            person_count = len([
+                o for o in (tracked_objects or [])
+                if getattr(o, "class_label", "") == "person"
+                and (not hasattr(o, "should_render") or o.should_render)
+            ])
+            line_2 = f"TRAFFIC: {vehicle_count} VEH | {person_count} PED | RTSP: {conn_text}"
         else:
             line_2 = f"CLEAR AREA: {bag_count} | FACES: {face_count} | RTSP: {conn_text}"
 

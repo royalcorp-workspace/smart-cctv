@@ -18,7 +18,6 @@ import numpy as np
 import requests
 from dotenv import load_dotenv
 
-from engine.composite_builder import generate_composite_evidence, encode_composite_jpg
 from engine.config_loader import ensure_env_loaded, load_camera_config
 from engine.logger import logger
 
@@ -269,6 +268,7 @@ class TelegramNotifier:
         zone_name: Optional[str] = None,
         overview_frame: Optional[np.ndarray] = None,
         zones: Optional[Dict[str, Any]] = None,
+        class_label: str = "OBJEK",
         owner_name: Optional[str] = None,
         owner_face_crop: Optional[np.ndarray] = None,
     ) -> bool:
@@ -303,6 +303,7 @@ class TelegramNotifier:
                 "zone_id": zone_id,
                 "zone_name": zone_name or zone_id,
                 "track_id": track_id,
+                "class_label": class_label,
                 "dwell_duration": dwell_duration,
                 "timestamp_str": timestamp_str,
                 "frame": frame.copy(),
@@ -310,8 +311,6 @@ class TelegramNotifier:
                 "bbox": bbox,
                 "zones": zones,
                 "recipients": recipients,
-                "owner_name": owner_name or "Tidak Teridentifikasi",
-                "owner_face_crop": owner_face_crop.copy() if owner_face_crop is not None else None,
             }
 
             self._queue.put_nowait(job)
@@ -356,72 +355,105 @@ class TelegramNotifier:
         except queue.Full:
             return False
 
-    def dispatch_composite_alert(
+    def dispatch_composite_alert(self, *args, **kwargs) -> bool:
+        """Deprecated: Bypassed in favor of standardized dual-image sendMediaGroup."""
+        logger.debug("[TelegramNotifier] dispatch_composite_alert bypassed (standardized dual-image format).")
+        return False
+
+    def dispatch_tripwire_alert(
+        self,
+        camera_id: str,
+        line_id: str,
+        line_name: str,
+        track_id: int,
+        class_label: str,
+        direction: str,
+        timestamp_str: str,
+        frame: np.ndarray,
+        overview_frame: Optional[np.ndarray] = None,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> bool:
+        """Enqueue tripwire line breach alert asynchronously with dual-image format."""
+        if not self.enabled or not self.bot_token or not self.bot_token.strip():
+            return False
+
+        try:
+            recipients = self.get_recipients_for_camera(camera_id)
+            if not recipients:
+                return False
+
+            job = {
+                "type": "tripwire_alert",
+                "camera_id": camera_id,
+                "line_id": line_id,
+                "line_name": line_name,
+                "track_id": track_id,
+                "class_label": class_label,
+                "direction": direction,
+                "timestamp_str": timestamp_str,
+                "frame": frame.copy(),
+                "overview_frame": overview_frame.copy() if overview_frame is not None else None,
+                "bbox": bbox,
+                "recipients": recipients,
+            }
+            self._queue.put_nowait(job)
+            return True
+        except queue.Full:
+            logger.warning("[TelegramNotifier] Alert queue is full! Dropping tripwire alert.")
+            return False
+        except Exception as e:
+            logger.warning(f"[TelegramNotifier] Error dispatching tripwire alert: {e}")
+            return False
+
+    def dispatch_vehicle_alert(
         self,
         camera_id: str,
         zone_id: str,
         track: Any,
-        stage: str,
+        alert_label: str,
         frame: np.ndarray,
         zone_name: Optional[str] = None,
+        overview_frame: Optional[np.ndarray] = None,
         timestamp_str: Optional[str] = None,
     ) -> bool:
-        """Enqueue side-by-side composite evidence card alert job asynchronously.
-
-        Generates 1200x700 side-by-side card (Object crop on Left, Face/Actor crop on Right)
-        and sends via background worker thread without blocking inference.
-        Returns True if enqueued, False if dropped or disabled.
-        """
+        """Enqueue vehicle parking/obstruction dwell violation alert job asynchronously with dual-image format."""
         if not self.enabled or not self.bot_token or not self.bot_token.strip():
-            logger.warning("[Telegram] Credentials not configured, skipping composite alert.")
+            logger.warning("[Telegram] Credentials not configured, skipping vehicle alert.")
             return False
 
         recipients = self.get_recipients_for_camera(camera_id)
         if not recipients:
-            logger.warning("[Telegram] Credentials not configured or no recipients, skipping composite alert.")
+            logger.warning("[Telegram] No recipients configured, skipping vehicle alert.")
             return False
 
         try:
             if not timestamp_str:
                 timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Generate composite evidence card image (1200x700 side-by-side)
-            composite_img = generate_composite_evidence(
-                object_track=track,
-                current_frame=frame,
-                stage_name=stage,
-                zone_name=zone_name or zone_id,
-                camera_id=camera_id,
-                timestamp_str=timestamp_str,
-            )
-
-            img_bytes = encode_composite_jpg(composite_img, quality=90)
-            if not img_bytes:
-                logger.error("[TelegramNotifier] Failed to encode composite evidence image to JPEG.")
-                return False
-
             job = {
-                "type": "composite_alert",
+                "type": "vehicle_alert",
                 "camera_id": camera_id,
                 "zone_id": zone_id,
                 "zone_name": zone_name or zone_id,
                 "track_id": getattr(track, "track_id", 0),
-                "class_label": getattr(track, "class_label", "object"),
-                "stage": stage,
+                "class_label": getattr(track, "class_label", "VEHICLE"),
+                "alert_label": alert_label,
                 "dwell_duration": float(getattr(track, "dwell_duration", 0.0)),
+                "dwell_threshold": float(getattr(track, "dwell_threshold", 60.0)),
                 "timestamp_str": timestamp_str,
-                "img_bytes": img_bytes,
+                "frame": frame.copy(),
+                "overview_frame": overview_frame.copy() if overview_frame is not None else None,
+                "bbox": getattr(track, "bbox", None),
                 "recipients": recipients,
-                "actor_meta": getattr(track, "associated_face_meta", None) or getattr(track, "last_owner_info", None) or {},
             }
 
             self._queue.put_nowait(job)
             return True
         except queue.Full:
-            logger.warning("[TelegramNotifier] Alert queue is full! Dropping composite alert.")
+            logger.warning("[TelegramNotifier] Alert queue full! Dropping vehicle alert.")
             return False
         except Exception as e:
-            logger.warning(f"[Telegram] Error enqueuing composite alert ({e}), skipping alert.")
+            logger.warning(f"[Telegram] Error enqueuing vehicle alert: {e}")
             return False
 
     def _worker_loop(self) -> None:
@@ -437,12 +469,152 @@ class TelegramNotifier:
                     self._send_resolution_job(job)
                 elif job.get("type") == "composite_alert":
                     self._send_composite_job(job)
+                elif job.get("type") == "tripwire_alert":
+                    self._send_tripwire_job(job)
+                elif job.get("type") == "vehicle_alert":
+                    self._send_vehicle_job(job)
                 else:
                     self._send_job(job)
             except Exception as e:
                 logger.error(f"[TelegramNotifier] Unhandled exception in worker: {e}")
             finally:
                 self._queue.task_done()
+
+    def _send_tripwire_job(self, job: dict) -> None:
+        """Send tripwire line crossing alert with standardized dual-image album (Overview + Zoom Detail)."""
+        camera_id = job["camera_id"]
+        line_id = job["line_id"]
+        line_name = job["line_name"]
+        track_id = job["track_id"]
+        class_label = str(job.get("class_label", "OBJECT")).upper()
+        direction = job.get("direction", "both")
+        timestamp_str = job["timestamp_str"]
+        clean_frame = job.get("frame")
+        overview_frame = job.get("overview_frame")
+        bbox = job.get("bbox")
+        recipients = job.get("recipients", [])
+
+        # 1. Overview Image (Full scene with HUD line and direction arrow)
+        if overview_frame is not None and overview_frame.size > 0:
+            annotated = overview_frame.copy()
+        elif clean_frame is not None and clean_frame.size > 0:
+            annotated = clean_frame.copy()
+        else:
+            logger.error("[TelegramNotifier] Tripwire job missing valid frames.")
+            return
+
+        success_ov, enc_overview = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not success_ov:
+            logger.error("[TelegramNotifier] Failed to encode tripwire overview image to JPEG.")
+            return
+        overview_bytes = enc_overview.tobytes()
+
+        # 2. Contextual Close-up Zoom Crop of violator
+        zoom_crop = None
+        if clean_frame is not None and clean_frame.size > 0 and bbox is not None:
+            zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.30)
+
+        # Fallback if zoom_crop couldn't be generated
+        if zoom_crop is None or zoom_crop.size == 0:
+            zoom_crop = annotated.copy()
+
+        success_zm, enc_zoom = cv2.imencode(".jpg", zoom_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not success_zm:
+            logger.error("[TelegramNotifier] Failed to encode tripwire zoom crop image to JPEG.")
+            return
+        zoom_bytes = enc_zoom.tobytes()
+
+        # 3. Standardized HTML Caption
+        caption = (
+            "🚨 <b>[ALERT] TEROBOSAN GARIS VIRTUAL (TRIPWIRE)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📹 <b>Kamera</b>: <code>{camera_id.upper()}</code>\n"
+            f"📍 <b>Lokasi / Zona</b>: <b>{line_name} ({line_id})</b>\n"
+            f"🎯 <b>Target</b>: <b>{class_label} #{track_id}</b>\n"
+            f"⏱️ <b>Durasi / Status</b>: <b>Melintas Arah: {direction}</b>\n"
+            f"🕒 <b>Waktu</b>: <code>{timestamp_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Bukti visual: [1] Area Kejadian  |  [2] Detail Pelanggar</i>"
+        )
+
+        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
+        for chat_id in recipients:
+            sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption)
+            if not sent:
+                send_photo_url = f"{base_url}/bot{self.bot_token}/sendPhoto"
+                self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
+                zoom_caption = f"🔍 <b>[DETAIL PELANGGAR]</b> {class_label} #{track_id}"
+                self._send_photo_with_retry(send_photo_url, chat_id, zoom_bytes, zoom_caption)
+
+    def _send_vehicle_job(self, job: dict) -> None:
+        """Send vehicle obstruction/parking violation alert with standardized dual-image album."""
+        camera_id = job["camera_id"]
+        zone_name = job["zone_name"]
+        track_id = job["track_id"]
+        class_label = str(job.get("class_label", "VEHICLE")).upper()
+        alert_label = job.get("alert_label", "PARKIR MELEBIHI BATAS")
+        dwell_sec = job["dwell_duration"]
+        thresh_sec = job["dwell_threshold"]
+        timestamp_str = job["timestamp_str"]
+        clean_frame = job.get("frame")
+        overview_frame = job.get("overview_frame")
+        bbox = job.get("bbox")
+        recipients = job.get("recipients", [])
+
+        dwell_str = f"{dwell_sec:.0f}s" if dwell_sec < 120 else f"{dwell_sec / 60.0:.1f} Menit"
+        thresh_str = f"{thresh_sec:.0f}s" if thresh_sec < 120 else f"{thresh_sec / 60.0:.0f} Menit"
+
+        # 1. Overview Image (Full scene with HUD annotations)
+        if overview_frame is not None and overview_frame.size > 0:
+            annotated = overview_frame.copy()
+        elif clean_frame is not None and clean_frame.size > 0:
+            annotated = clean_frame.copy()
+        else:
+            logger.error("[TelegramNotifier] Vehicle job missing valid frames.")
+            return
+
+        success_ov, enc_overview = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not success_ov:
+            logger.error("[TelegramNotifier] Failed to encode vehicle overview image to JPEG.")
+            return
+        overview_bytes = enc_overview.tobytes()
+
+        # 2. Contextual Close-up Zoom Crop of vehicle
+        zoom_crop = None
+        if clean_frame is not None and clean_frame.size > 0 and bbox is not None:
+            zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.25)
+
+        # Fallback if zoom_crop couldn't be generated
+        if zoom_crop is None or zoom_crop.size == 0:
+            zoom_crop = annotated.copy()
+
+        success_zm, enc_zoom = cv2.imencode(".jpg", zoom_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not success_zm:
+            logger.error("[TelegramNotifier] Failed to encode vehicle zoom crop image to JPEG.")
+            return
+        zoom_bytes = enc_zoom.tobytes()
+
+        # 3. Standardized HTML Caption
+        caption = (
+            f"🚨 <b>[ALERT] {alert_label.upper()}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📹 <b>Kamera</b>: <code>{camera_id.upper()}</code>\n"
+            f"📍 <b>Lokasi / Zona</b>: <b>{zone_name}</b>\n"
+            f"🎯 <b>Target</b>: <b>{class_label} #{track_id}</b>\n"
+            f"⏱️ <b>Durasi / Status</b>: <b>{dwell_str} (Batas: {thresh_str})</b>\n"
+            f"🕒 <b>Waktu</b>: <code>{timestamp_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Bukti visual: [1] Area Kejadian  |  [2] Detail Pelanggar</i>"
+        )
+
+        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
+        for chat_id in recipients:
+            sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption)
+            if not sent:
+                send_photo_url = f"{base_url}/bot{self.bot_token}/sendPhoto"
+                self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
+                zoom_caption = f"🔍 <b>[DETAIL PELANGGAR]</b> {class_label} #{track_id}"
+                self._send_photo_with_retry(send_photo_url, chat_id, zoom_bytes, zoom_caption)
 
     def _send_job(self, job: dict) -> None:
         """Render annotated overview + contextual zoom crop and dispatch via sendMediaGroup."""
@@ -451,6 +623,7 @@ class TelegramNotifier:
         zone_name = job.get("zone_name", zone_id)
         display_zone = zone_name if zone_name else zone_id
         track_id = job["track_id"]
+        class_label = str(job.get("class_label", "OBJEK")).upper()
         dwell = job["dwell_duration"]
         timestamp_str = job["timestamp_str"]
         clean_frame = job["frame"]
@@ -460,21 +633,11 @@ class TelegramNotifier:
         recipients = job["recipients"]
 
         # 1. Prepare Overview Image
-        # Snapshot MUST strictly originate from VisualHUD.render() (annotated_frame.copy()).
-        # Zero re-drawing: Never re-draw zones or boxes in the Telegram module.
         if overview_frame is not None and overview_frame.size > 0:
             annotated = overview_frame.copy()
         else:
             annotated = clean_frame.copy()
 
-        # 2. Extract Contextual Close-up Zoom Crop from clean frame (un-occluded, 35% padding)
-        zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.35)
-
-        # 2b. Extract Owner Face Crop if available
-        owner_face_crop = job.get("owner_face_crop")
-        owner_name = job.get("owner_name", "Tidak Teridentifikasi")
-
-        # 3. Encode images to JPEG
         success_ov, enc_overview = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not success_ov:
             logger.error("[TelegramNotifier] Failed to encode overview snapshot image to JPEG.")
@@ -482,57 +645,50 @@ class TelegramNotifier:
 
         overview_bytes = enc_overview.tobytes()
 
-        zoom_bytes = None
-        if zoom_crop is not None:
-            success_zm, enc_zoom = cv2.imencode(".jpg", zoom_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            if success_zm:
-                zoom_bytes = enc_zoom.tobytes()
+        # 2. Extract Contextual Close-up Zoom Crop from clean frame (un-occluded, 35% padding)
+        zoom_crop = self.create_zoom_crop(clean_frame, bbox, min_width=480, padding_ratio=0.35)
+        if zoom_crop is None or zoom_crop.size == 0:
+            zoom_crop = annotated.copy()
 
-        face_bytes = None
-        if owner_face_crop is not None and owner_face_crop.size > 0:
-            success_fc, enc_face = cv2.imencode(".jpg", owner_face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            if success_fc:
-                face_bytes = enc_face.tobytes()
-
-        # 4. Format structured caption (HTML mode)
-        dwell_mins = dwell / 60.0
-        owner_line = f"👤 <b>Terduga Pemilik</b>: <b>{owner_name}</b>\n" if owner_name and owner_name != "Tidak Teridentifikasi" else "👤 <b>Terduga Pemilik</b>: <i>Tidak Teridentifikasi</i>\n"
-        caption = (
-            "🚨 <b>PERINGATAN: PELANGGARAN CLEAR AREA</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📹 <b>Kamera</b>: <code>{camera_id}</code>\n"
-            f"📍 <b>Zona</b>: <code>{display_zone}</code>\n"
-            f"🏷️ <b>Objek</b>: Objek Terlarang (Track ID #{track_id})\n"
-            f"{owner_line}"
-            f"⏱️ <b>Durasi Pelanggaran</b>: <b>{dwell_mins:.1f} Menit</b> (Batas: 60 Menit)\n"
-            f"🕒 <b>Waktu</b>: <code>{timestamp_str}</code>\n"
-            "📷 <b>Bukti</b>: Foto Overview + Close-up Zoom terlampir.\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <i>Terdeteksi barang di area steril yang tidak semestinya. Harap petugas keamanan segera mensterilkan lokasi.</i>"
-        )
-
-        # 5. Dispatch multi-image album or single photo per recipient
-        if not self.bot_token or not self.bot_token.strip():
-            logger.warning("[Telegram] Credentials not configured, skipping alert.")
+        success_zm, enc_zoom = cv2.imencode(".jpg", zoom_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not success_zm:
+            logger.error("[TelegramNotifier] Failed to encode zoom crop image to JPEG.")
             return
 
+        zoom_bytes = enc_zoom.tobytes()
+
+        # Dwell threshold
+        dwell_thresh = 3600.0
+        if zones and isinstance(zones, dict) and zone_id in zones:
+            z_cfg = zones[zone_id]
+            if isinstance(z_cfg, dict):
+                dwell_thresh = float(z_cfg.get("dwell_threshold_sec", z_cfg.get("dwell_time_threshold", z_cfg.get("unattended_threshold", 3600.0))))
+        
+        dwell_str = f"{dwell:.0f}s" if dwell < 120 else f"{dwell / 60.0:.1f} Menit"
+        thresh_str = f"{dwell_thresh:.0f}s" if dwell_thresh < 120 else f"{dwell_thresh / 60.0:.0f} Menit"
+        dwell_status = f"{dwell_str} (Batas: {thresh_str})"
+
+        # 3. Standardized HTML Caption
+        caption = (
+            "🚨 <b>[ALERT] PELANGGARAN CLEAR AREA</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📹 <b>Kamera</b>: <code>{camera_id.upper()}</code>\n"
+            f"📍 <b>Lokasi / Zona</b>: <b>{display_zone}</b>\n"
+            f"🎯 <b>Target</b>: <b>{class_label.upper()} #{track_id}</b>\n"
+            f"⏱️ <b>Durasi / Status</b>: <b>{dwell_status}</b>\n"
+            f"🕒 <b>Waktu</b>: <code>{timestamp_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Bukti visual: [1] Area Kejadian  |  [2] Detail Pelanggar</i>"
+        )
+
+        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
         for chat_id in recipients:
-            if zoom_bytes is not None:
-                # Primary: sendMediaGroup (album in 1 bubble)
-                sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption, face_bytes=face_bytes)
-                if not sent:
-                    # Fallback: sequential sendPhoto
-                    logger.info(f"[TelegramNotifier] sendMediaGroup failed for {chat_id}; falling back to sendPhoto.")
-                    send_photo_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
-                    self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
-                    zoom_caption = f"🔍 <b>[DETAIL CROP]</b> Objek Terlarang di Area Steril (Track ID #{track_id})"
-                    self._send_photo_with_retry(send_photo_url, chat_id, zoom_bytes, zoom_caption)
-                    if face_bytes is not None:
-                        face_caption = f"👤 <b>[FOTO PEMILIK/TERDUGA]</b> {owner_name}"
-                        self._send_photo_with_retry(send_photo_url, chat_id, face_bytes, face_caption)
-            else:
-                send_photo_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+            sent = self._send_media_group_with_retry(chat_id, overview_bytes, zoom_bytes, caption)
+            if not sent:
+                send_photo_url = f"{base_url}/bot{self.bot_token}/sendPhoto"
                 self._send_photo_with_retry(send_photo_url, chat_id, overview_bytes, caption)
+                zoom_caption = f"🔍 <b>[DETAIL PELANGGAR]</b> {class_label} #{track_id}"
+                self._send_photo_with_retry(send_photo_url, chat_id, zoom_bytes, zoom_caption)
 
     def _send_resolution_job(self, job: dict) -> None:
         """Send HTML text message to Telegram when incident is resolved."""
@@ -575,57 +731,8 @@ class TelegramNotifier:
                     logger.warning(f"[TelegramNotifier] Failed to send resolution message: {e}")
 
     def _send_composite_job(self, job: dict) -> None:
-        """Send composite evidence card to camera recipients via sendPhoto."""
-        camera_id = job["camera_id"]
-        zone_id = job["zone_id"]
-        zone_name = job.get("zone_name", zone_id)
-        display_zone = zone_name if zone_name else zone_id
-        track_id = job["track_id"]
-        class_label = job.get("class_label", "object").upper()
-        dwell = job["dwell_duration"]
-        dwell_min = dwell / 60.0
-        timestamp_str = job["timestamp_str"]
-        stage = job.get("stage", "BREACH").upper()
-        actor_meta = job.get("actor_meta", {})
-        actor_name = actor_meta.get("name", "Tidak Teridentifikasi")
-        actor_conf = float(actor_meta.get("confidence", 0.0))
-        conf_str = f"{int(round(actor_conf * 100))}%" if actor_conf > 0 else "-"
-
-        if "WARN" in stage:
-            header_icon = "⚠️"
-            stage_title = "STAGE 1: WARNING (50% DWELL)"
-            status_desc = "Objek mulai terindikasi diam di zona transit/steril melebihi 50% batas toleransi."
-        elif "PRE" in stage:
-            header_icon = "🚨"
-            stage_title = "STAGE 2: PRE-ALARM (85% DWELL)"
-            status_desc = "Objek mendekati ambang batas kritis (85%). Siapkan verifikasi sebelum eskalasi pelanggaran!"
-        elif "RESOLV" in stage:
-            header_icon = "✅"
-            stage_title = "STAGE 4: RESOLVED"
-            status_desc = "Objek telah dipindahkan atau diambil kembali oleh pemilik/petugas."
-        else:
-            header_icon = "⛔"
-            stage_title = "STAGE 3: CLEAR AREA BREACH (100% DWELL)"
-            status_desc = "Pelanggaran steril terkonfirmasi penuh (100% dwell). Intervensi petugas segera diperlukan!"
-
-        caption = (
-            f"<b>{header_icon} [{stage_title}]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Kamera:</b> <code>{camera_id.upper()}</code>\n"
-            f"<b>Zona:</b> {display_zone}\n"
-            f"<b>Objek:</b> {class_label} #{track_id}\n"
-            f"<b>Akumulasi Dwell:</b> {dwell_min:.1f} Menit\n"
-            f"<b>Pelaku Terakhir:</b> {actor_name} (Kecocokan: {conf_str})\n"
-            f"<b>Waktu:</b> <code>{timestamp_str}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>{status_desc}</i>\n"
-            f"<i>Smart CCTV 2.0 AI Composite Evidence</i>"
-        )
-
-        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
-        send_photo_url = f"{base_url}/bot{self.bot_token}/sendPhoto"
-        for chat_id in job.get("recipients", []):
-            self._send_photo_with_retry(send_photo_url, chat_id, job["img_bytes"], caption)
+        """Deprecated: Pass-through for composite alert."""
+        pass
 
     def _send_media_group_with_retry(
         self,
@@ -633,14 +740,14 @@ class TelegramNotifier:
         overview_bytes: bytes,
         zoom_bytes: bytes,
         caption: str,
-        face_bytes: Optional[bytes] = None,
     ) -> bool:
-        """Send 2 or 3-image album via Telegram sendMediaGroup with retry protection."""
+        """Send standardized 2-image album via Telegram sendMediaGroup with retry protection."""
         if not self.bot_token or not chat_id:
             logger.warning("[Telegram] Credentials not configured, skipping alert.")
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMediaGroup"
+        base_url = getattr(self, "api_base_url", "https://api.telegram.org")
+        url = f"{base_url}/bot{self.bot_token}/sendMediaGroup"
         media = [
             {
                 "type": "photo",
@@ -653,17 +760,6 @@ class TelegramNotifier:
                 "media": "attach://photo_zoom.jpg",
             },
         ]
-        files = {
-            "photo_overview.jpg": ("photo_overview.jpg", overview_bytes, "image/jpeg"),
-            "photo_zoom.jpg": ("photo_zoom.jpg", zoom_bytes, "image/jpeg"),
-        }
-
-        if face_bytes is not None:
-            media.append({
-                "type": "photo",
-                "media": "attach://photo_face.jpg",
-            })
-            files["photo_face.jpg"] = ("photo_face.jpg", face_bytes, "image/jpeg")
 
         for attempt in range(1, self.max_retries + 1):
             try:

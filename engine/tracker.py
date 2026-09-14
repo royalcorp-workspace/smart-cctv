@@ -104,6 +104,7 @@ class TrackedObject:
     outside_walkway_duration: float = 0.0
     is_near_vehicle: bool = False
     nearest_vehicle_dist: float = 999.0
+    stationary_frames: int = 0
 
     def __post_init__(self) -> None:
         if self.associated_face_meta is not None and self.last_owner_info is None:
@@ -267,7 +268,7 @@ class CentroidTracker:
     ) -> Optional[SpatialMemoryEntry]:
         """Search spatial memory cache for a matching previously observed stationary object."""
         det_label = label if label is not None else ("tas" if zone_id else "person")
-        if det_label == "person":
+        if det_label in ("person", "car", "bus", "truck"):
             return None
 
         BAG_FAMILY = ("tas", "backpack", "handbag", "suitcase", "koper", "ransel")
@@ -279,7 +280,7 @@ class CentroidTracker:
             if (now - entry.deregistered_at) > self.spatial_memory_ttl_sec:
                 continue
 
-            if entry.class_label == "person":
+            if entry.class_label in ("person", "car", "bus", "truck"):
                 continue
 
             is_both_bags = (det_label in BAG_FAMILY and entry.class_label in BAG_FAMILY)
@@ -431,9 +432,9 @@ class CentroidTracker:
             last_yolo_seen_time=last_yolo_seen_time,
         )
         self.objects[self._next_id] = new_obj
-        if label == "person":
+        if label in ("person", "car", "bus", "truck"):
             logger.info(
-                f"[TRACKER] Person Track #{self._next_id} registered at {centroid} "
+                f"[TRACKER] {label.upper()} Track #{self._next_id} registered at {centroid} "
                 f"(bbox={bbox}, conf={conf:.2f}, zone='{zone_id}')"
             )
         self._next_id += 1
@@ -533,10 +534,22 @@ class CentroidTracker:
             det = detections[col]
             det_label = det[4] if len(det) >= 5 else None
 
-            # Class compatibility guard: Person can NEVER match a Bag, and Bag can NEVER match a Person
-            is_obj_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
-            if (is_obj_bag and det_label == "person") or (obj.class_label == "person" and is_det_bag):
+            # Class compatibility guard: Strict isolation between Person, Bag, and Vehicle families
+            VEHICLE_CLASSES = ("car", "bus", "truck")
+            BAG_CLASSES = ("tas", "backpack", "handbag", "suitcase")
+
+            is_obj_bag = obj.class_label in BAG_CLASSES
+            is_det_bag = det_label in BAG_CLASSES
+            is_obj_vehicle = obj.class_label in VEHICLE_CLASSES
+            is_det_vehicle = det_label in VEHICLE_CLASSES
+            is_obj_person = obj.class_label == "person"
+            is_det_person = det_label == "person"
+
+            if (is_obj_bag and not is_det_bag) or (not is_obj_bag and is_det_bag):
+                continue
+            if (is_obj_vehicle and not is_det_vehicle) or (not is_obj_vehicle and is_det_vehicle):
+                continue
+            if (is_obj_person and not is_det_person) or (not is_obj_person and is_det_person):
                 continue
 
             bbox, new_centroid, zone_id, area = det[0], det[1], det[2], det[3]
@@ -547,6 +560,11 @@ class CentroidTracker:
                 anchor_iou = compute_bbox_iou(getattr(obj, "anchor_bbox", obj.bbox), bbox)
                 d_anchor = float(np.linalg.norm(np.array(obj.anchor_centroid, dtype=np.float32) - np.array(new_centroid, dtype=np.float32)))
                 if min(dist_matrix[row, col], d_anchor) > self.max_distance_px and max(box_iou, anchor_iou) < 0.20:
+                    continue
+            elif is_obj_vehicle and is_det_vehicle:
+                # Vehicles: large objects moving through traffic corridor, match via distance or bounding box IoU
+                box_iou = compute_bbox_iou(obj.bbox, bbox)
+                if dist_matrix[row, col] > max(150.0, self.max_distance_px * 1.5) and box_iou < 0.15:
                     continue
             else:
                 # Adaptive person distance scaling: perspective increases step distance in foreground (bottom of frame)
@@ -559,11 +577,11 @@ class CentroidTracker:
             conf = float(det[6]) if len(det) >= 7 else 0.0
             det_source = str(det[7]) if len(det) >= 8 else "yolo"
 
-            # 1. Centroid Smoothing: fast responsive tracking for persons (alpha=0.70) to prevent lag during walking,
+            # 1. Centroid Smoothing: fast responsive tracking for moving targets (alpha=0.70) to prevent lag,
             # heavy smoothing for stationary bags (alpha=0.30) to eliminate jitter
             old_cx, old_cy = obj.centroid
             new_cx, new_cy = new_centroid
-            alpha_val = 0.70 if obj.class_label == "person" else self.ema_alpha
+            alpha_val = 0.70 if obj.class_label in ("person", "car", "bus", "truck") else self.ema_alpha
             smooth_cx = int(round(alpha_val * float(new_cx) + (1.0 - alpha_val) * float(old_cx)))
             smooth_cy = int(round(alpha_val * float(new_cy) + (1.0 - alpha_val) * float(old_cy)))
             smoothed_centroid = (smooth_cx, smooth_cy)
@@ -589,8 +607,9 @@ class CentroidTracker:
             if det_source == "yolo":
                 obj.last_yolo_seen_time = now
 
-            # 2. Sticky Stationary State Machine for Baggage
+            # 2. Sticky Stationary State Machine for Baggage & Vehicles
             is_bag_obj = (det_label or obj.class_label) in ("tas", "backpack", "handbag", "suitcase")
+            is_vehicle_obj = (det_label or obj.class_label) in ("car", "bus", "truck")
             if is_bag_obj:
                 anchor_box = getattr(obj, "anchor_bbox", obj.bbox)
                 anchor_iou = compute_bbox_iou(anchor_box, bbox)
@@ -646,6 +665,36 @@ class CentroidTracker:
                     else:
                         obj.stationary_start = now
                         obj.dwell_duration = 0.0
+            elif is_vehicle_obj:
+                # Stationary Vehicle (Parking / Obstruction) Logic:
+                # Vehicle is stationary if centroid shift <= 15 px across consecutive frames.
+                # Dwell time accumulates only if stationary inside a monitored polygon zone.
+                # If moving normally (speed > 15 px/frame), timer resets immediately.
+                is_in_zone = bool(zone_id and "outside" not in zone_id and "unassigned" not in zone_id)
+                frame_shift = float(np.hypot(smoothed_centroid[0] - old_cx, smoothed_centroid[1] - old_cy))
+                anchor_shift = float(np.hypot(smoothed_centroid[0] - obj.anchor_centroid[0], smoothed_centroid[1] - obj.anchor_centroid[1]))
+
+                if is_in_zone and frame_shift <= 15.0 and anchor_shift <= 30.0:
+                    obj.stationary_frames += 1
+                    if obj.stationary_frames >= 4:  # Confirmed stationary after consecutive quiet frames
+                        if not obj.is_stationary:
+                            obj.is_stationary = True
+                            obj.stationary_start = now
+                            obj.dwell_duration = 0.0
+                        else:
+                            obj.dwell_duration = now - obj.stationary_start
+                    else:
+                        obj.dwell_duration = 0.0
+                else:
+                    # Vehicle is moving normally or outside zone -> reset stationary status & dwell timer
+                    obj.stationary_frames = 0
+                    obj.is_stationary = False
+                    obj.stationary_start = now
+                    obj.anchor_centroid = smoothed_centroid
+                    obj.anchor_bbox = bbox
+                    obj.dwell_duration = 0.0
+                    obj.is_triggered = False
+                    obj.alert_sent = False
             else:
                 # Person never triggers dwell violation
                 obj.is_stationary = False
@@ -754,9 +803,19 @@ class CentroidTracker:
                 if ex_id in [existing_ids[r] for r in assigned_rows]:
                     continue  # already matched to another detection in this frame
 
-                # Class compatibility guard: Person cannot match Bag, and Bag cannot match Person
+                # Class compatibility guard: Strict isolation between Person, Bag, and Vehicle families
                 is_ex_bag = ex_obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-                if (is_ex_bag and det_label == "person") or (ex_obj.class_label == "person" and is_det_bag):
+                is_det_bag = det_label in ("tas", "backpack", "handbag", "suitcase")
+                is_ex_vehicle = ex_obj.class_label in ("car", "bus", "truck")
+                is_det_vehicle = det_label in ("car", "bus", "truck")
+                is_ex_person = ex_obj.class_label == "person"
+                is_det_person = det_label == "person"
+
+                if (is_ex_bag and not is_det_bag) or (not is_ex_bag and is_det_bag):
+                    continue
+                if (is_ex_vehicle and not is_det_vehicle) or (not is_ex_vehicle and is_det_vehicle):
+                    continue
+                if (is_ex_person and not is_det_person) or (not is_ex_person and is_det_person):
                     continue
 
                 d_cent = float(np.linalg.norm(np.array(ex_obj.centroid, dtype=np.float32) - np.array(det_centroid, dtype=np.float32)))
@@ -1046,6 +1105,10 @@ class CentroidTracker:
                 if other.track_id == bag.track_id:
                     continue
 
+                # Strictly evaluate only persons as potential owners (ignore vehicles, bags, etc.)
+                if other.class_label != "person" or not getattr(other, "is_active_this_frame", False):
+                    continue
+
                 ox, oy, ow, oh = other.bbox
                 other_foot = (float(ox + ow / 2.0), float(oy + oh))
 
@@ -1055,41 +1118,38 @@ class CentroidTracker:
                     )
                 )
 
-                is_person_or_moving = (other.class_label == "person" or not other.is_stationary) and getattr(other, "is_active_this_frame", False)
-
                 # Check physical contact: IoU overlap > 0.20 OR IoF (bag fraction) > 0.30
                 # This distinguishes mere proximity from actual physical interaction.
                 is_carried_or_overlapping = False
                 has_real_contact = False
-                if other.class_label == "person" and getattr(other, "is_active_this_frame", False):
-                    bcx, bcy = bag.centroid
-                    if ox <= bcx <= (ox + ow) and oy <= bcy <= (oy + oh):
-                        is_carried_or_overlapping = True
-                        has_real_contact = True
-                    else:
-                        ix1 = max(bx, ox)
-                        iy1 = max(by, oy)
-                        ix2 = min(bx + bw, ox + ow)
-                        iy2 = min(by + bh, oy + oh)
-                        if ix2 > ix1 and iy2 > iy1:
-                            inter = float((ix2 - ix1) * (iy2 - iy1))
-                            bag_area = float(bw * bh)
-                            bag_box_a = float(bw * bh)
-                            person_box_a = float(ow * oh)
-                            union_a = bag_box_a + person_box_a - inter
-                            iou_val = inter / union_a if union_a > 0 else 0.0
-                            iof_val = inter / bag_area if bag_area > 0 else 0.0
-                            if iof_val > 0.30:
-                                is_carried_or_overlapping = True
-                                has_real_contact = True
-                            elif iou_val > 0.20:
-                                has_real_contact = True
+                bcx, bcy = bag.centroid
+                if ox <= bcx <= (ox + ow) and oy <= bcy <= (oy + oh):
+                    is_carried_or_overlapping = True
+                    has_real_contact = True
+                else:
+                    ix1 = max(bx, ox)
+                    iy1 = max(by, oy)
+                    ix2 = min(bx + bw, ox + ow)
+                    iy2 = min(by + bh, oy + oh)
+                    if ix2 > ix1 and iy2 > iy1:
+                        inter = float((ix2 - ix1) * (iy2 - iy1))
+                        bag_area = float(bw * bh)
+                        bag_box_a = float(bw * bh)
+                        person_box_a = float(ow * oh)
+                        union_a = bag_box_a + person_box_a - inter
+                        iou_val = inter / union_a if union_a > 0 else 0.0
+                        iof_val = inter / bag_area if bag_area > 0 else 0.0
+                        if iof_val > 0.30:
+                            is_carried_or_overlapping = True
+                            has_real_contact = True
+                        elif iou_val > 0.20:
+                            has_real_contact = True
 
                 if has_real_contact:
                     # Record confirmed physical contact timestamp for is_retrieved gate
                     bag.last_physical_contact_time = now
 
-                if (is_person_or_moving and dist <= adaptive_radius) or is_carried_or_overlapping:
+                if (dist <= adaptive_radius) or is_carried_or_overlapping:
                     owner_nearby = True
                     break
 

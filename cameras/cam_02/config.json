@@ -6,17 +6,25 @@
   "detector": {
     "enabled_classes": [
       "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "target_classes": [
+      "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "confidence_threshold": 0.22,
     "base_conf": 0.22,
+    "vehicle_conf": 0.28,
     "bag_conf": 0.18,
     "stride": 2
   },
@@ -39,9 +47,9 @@
   },
   "motion_gating": {
     "enabled": true,
-    "threshold_px": 120,
+    "threshold_px": 100,
     "diff_threshold": 25,
-    "hangover_sec": 2.0,
+    "hangover_sec": 2.5,
     "quiescent_interval": 30
   },
   "telegram": {
@@ -57,25 +65,46 @@
   },
   "zones": {
     "zone_1_koridor": {
-      "name": "Area Parkir Utama (Walkway)",
+      "name": "Zebra Cross / Akses Pejalan Kaki",
+      "target_classes": [
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 60.0,
+      "alert_label": "HALANGAN ZEBRA CROSS",
       "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_time_threshold": 60.0,
+      "unattended_threshold": 60.0,
       "min_contour_area": 300
     },
     "zone_2_transit": {
-      "name": "Area Parkir POS-2",
-      "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 250,
+      "name": "Area Transit Parkir Samping",
       "target_classes": [
-        "backpack",
-        "handbag",
-        "suitcase"
-      ]
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 1800.0,
+      "alert_label": "PARKIR MELEBIHI BATAS (30M)",
+      "detect_unattended": true,
+      "dwell_time_threshold": 1800.0,
+      "unattended_threshold": 1800.0,
+      "min_contour_area": 250
+    },
+    "zone_3": {
+      "name": "Akses Depan Pintu Tengah",
+      "target_classes": [
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 1800.0,
+      "alert_label": "PARKIR MELEBIHI BATAS (30M)",
+      "detect_unattended": true,
+      "dwell_time_threshold": 1800.0,
+      "unattended_threshold": 1800.0,
+      "min_contour_area": 250
     }
   }
 }

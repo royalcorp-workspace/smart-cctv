@@ -72,7 +72,17 @@ def test_media_group_payload_structure() -> bool:
     ov_bytes = enc_ov.tobytes()
     zm_bytes = enc_zm.tobytes()
 
-    caption = "🚨 <b>PERINGATAN: PELANGGARAN CLEAR AREA</b>\nKamera: cam_01"
+    caption = (
+        "🚨 <b>[ALERT] PELANGGARAN CLEAR AREA</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📹 <b>Kamera</b>: <code>CAM_01</code>\n"
+        "📍 <b>Lokasi / Zona</b>: <b>Area Transit Depan</b>\n"
+        "🎯 <b>Target</b>: <b>OBJEK #99</b>\n"
+        "⏱️ <b>Durasi / Status</b>: <b>60.0 Menit (Batas: 60 Menit)</b>\n"
+        "🕒 <b>Waktu</b>: <code>2026-09-14 08:30:00</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ <i>Bukti visual: [1] Area Kejadian  |  [2] Detail Pelanggar</i>"
+    )
     media = [
         {"type": "photo", "media": "attach://photo_overview.jpg", "caption": caption, "parse_mode": "HTML"},
         {"type": "photo", "media": "attach://photo_zoom.jpg"}
@@ -142,6 +152,56 @@ def test_non_blocking_and_live_dispatch() -> bool:
     return True
 
 
+def test_vehicle_and_tripwire_dual_image_structure() -> bool:
+    print("\n[STEP 4] Testing Vehicle and Tripwire Dual-Image Album Payloads...")
+
+    notifier = TelegramNotifier.get_instance()
+    test_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    overview_frame = test_frame.copy()
+    cv2.putText(overview_frame, "HUD OVERVIEW", (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+
+    # 1. Vehicle Alert Job Simulation
+    from types import SimpleNamespace
+    mock_truck = SimpleNamespace(
+        track_id=77,
+        class_label="truck",
+        bbox=(200, 200, 150, 120),
+        dwell_duration=1200.0,
+        dwell_threshold=600.0,
+    )
+    v_enqueued = notifier.dispatch_vehicle_alert(
+        camera_id="cam_04",
+        zone_id="zone_1_koridor",
+        track=mock_truck,
+        alert_label="HALANGAN ZEBRA CROSS TIMBANGAN",
+        frame=test_frame,
+        zone_name="Zebra Cross Timbangan",
+        overview_frame=overview_frame,
+        timestamp_str="2026-09-10 16:45:00",
+    )
+    assert v_enqueued is True, "Vehicle alert should be enqueued successfully."
+
+    # 2. Tripwire Alert Job Simulation
+    t_enqueued = notifier.dispatch_tripwire_alert(
+        camera_id="cam_04",
+        line_id="line_1",
+        line_name="Tripwire Timbangan",
+        track_id=88,
+        class_label="person",
+        direction="A_to_B",
+        timestamp_str="2026-09-10 16:45:01",
+        frame=test_frame,
+        overview_frame=overview_frame,
+        bbox=(300, 400, 60, 140),
+    )
+    assert t_enqueued is True, "Tripwire alert should be enqueued successfully."
+
+    # Wait for queue worker
+    time.sleep(3.0)
+    print(" -> PASS: Vehicle and Tripwire dual-image dispatch jobs executed successfully.")
+    return True
+
+
 def main() -> int:
     print("=" * 68)
     print("      DUAL-IMAGE TELEGRAM ALERT VERIFICATION & TEST SUITE      ")
@@ -150,8 +210,9 @@ def main() -> int:
     ok1 = test_zoom_crop_edge_cases()
     ok2 = test_media_group_payload_structure()
     ok3 = test_non_blocking_and_live_dispatch()
+    ok4 = test_vehicle_and_tripwire_dual_image_structure()
 
-    if ok1 and ok2 and ok3:
+    if ok1 and ok2 and ok3 and ok4:
         print("\n" + "=" * 68)
         print("  ALL DUAL-IMAGE ALERT TESTS PASSED SUCCESSFULLY (100%)!   ")
         print("=" * 68)

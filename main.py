@@ -24,7 +24,8 @@ from engine.face_detector import YuNetFaceDetector
 from engine.face_recognizer import FaceRecognizer
 from engine.tracker import CentroidTracker, TrackedObject, compute_bbox_iou
 from engine.yolo_detector import YOLOOpenVINODetector
-from engine.zone_filter import ZoneFilter
+from engine.line_crossing import TripwireEngine
+from engine.zone_filter import ZoneFilter, load_roi_data
 from notification.local_alert import GlobalAudioWorker, VisualHUD
 from notification.telegram_alert import TelegramNotifier
 from storage.db import init_db, log_event, resolve_event, update_event_clip
@@ -183,9 +184,14 @@ class CameraPipeline:
         )
         self.zone_filter = ZoneFilter(
             zones=self.roi_zones,
+            lines=getattr(self, "roi_lines", {}),
             zone_configs=self.config.get("zones", {}),
             frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
             base_resolution=self.roi_base_resolution,
+        )
+        self.tripwire_engine = TripwireEngine(
+            lines=self.zone_filter.scaled_lines,
+            cooldown_sec=5.0,
         )
         self.tracker = CentroidTracker(
             max_distance_px=100.0,                  # Increased from 80 -> 100px for faster-moving persons
@@ -327,20 +333,29 @@ class CameraPipeline:
         MultiCameraBuffer.get_instance().register_pipeline(self.camera_id, self)
 
     def reload_zones(self) -> Dict[str, Any]:
-        """Thread-safely reload ROI zones from roi_zones.json and re-initialize ZoneFilter."""
+        """Thread-safely reload ROI zones from roi_zones.json and re-initialize ZoneFilter & TripwireEngine."""
         with self._zone_lock:
             self._load_configurations()
             self._unattended_zones_mask = None
             self.zone_filter = ZoneFilter(
                 zones=self.roi_zones,
+                lines=getattr(self, "roi_lines", {}),
                 zone_configs=self.config.get("zones", {}),
                 frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
                 base_resolution=self.roi_base_resolution,
             )
-            logger.info(f"[{self.camera_id}] ZoneFilter atomically reloaded ({len(self.roi_zones)} active zones).")
+            self.tripwire_engine = TripwireEngine(
+                lines=self.zone_filter.scaled_lines,
+                cooldown_sec=5.0,
+            )
+            logger.info(
+                f"[{self.camera_id}] ZoneFilter atomically reloaded "
+                f"({len(self.roi_zones)} active zones, {len(self.roi_lines)} tripwires)."
+            )
             return {
                 "camera_id": self.camera_id,
                 "zones": self.roi_zones,
+                "lines": self.roi_lines,
                 "base_resolution": self.roi_base_resolution,
             }
 
@@ -353,32 +368,13 @@ class CameraPipeline:
         self.camera_id: str = self.config.get("camera_id", self.camera_dir.name)
 
         self.roi_zones: Dict[str, List[List[int]]] = {}
+        self.roi_lines: Dict[str, dict] = {}
         self.roi_base_resolution: Tuple[int, int] = (1920, 1080)
         if self.roi_path.exists():
-            with open(self.roi_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    if "base_resolution" in data and isinstance(data["base_resolution"], (list, tuple)):
-                        self.roi_base_resolution = (int(data["base_resolution"][0]), int(data["base_resolution"][1]))
-                    else:
-                        # Auto-detect: if any coordinate x > 640 or y > 480 -> 1080p, else 640p
-                        max_x = 0
-                        max_y = 0
-                        for k, v in data.items():
-                            if isinstance(v, list) and not k.startswith("_") and k != "base_resolution":
-                                for pt in v:
-                                    if len(pt) >= 2:
-                                        max_x = max(max_x, pt[0])
-                                        max_y = max(max_y, pt[1])
-                        if max_x > 640 or max_y > 480:
-                            self.roi_base_resolution = (1920, 1080)
-                        else:
-                            self.roi_base_resolution = (640, 480)
-
-                    self.roi_zones = {
-                        k: v for k, v in data.items()
-                        if isinstance(v, list) and not k.startswith("_") and k != "base_resolution"
-                    }
+            base_res, zones, lines = load_roi_data(self.roi_path)
+            self.roi_base_resolution = base_res
+            self.roi_zones = zones
+            self.roi_lines = lines
 
     def start(self) -> "CameraPipeline":
         """Start capture and processing pipeline in background thread."""
@@ -422,7 +418,7 @@ class CameraPipeline:
         """Associate tracked objects (tas, ransel, koper, boks, paket, dll.) with nearest/contacting actor."""
         monitored_objects = [
             t for t in active_tracks
-            if t.class_label != "person"
+            if t.class_label not in ("person", "car", "bus", "truck", "vehicle")
             and (getattr(t, "is_stationary", False) or getattr(t, "frame_count", 1) <= 15)
         ]
         if not monitored_objects:
@@ -608,6 +604,7 @@ class CameraPipeline:
                         is_connected=False,
                         faces=[],
                         camera_name=self.config.get("name", self.camera_id),
+                        lines=getattr(self, "roi_lines", {}),
                     )
                     with self._display_lock:
                         self._latest_display_frame = placeholder
@@ -677,7 +674,7 @@ class CameraPipeline:
 
             # 1. YOLO11 Nano Object Detection on 640x360 inference frame with Staggered Round-Robin
             has_moving_track = any(
-                getattr(t, "class_label", "") == "person" and getattr(t, "is_active_this_frame", False)
+                getattr(t, "class_label", "") in ("person", "car", "bus", "truck") and getattr(t, "is_active_this_frame", False)
                 for t in self.tracker.objects.values()
             )
             has_moving_activity = (
@@ -708,11 +705,6 @@ class CameraPipeline:
             self._yolo_frame_index += 1
             yolo_results = self._cached_yolo_results
             person_boxes = [bbox for bbox, _, _, _, cid, _ in yolo_results if cid == 0]
-            vehicle_boxes = [
-                (bbox, centroid, cname)
-                for bbox, centroid, _, _, cid, cname in yolo_results
-                if cid in (2, 5, 7)
-            ]
             # Tracker coasting: also include active person tracks to bridge non-inferenced frames seamlessly
             for trk in self.tracker.objects.values():
                 if trk.class_label == "person" and getattr(trk, "is_active_this_frame", False):
@@ -927,6 +919,31 @@ class CameraPipeline:
                             formatted_detections.append(
                                 (bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf), "yolo")
                             )
+                elif cid in (2, 5, 7):  # vehicles: car, bus, truck
+                    v_w, v_h = bbox[2], bbox[3]
+                    area = float(v_w * v_h)
+                    if v_w < 25 or v_h < 20 or area < 600:
+                        continue
+
+                    # Dynamic vehicle zone matching: evaluate bottom-center or centroid with 15px step margin
+                    bottom_center = (centroid[0], bbox[1] + bbox[3] - 2)
+                    matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
+                        bottom_center, margin_px=15.0
+                    )
+                    if matched_zone is None:
+                        matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
+                            centroid, margin_px=15.0
+                        )
+
+                    if matched_zone is not None:
+                        formatted_detections.append(
+                            (bbox, centroid, matched_zone, area, cname, edge_dist, float(conf), "yolo")
+                        )
+                    else:
+                        dist_to_nearest = self.zone_filter.get_distance_to_nearest_zone(bottom_center)
+                        formatted_detections.append(
+                            (bbox, centroid, "outside_zone", area, cname, dist_to_nearest, float(conf), "yolo")
+                        )
 
             # 3. Tracking & Dwell Classification
             active_tracks, purged_tracks = self.tracker.update(formatted_detections, timestamp=now)
@@ -995,10 +1012,11 @@ class CameraPipeline:
                 self._face_burst_until_time = max(self._face_burst_until_time, now + 3.0)
                 logger.info(f"[{self.camera_id}] Dynamic Face Burst activated for 3.0s (interval=1) due to bag interaction.")
 
-            # 2a. Periodic 5-second terminal dwell time logging for stationary bags
+            # 2a. Periodic 5-second terminal dwell time logging for stationary bags and vehicles
             if (now - self._last_dwell_log_time) >= 5.0:
                 for track in active_tracks:
                     is_bag = getattr(track, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
+                    is_veh = getattr(track, "class_label", "") in ("car", "bus", "truck")
                     if is_bag and getattr(track, "is_stationary", False):
                         z_info = zones_cfg.get(track.zone_id, {})
                         if not z_info and track.zone_id.replace("__", "_") in zones_cfg:
@@ -1020,7 +1038,67 @@ class CameraPipeline:
                         log_msg = f"[TRACKER] ID: {track.track_id} | Dwell: {cur_str} / {max_str} | Status: {status_str}"
                         print(log_msg)
                         logger.info(log_msg)
+                    elif is_veh and getattr(track, "is_stationary", False):
+                        z_info = zones_cfg.get(track.zone_id, {})
+                        if not z_info and track.zone_id.replace("__", "_") in zones_cfg:
+                            z_info = zones_cfg[track.zone_id.replace("__", "_")]
+                        dwell_max = float(z_info.get("dwell_threshold_sec", 60.0))
+                        max_str = f"{dwell_max:.0f}s" if dwell_max < 120 else f"{dwell_max / 60.0:.0f}m"
+                        cur_str = f"{track.dwell_duration:.0f}s" if track.dwell_duration < 120 else f"{track.dwell_duration / 60.0:.1f}m"
+                        log_msg = f"[TRACKER] VEHICLE #{track.track_id} ({track.class_label.upper()}) | Dwell: {cur_str} / {max_str} | Zone: '{z_info.get('name', track.zone_id)}'"
+                        print(log_msg)
+                        logger.info(log_msg)
                 self._last_dwell_log_time = now
+
+            # 2b. Evaluate Virtual Tripwire Line Crossings (Instant Zero Dwell Time Alert)
+            if hasattr(self, "tripwire_engine") and self.tripwire_engine.lines:
+                tripwire_crossings = self.tripwire_engine.update(active_tracks, timestamp=now)
+                for cross_ev in tripwire_crossings:
+                    t_track = cross_ev.track
+                    c_label = getattr(t_track, "class_label", "object")
+                    trigger_iso = datetime.datetime.now().isoformat()
+                    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    alert_msg = (
+                        f"[TRIPWIRE ALERT] Line Breach: {cross_ev.line_name} by {c_label.upper()} #{t_track.track_id} "
+                        f"(Direction: {cross_ev.direction}) on '{self.config.get('name', self.camera_id)}'"
+                    )
+                    print(f"\n{alert_msg}\n")
+                    logger.warning(alert_msg)
+
+                    # 1. Local audio alarm chime
+                    self.audio_worker.request_alarm()
+
+                    # 2. SQLite Event Log (event_type="LINE_CROSSING", dwell_duration=0.0)
+                    try:
+                        log_event(
+                            camera_id=self.camera_id,
+                            zone_id=cross_ev.line_id,
+                            track_id=t_track.track_id,
+                            event_type="LINE_CROSSING",
+                            dwell_duration=0.0,
+                            start_time=trigger_iso,
+                            trigger_time=trigger_iso,
+                        )
+                    except Exception as e:
+                        logger.error(f"[{self.camera_id}] Error logging tripwire DB event: {e}")
+
+                    # 3. Telegram Instant Alert
+                    try:
+                        self.telegram_notifier.dispatch_tripwire_alert(
+                            camera_id=self.camera_id,
+                            line_id=cross_ev.line_id,
+                            line_name=cross_ev.line_name,
+                            track_id=t_track.track_id,
+                            class_label=c_label,
+                            direction=cross_ev.direction,
+                            timestamp_str=timestamp_str,
+                            frame=raw_clean_frame,
+                            overview_frame=display_frame,
+                            bbox=getattr(t_track, "bbox", None),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{self.camera_id}] Error dispatching tripwire telegram alert: {e}")
 
             # 3. Handle Violation Triggers & Exit Zone Auto-Reset
             pending_telegram_alerts = []
@@ -1052,33 +1130,7 @@ class CameraPipeline:
                                     self._resolve_event_async(eid, zone_name="Jalur Aman Pejalan Kaki", track_id=track.track_id, dwell_duration=track.outside_walkway_duration)
                             continue
 
-                        # 1b. Person is OUTSIDE safe walkway. Evaluate Vehicle Proximity Latch
-                        min_veh_dist = 999.0
-                        for (vx, vy, vvw, vvh), (vcx, vcy), vcname in vehicle_boxes:
-                            clamped_x = max(vx, min(cx, vx + vvw))
-                            clamped_y = max(vy, min(foot_y, vy + vvh))
-                            dist = float(np.hypot(cx - clamped_x, foot_y - clamped_y))
-                            if dist < min_veh_dist:
-                                min_veh_dist = dist
-
-                        track.nearest_vehicle_dist = min_veh_dist
-
-                        # If near vehicle (overlap or within proximity threshold px):
-                        if min_veh_dist <= self.vehicle_proximity_px:
-                            track.is_near_vehicle = True
-                            track.walkway_status = "NEAR_VEHICLE"
-                            track.outside_walkway_start = now
-                            track.outside_walkway_duration = 0.0
-                            track.dwell_duration = 0.0
-                            if track.is_triggered:
-                                track.is_triggered = False
-                                track.alert_sent = False
-                                eid = self.active_db_events.pop(track.track_id, track.db_event_id)
-                                if eid is not None:
-                                    self._resolve_event_async(eid, zone_name="Aktivitas Kendaraan", track_id=track.track_id, dwell_duration=track.outside_walkway_duration)
-                            continue
-
-                        # 1c. Person is OUTSIDE safe walkway and FAR from any vehicle
+                        # 1b. Person is OUTSIDE safe walkway (independent of vehicles)
                         track.is_near_vehicle = False
                         if track.outside_walkway_start <= 0.0:
                             track.outside_walkway_start = now
@@ -1123,17 +1175,6 @@ class CameraPipeline:
 
                                 if not track.alert_sent:
                                     track.alert_sent = True
-                                    try:
-                                        self.telegram_notifier.dispatch_composite_alert(
-                                            camera_id=self.camera_id,
-                                            zone_id="outside_walkway",
-                                            track=track,
-                                            stage="VIOLATION",
-                                            frame=raw_clean_frame,
-                                            zone_name=f"{self.config.get('name', self.camera_id)} (Luar Jalur Aman)",
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"[Telegram] Error sending walkway alert: {e}")
                         continue
                     else:
                         if track.is_triggered:
@@ -1144,6 +1185,114 @@ class CameraPipeline:
                             if eid is not None:
                                 self._resolve_event_async(eid)
                         continue
+
+                # Persons never trigger baggage or parking dwell violations on traffic cameras
+                if getattr(track, "class_label", "") == "person":
+                    if track.is_triggered:
+                        track.is_triggered = False
+                        track.alert_sent = False
+                        track.dwell_duration = 0.0
+                        eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                        if eid is not None:
+                            self._resolve_event_async(eid)
+                    continue
+
+                # 1b. VEHICLE HANDLING (car, bus, truck): Parking / Obstruction Dwell Monitoring
+                if getattr(track, "class_label", "") in ("car", "bus", "truck"):
+                    zone_info = zones_cfg.get(track.zone_id, {})
+                    if not zone_info and track.zone_id.replace("__", "_") in zones_cfg:
+                        zone_info = zones_cfg[track.zone_id.replace("__", "_")]
+
+                    # Check if current zone monitors vehicle classes
+                    zone_target_classes = zone_info.get("target_classes", [])
+                    is_vehicle_zone = any(cls in zone_target_classes for cls in ("car", "bus", "truck")) or (self.camera_id in ("cam_02", "cam_03", "cam_04") and track.zone_id and "outside" not in track.zone_id and "unassigned" not in track.zone_id)
+
+                    if not is_vehicle_zone or not track.zone_id or "outside" in track.zone_id or "unassigned" in track.zone_id:
+                        if track.is_triggered:
+                            track.is_triggered = False
+                            track.alert_sent = False
+                            track.dwell_duration = 0.0
+                            eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                            if eid is not None:
+                                z_name = zone_info.get("name", track.zone_id)
+                                self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration)
+                        continue
+
+                    # Set dwell threshold from zone config (e.g. 60s for zone_1, 1800s for zone_2 and zone_3)
+                    dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", 3600.0)))
+                    track.dwell_threshold = dwell_thresh
+
+                    # Check stationary vehicle status
+                    if getattr(track, "is_stationary", False):
+                        if track.dwell_duration >= dwell_thresh and not track.is_triggered:
+                            track.is_triggered = True
+                            self.audio_worker.request_alarm()
+
+                            alert_label = zone_info.get("alert_label", "PARKIR / HALANGAN KENDARAAN")
+                            zone_name = zone_info.get("name", track.zone_id)
+                            dwell_min = track.dwell_duration / 60.0
+                            alert_msg = (
+                                f"[{self.camera_id}] [ALERT KENDARAAN] {track.class_label.upper()} #{track.track_id} "
+                                f"{alert_label} di '{zone_name}' (Durasi: {dwell_min:.1f}m >= {dwell_thresh/60.0:.1f}m)"
+                            )
+                            print(f"\n{alert_msg}\n")
+                            logger.warning(alert_msg)
+
+                            # Snapshot filenames
+                            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            veh_filename = f"ALERT_VEHICLE_{self.camera_id}_{timestamp_str}.jpg"
+                            storage_path = Path(__file__).resolve().parent / "storage" / veh_filename
+                            reports_path = Path(__file__).resolve().parent / "reports" / veh_filename
+                            filepath = self.snapshots_dir / f"{timestamp_str}_{track.zone_id}_{track.track_id}.jpg"
+
+                            # Immediate synchronous SQLite event registration
+                            try:
+                                event_type = "VEHICLE_OBSTRUCTION"
+                                event_id = log_event(
+                                    camera_id=self.camera_id,
+                                    zone_id=track.zone_id,
+                                    track_id=track.track_id,
+                                    event_type=event_type,
+                                    dwell_duration=track.dwell_duration,
+                                    owner_name=f"{track.class_label.upper()} #{track.track_id}",
+                                    owner_confidence=float(track.confidence),
+                                    notes=f"{alert_label} ({dwell_min:.1f}m)",
+                                )
+                                track.db_event_id = event_id
+                                self.active_db_events[track.track_id] = event_id
+                            except Exception as e:
+                                logger.error(f"[{self.camera_id}] Failed to log vehicle obstruction event: {e}")
+
+                            # Stage for Telegram dispatch and snapshot save with VisualHUD annotated display_frame
+                            if not getattr(track, "alert_sent", False):
+                                track.alert_sent = True
+                                pending_telegram_alerts.append({
+                                    "type": "vehicle",
+                                    "track": track,
+                                    "zone_id": track.zone_id,
+                                    "zone_name": zone_name,
+                                    "alert_label": alert_label,
+                                    "dwell_duration": track.dwell_duration,
+                                    "timestamp_str": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "bbox": list(track.bbox),
+                                    "storage_path": storage_path,
+                                    "reports_path": reports_path,
+                                    "filepath": filepath,
+                                })
+                        elif track.is_triggered:
+                            # Pulse alarm while still in alert state
+                            self.audio_worker.request_alarm()
+                    else:
+                        # Moving vehicle -> if previously triggered and now moving/cleared, resolve event
+                        if track.is_triggered:
+                            track.is_triggered = False
+                            track.alert_sent = False
+                            track.dwell_duration = 0.0
+                            eid = self.active_db_events.pop(track.track_id, track.db_event_id)
+                            if eid is not None:
+                                z_name = zone_info.get("name", track.zone_id)
+                                self._resolve_event_async(eid, zone_name=z_name, track_id=track.track_id, dwell_duration=track.dwell_duration)
+                    continue
 
                 # 2. EXIT ZONE / NON-UNATTENDED ZONE RESET:
                 # If track is not in a valid unattended monitoring zone (e.g. corridor or outside), immediately disarm and clear
@@ -1190,7 +1339,7 @@ class CameraPipeline:
                     dwell_thresh = float(zone_info.get("dwell_threshold_sec", zone_info.get("dwell_time_threshold", zone_info.get("unattended_threshold", 3600.0))))
 
                     # Multi-Stage Alert Escalation:
-                    # Stage 1 (Warning 50% Dwell)
+                    # Stage 1 (Warning 50% Dwell) Local Log
                     if track.dwell_duration >= (dwell_thresh * 0.50) and not getattr(track, "warning_alerted", False):
                         track.warning_alerted = True
                         track.is_warning = True
@@ -1198,19 +1347,8 @@ class CameraPipeline:
                             f"[{self.camera_id}] STAGE 1 WARNING: {track.class_label.upper()} #{track.track_id} "
                             f"mencapai 50% dwell ({track.dwell_duration / 60.0:.1f}m/{dwell_thresh / 60.0:.1f}m) di '{zone_info.get('name', track.zone_id)}'"
                         )
-                        try:
-                            self.telegram_notifier.dispatch_composite_alert(
-                                camera_id=self.camera_id,
-                                zone_id=track.zone_id,
-                                track=track,
-                                stage="WARNING",
-                                frame=raw_clean_frame,
-                                zone_name=zone_info.get("name", track.zone_id),
-                            )
-                        except Exception as e:
-                            logger.warning(f"[Telegram] Error sending warning composite alert: {e}")
 
-                    # Stage 2 (Pre-Alarm 85% Dwell) Local Chime & Telegram Notification
+                    # Stage 2 (Pre-Alarm 85% Dwell) Local Chime
                     if track.dwell_duration >= (dwell_thresh * 0.85) and not getattr(track, "pre_alarm_alerted", False):
                         self.audio_worker.request_pre_alarm_chime()
                         track.pre_alarm_alerted = True
@@ -1219,17 +1357,6 @@ class CameraPipeline:
                             f"[{self.camera_id}] STAGE 2 PRE-ALARM: {track.class_label.upper()} #{track.track_id} "
                             f"mencapai 85% dwell ({track.dwell_duration / 60.0:.1f}m/{dwell_thresh / 60.0:.1f}m) di '{zone_info.get('name', track.zone_id)}'"
                         )
-                        try:
-                            self.telegram_notifier.dispatch_composite_alert(
-                                camera_id=self.camera_id,
-                                zone_id=track.zone_id,
-                                track=track,
-                                stage="PRE_ALARM",
-                                frame=raw_clean_frame,
-                                zone_name=zone_info.get("name", track.zone_id),
-                            )
-                        except Exception as e:
-                            logger.warning(f"[Telegram] Error sending pre-alarm composite alert: {e}")
 
                     if track.dwell_duration >= dwell_thresh and not track.is_triggered:
                         track.is_triggered = True
@@ -1723,6 +1850,8 @@ class CameraPipeline:
                 faces=self._cached_faces,
                 zone_base_resolution=self.roi_base_resolution,
                 camera_name=self.config.get("name", self.camera_id),
+                lines=getattr(self, "roi_lines", {}),
+                flashing_lines=self.tripwire_engine.get_flashing_lines(now=now) if hasattr(self, "tripwire_engine") else None,
             )
 
             # Process pending alerts with synchronized VisualHUD annotated display_frame
@@ -1734,33 +1863,38 @@ class CameraPipeline:
                     self.io_executor.submit(cv2.imwrite, str(alert["reports_path"]), annotated_snapshot)
                     self.io_executor.submit(cv2.imwrite, str(alert["filepath"]), annotated_snapshot)
 
-                    # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
-                    try:
-                        self.telegram_notifier.dispatch_composite_alert(
-                            camera_id=self.camera_id,
-                            zone_id=alert["zone_id"],
-                            track=alert["track"],
-                            stage="BREACH",
-                            frame=raw_clean_frame,
-                            zone_name=alert["zone_name"],
-                            timestamp_str=alert["timestamp_str"],
-                        )
-                        self.telegram_notifier.dispatch_alert(
-                            camera_id=self.camera_id,
-                            zone_id=alert["zone_id"],
-                            track_id=alert["track"].track_id,
-                            dwell_duration=alert["dwell_duration"],
-                            timestamp_str=alert["timestamp_str"],
-                            frame=raw_clean_frame,
-                            overview_frame=annotated_snapshot,
-                            bbox=alert["bbox"],
-                            zone_name=alert["zone_name"],
-                            zones=self.roi_zones,
-                            owner_name=alert.get("owner_name"),
-                            owner_face_crop=alert.get("owner_face_crop"),
-                        )
-                    except Exception as e:
-                        logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
+                    if alert.get("type") == "vehicle":
+                        try:
+                            self.telegram_notifier.dispatch_vehicle_alert(
+                                camera_id=self.camera_id,
+                                zone_id=alert["zone_id"],
+                                track=alert["track"],
+                                alert_label=alert.get("alert_label", "PARKIR MELEBIHI BATAS"),
+                                frame=raw_clean_frame,
+                                zone_name=alert["zone_name"],
+                                overview_frame=annotated_snapshot,
+                                timestamp_str=alert["timestamp_str"],
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Telegram] Failed dispatching vehicle alert ({e}), skipping alert.")
+                    else:
+                        # Non-blocking Telegram photo alert dispatch (Single dispatch & anti-spam guard)
+                        try:
+                            self.telegram_notifier.dispatch_alert(
+                                camera_id=self.camera_id,
+                                zone_id=alert["zone_id"],
+                                track_id=alert["track"].track_id,
+                                dwell_duration=alert["dwell_duration"],
+                                timestamp_str=alert["timestamp_str"],
+                                frame=raw_clean_frame,
+                                overview_frame=annotated_snapshot,
+                                bbox=alert["bbox"],
+                                zone_name=alert["zone_name"],
+                                zones=self.roi_zones,
+                                class_label=getattr(alert["track"], "class_label", "Objek"),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Telegram] Credentials not configured or dispatch error ({e}), skipping alert.")
 
             with self._display_lock:
                 self._latest_display_frame = display_frame

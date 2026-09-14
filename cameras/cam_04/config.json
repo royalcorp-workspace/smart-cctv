@@ -4,7 +4,7 @@
   "source": "rtsp://${CAM04_USER}:${CAM04_PASS}@${CAM04_IP}:${CAM04_PORT}/Streaming/Channels/${CAM04_CHANNEL}",
   "target_resolution": null,
   "walkway_compliance": {
-    "enabled": true,
+    "enabled": false,
     "safe_zone_id": "zone_1_koridor",
     "dwell_threshold_sec": 35.0,
     "vehicle_proximity_px": 75.0,
@@ -17,17 +17,25 @@
   "detector": {
     "enabled_classes": [
       "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "target_classes": [
+      "person",
+      "car",
+      "bus",
+      "truck",
       "backpack",
       "handbag",
       "suitcase"
     ],
     "confidence_threshold": 0.22,
     "base_conf": 0.22,
+    "vehicle_conf": 0.28,
     "bag_conf": 0.18,
     "stride": 2
   },
@@ -68,25 +76,32 @@
   },
   "zones": {
     "zone_1_koridor": {
-      "name": "Jalur Timbangan Truk (Walkway)",
+      "name": "Zebra Cross Timbangan",
+      "target_classes": [
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 600.0,
+      "alert_label": "HALANGAN ZEBRA CROSS TIMBANGAN",
       "detect_unattended": false,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
+      "dwell_time_threshold": 600.0,
+      "unattended_threshold": 600.0,
       "min_contour_area": 300
     },
     "zone_2_transit": {
-      "name": "Area Timbangan Truk",
-      "detect_unattended": true,
-      "dwell_threshold_sec": 3600,
-      "dwell_time_threshold": 3600.0,
-      "unattended_threshold": 3600.0,
-      "min_contour_area": 250,
+      "name": "Area Parkir Antrean Timbangan",
       "target_classes": [
-        "backpack",
-        "handbag",
-        "suitcase"
-      ]
+        "car",
+        "bus",
+        "truck"
+      ],
+      "dwell_threshold_sec": 1800.0,
+      "alert_label": "ANTREAN TIMBANGAN MELEBIHI BATAS",
+      "detect_unattended": true,
+      "dwell_time_threshold": 1800.0,
+      "unattended_threshold": 1800.0,
+      "min_contour_area": 250
     }
   }
 }
