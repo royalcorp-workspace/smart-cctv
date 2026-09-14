@@ -176,8 +176,48 @@ def test_moving_vehicle_zone_change_resets_dwell():
     print("PASS: Genuine vehicle movement properly updates zone and resets dwell timer.")
 
 
+def test_nested_cargo_vehicle_on_truck_suppression():
+    """Verify that cargo/tarp detections on top of truck bodies are suppressed."""
+    from main import CameraPipeline
+
+    # Scenario from user screenshot:
+    # Truck: [160, 150, 280, 200] -> area 56,000, top=150, bottom=350
+    # Phantom Car (tarp on cab): [160, 130, 180, 70] -> area 12,600, top=130, bottom=200
+    # Candidate bottom (200) is well above parent top + 0.70*height (150 + 140 = 290)
+    # Intersection: [160, 150, 180, 50] -> area 9,000 / 12,600 = 0.71 (>= 0.60)
+    truck_box = (160, 150, 280, 200)
+    phantom_car_box = (160, 130, 180, 70)
+
+    is_suppressed = CameraPipeline._is_nested_cargo_vehicle(
+        phantom_car_box, [truck_box], iof_threshold=0.60
+    )
+    assert is_suppressed is True, "Phantom car (tarp on truck cab) MUST be suppressed!"
+
+    # Scenario 2: Real car driving beside the truck
+    # Car: [50, 170, 70, 60] -> completely outside truck
+    beside_car_box = (50, 170, 70, 60)
+    assert CameraPipeline._is_nested_cargo_vehicle(beside_car_box, [truck_box]) is False, (
+        "Real car beside truck must NOT be suppressed!"
+    )
+
+    # Scenario 3: Real car driving behind truck with partial overlap, but wheels on ground
+    # Car: [170, 280, 80, 75] -> bottom = 355 (> parent top + 0.70*parent_height = 290)
+    ground_car_box = (170, 280, 80, 75)
+    assert CameraPipeline._is_nested_cargo_vehicle(ground_car_box, [truck_box]) is False, (
+        "Ground-level vehicle with wheels on asphalt must NOT be suppressed!"
+    )
+
+    # Scenario 4: Car on road without any truck
+    assert CameraPipeline._is_nested_cargo_vehicle(beside_car_box, []) is False, (
+        "Standalone car must NOT be suppressed!"
+    )
+
+    print("PASS: Nested cargo vehicle (tarp on truck) suppression verified.")
+
+
 if __name__ == "__main__":
     test_multi_point_wheel_probe_and_priority()
     test_stationary_zone_lock_anti_flapping()
     test_moving_vehicle_zone_change_resets_dwell()
+    test_nested_cargo_vehicle_on_truck_suppression()
     print("\nALL VEHICLE MULTI-WHEEL & PRIORITY TESTS PASSED SUCCESSFULLY!")

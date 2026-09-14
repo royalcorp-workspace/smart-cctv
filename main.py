@@ -580,6 +580,42 @@ class CameraPipeline:
 
         return False
 
+    @staticmethod
+    def _is_nested_cargo_vehicle(
+        veh_box: Tuple[int, int, int, int],
+        parent_boxes: List[Tuple[int, int, int, int]],
+        iof_threshold: float = 0.60,
+    ) -> bool:
+        """Check if candidate vehicle bbox is resting atop a parent truck/bus body (cargo/tarp)."""
+        bx, by, bw, bh = veh_box
+        cand_area = float(bw * bh)
+        if cand_area <= 0:
+            return False
+
+        cand_bottom = by + bh
+
+        for (px, py, pw, ph) in parent_boxes:
+            p_area = float(pw * ph)
+            # Parent vehicle must be significantly larger (at least 1.8x area of candidate)
+            if p_area < 1.8 * cand_area:
+                continue
+
+            # Compute intersection over foreground (candidate)
+            ix1 = max(bx, px)
+            iy1 = max(by, py)
+            ix2 = min(bx + bw, px + pw)
+            iy2 = min(by + bh, py + ph)
+
+            if ix2 > ix1 and iy2 > iy1:
+                intersection = float((ix2 - ix1) * (iy2 - iy1))
+                iof = intersection / cand_area
+                # Floating condition: candidate bottom edge is in the upper 70% of the parent body
+                # (i.e. resting on top of the cargo bed/roof rack, not touching ground where wheels are)
+                if iof >= iof_threshold and cand_bottom <= (py + 0.70 * ph):
+                    return True
+
+        return False
+
     def _run_pipeline(self) -> None:
         """Continuous camera frame processing loop."""
         last_valid_frame_time = time.time()
@@ -854,6 +890,13 @@ class CameraPipeline:
                     ((bx, by, bw, bh), (bcx, bcy), bzone, area, "tas", 20.0, 0.95, "subtractor")
                 )
 
+            # Gather truck/bus bounding boxes (both from current YOLO frame and active tracker)
+            # to suppress phantom cargo vehicles (e.g. rolled tarp / luggage rack detected as 'car' atop truck cab)
+            truck_bus_boxes = [d[0] for d in yolo_results if d[4] in (5, 7)]
+            for trk in self.tracker.objects.values():
+                if trk.class_label in ("truck", "bus") and hasattr(trk, "bbox") and trk.bbox:
+                    truck_bus_boxes.append(trk.bbox)
+
             # 2b. Add YOLO detections (Persons and valid non-carried bags)
             for bbox, centroid, ref_point, conf, cid, cname in yolo_results:
                 is_bag = cid in (24, 26, 28)
@@ -928,6 +971,13 @@ class CameraPipeline:
                                 (bbox, centroid, matched_zone, area, "tas", edge_dist, float(conf), "yolo")
                             )
                 elif cid in (2, 5, 7):  # vehicles: car, bus, truck
+                    # Filter phantom / nested cargo vehicle (e.g. rolled tarp / cargo rack on truck cab)
+                    if cid == 2 and self._is_nested_cargo_vehicle(bbox, truck_bus_boxes, iof_threshold=0.60):
+                        logger.debug(
+                            f"[{self.camera_id}] Suppressed nested cargo vehicle on truck/bus: bbox={bbox}"
+                        )
+                        continue
+
                     v_w, v_h = bbox[2], bbox[3]
                     area = float(v_w * v_h)
                     if v_w < 25 or v_h < 20 or area < 600:
