@@ -1011,7 +1011,7 @@ class CameraPipeline:
             active_tracks, purged_tracks = self.tracker.update(formatted_detections, timestamp=now)
             self._associate_bag_owners(active_tracks, infer_frame, raw_clean_frame)
 
-            # Record retrieved / departing stationary bags for ghost tile suppression
+            # Record retrieved / departing stationary bags for ghost tile suppression & auto-resolve purged events
             for purged in purged_tracks:
                 is_purged_bag = getattr(purged, "class_label", "") in ("tas", "backpack", "handbag", "suitcase")
                 if getattr(purged, "is_retrieved", False) or (is_purged_bag and getattr(purged, "is_stationary", False)):
@@ -1022,6 +1022,10 @@ class CameraPipeline:
                         "zone_id": purged.zone_id,
                         "time": now,
                     }
+                eid = self.active_db_events.pop(purged.track_id, getattr(purged, "db_event_id", None))
+                if eid is not None:
+                    z_name = self.config.get("zones", {}).get(purged.zone_id, {}).get("name", purged.zone_id)
+                    self._resolve_event_async(eid, zone_name=z_name, track_id=purged.track_id, dwell_duration=purged.dwell_duration)
 
             zones_cfg = self.config.get("zones", {})
 
@@ -2095,7 +2099,10 @@ def discover_cameras(base_dir: Path) -> List[Path]:
     cam_root = base_dir / "cameras"
     if not cam_root.exists():
         return []
-    return [p for p in cam_root.iterdir() if p.is_dir() and (p / "config.json").exists()]
+    return [
+        p for p in sorted(cam_root.iterdir())
+        if p.is_dir() and not p.name.startswith((".", "_")) and (p / "config.json").exists()
+    ]
 
 
 def main() -> None:

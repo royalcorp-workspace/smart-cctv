@@ -194,8 +194,12 @@ class TrackedObject:
         # Hold stationary objects and bags
         # Stationary Bag Latching: keep confirmed stationary bag rendering up to 600 frames (~45s)
         is_bag = self.class_label in ("tas", "backpack", "handbag", "suitcase")
-        if is_bag or self.is_stationary:
+        is_vehicle = self.class_label in ("car", "bus", "truck")
+        if is_bag:
             return self.missed_frames <= 600
+        if is_vehicle and self.is_stationary:
+            # Stationary Vehicle Latching: hold rendering for ~5s (~65 frames at 13fps)
+            return self.missed_frames <= 65
 
         return self.edge_distance >= 8.0 and self.missed_frames <= 20
 
@@ -1098,10 +1102,15 @@ class CentroidTracker:
                 stale_ids.append(obj_id)
                 continue
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
-            if is_bag or obj.is_stationary:
+            is_vehicle = obj.class_label in ("car", "bus", "truck")
+            if is_bag:
                 # Stationary Bag Latching: hold confirmed stationary bag for up to 600 frames (~45s)
                 max_frames = getattr(self, "stationary_max_age_frames", 600)
                 max_sec = getattr(self, "stationary_max_disappeared_sec", 45.0)
+            elif is_vehicle and obj.is_stationary:
+                # Stationary Vehicle: purge after ~5s unobserved (~65 frames at 13fps)
+                max_frames = 65
+                max_sec = 5.0
             else:
                 max_frames = self.max_age_frames
                 max_sec = self.max_disappeared_sec
@@ -1114,9 +1123,17 @@ class CentroidTracker:
             obj = self.objects[obj_id]
             is_retrieved = getattr(obj, "is_retrieved", False)
             is_bag = obj.class_label in ("tas", "backpack", "handbag", "suitcase")
+            is_vehicle = obj.class_label in ("car", "bus", "truck")
             elapsed_sec = now - obj.last_seen
-            max_limit_frames = getattr(self, "stationary_max_age_frames", 600) if (is_bag or obj.is_stationary) else self.max_age_frames
-            max_limit_sec = getattr(self, "stationary_max_disappeared_sec", 45.0) if (is_bag or obj.is_stationary) else self.max_disappeared_sec
+            if is_bag:
+                max_limit_frames = getattr(self, "stationary_max_age_frames", 600)
+                max_limit_sec = getattr(self, "stationary_max_disappeared_sec", 45.0)
+            elif is_vehicle and obj.is_stationary:
+                max_limit_frames = 65
+                max_limit_sec = 5.0
+            else:
+                max_limit_frames = self.max_age_frames
+                max_limit_sec = self.max_disappeared_sec
 
             if not is_retrieved:
                 if obj.class_label == "person":

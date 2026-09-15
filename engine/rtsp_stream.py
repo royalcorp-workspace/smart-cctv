@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
@@ -59,6 +60,21 @@ class ThreadedCapture:
         """Initialize OpenCV VideoCapture with TCP transport and minimal buffer."""
         if self._cap is not None:
             self._cap.release()
+
+        # Validate RTSP URI before passing to FFmpeg/OpenCV to avoid parser errors
+        if isinstance(self.source, str) and self.source.startswith("rtsp://"):
+            try:
+                parsed = urllib.parse.urlparse(self.source)
+                if not parsed.hostname or parsed.netloc.endswith(":"):
+                    logger.warning(
+                        f"RTSP source URL '{self.source}' is invalid or missing hostname/port. Skipping connection."
+                    )
+                    self.is_connected = False
+                    return False
+            except Exception as e:
+                logger.warning(f"Failed parsing RTSP source URL '{self.source}': {e}. Skipping connection.")
+                self.is_connected = False
+                return False
 
         backend = cv2.CAP_FFMPEG if isinstance(self.source, str) and self.source.startswith("rtsp://") else cv2.CAP_ANY
         self._cap = cv2.VideoCapture(self.source, backend)
