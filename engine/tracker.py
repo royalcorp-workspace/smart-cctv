@@ -1,7 +1,7 @@
 """Centroid tracking engine with dwell calculation, deregistration hooks, and flicker tolerance."""
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
@@ -106,6 +106,7 @@ class TrackedObject:
     nearest_vehicle_dist: float = 999.0
     stationary_frames: int = 0
     anchor_time: float = 0.0
+    label_history: List[Tuple[str, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.associated_face_meta is not None and self.last_owner_info is None:
@@ -116,6 +117,46 @@ class TrackedObject:
             self.associated_face_crop = self.last_owner_info.get("face_crop")
         if self.associated_person_crop is None and self.last_owner_info:
             self.associated_person_crop = self.last_owner_info.get("person_crop")
+        if not self.label_history and self.class_label:
+            self.label_history.append((self.class_label, max(0.1, float(self.confidence))))
+
+    def update_label(self, new_label: str, confidence: float, max_history: int = 20) -> str:
+        """Update label history and return smoothed majority-voted label weighted by confidence."""
+        if not new_label:
+            return self.class_label
+
+        self.label_history.append((new_label, max(0.1, float(confidence))))
+        if len(self.label_history) > max_history:
+            self.label_history = self.label_history[-max_history:]
+
+        VEHICLE_FAMILY = ("car", "bus", "truck")
+        BAG_FAMILY = ("tas", "backpack", "handbag", "suitcase")
+
+        votes: Dict[str, float] = {}
+        for lbl, conf in self.label_history:
+            votes[lbl] = votes.get(lbl, 0.0) + float(conf)
+
+        if not votes:
+            return self.class_label
+
+        # Priority filtering by family to prevent cross-family pollution
+        if any(lbl in VEHICLE_FAMILY for lbl in votes):
+            vehicle_votes = {k: v for k, v in votes.items() if k in VEHICLE_FAMILY}
+            if vehicle_votes:
+                best_label = max(vehicle_votes.items(), key=lambda x: x[1])[0]
+                self.class_label = best_label
+                return best_label
+
+        if any(lbl in BAG_FAMILY for lbl in votes):
+            bag_votes = {k: v for k, v in votes.items() if k in BAG_FAMILY}
+            if bag_votes:
+                best_label = max(bag_votes.items(), key=lambda x: x[1])[0]
+                self.class_label = best_label
+                return best_label
+
+        best_label = max(votes.items(), key=lambda x: x[1])[0]
+        self.class_label = best_label
+        return best_label
 
     @property
     def is_static_artifact(self) -> bool:
@@ -680,12 +721,11 @@ class CentroidTracker:
                         obj.stationary_start = now
                         obj.dwell_duration = 0.0
             elif is_vehicle_obj:
-                # Stationary Vehicle (Parking / Obstruction) Logic:
-                # Vehicle is stationary if centroid shift <= 15 px across consecutive frames.
-                # Dwell time accumulates only if stationary inside a monitored polygon zone.
-                # If moving normally (speed > 15 px/frame), timer resets immediately.
+                # Stationary Vehicle (Parking / Obstruction) Logic with Grace Period & Jitter Guard
+                # Vehicles have larger bounding boxes and natural detection jitter (15-25px).
+                # Jitter guard: still if frame_shift <= 25 px and anchor_shift <= max(45.0, self.anchor_radius_px).
                 anchor_shift = anchor_dist
-                is_physically_still = (frame_shift <= 15.0 and anchor_shift <= 30.0)
+                is_physically_still = (frame_shift <= 25.0 and anchor_shift <= max(45.0, self.anchor_radius_px))
 
                 # ANTI-FLAPPING HYSTERESIS & STATIONARY ZONE LOCK
                 effective_zone = zone_id
@@ -704,6 +744,7 @@ class CentroidTracker:
                 is_in_zone = bool(zone_id and "outside" not in zone_id and "unassigned" not in zone_id)
 
                 if is_in_zone and is_physically_still:
+                    obj.moved_confirmation_frames = 0
                     obj.stationary_frames += 1
                     if obj.stationary_frames >= 4:  # Confirmed stationary after consecutive quiet frames
                         if not obj.is_stationary:
@@ -715,15 +756,42 @@ class CentroidTracker:
                     else:
                         obj.dwell_duration = 0.0
                 else:
-                    # Vehicle is moving normally or outside zone -> reset stationary status & dwell timer
-                    obj.stationary_frames = 0
-                    obj.is_stationary = False
-                    obj.stationary_start = now
-                    obj.anchor_centroid = smoothed_centroid
-                    obj.anchor_bbox = bbox
-                    obj.dwell_duration = 0.0
-                    obj.is_triggered = False
-                    obj.alert_sent = False
+                    # Vehicle is moving normally or outside zone
+                    if obj.is_stationary:
+                        # STICKY STATIONARY WITH GRACE PERIOD:
+                        # Significant displacement: smoothed frame shift > 35px or anchor shift > 45px
+                        # (corresponds to raw detection jump > 50px under alpha=0.70)
+                        is_large_displacement = (frame_shift > 35.0 or anchor_shift > 45.0)
+                        if is_large_displacement:
+                            obj.moved_confirmation_frames += 10
+                        else:
+                            obj.moved_confirmation_frames += 1
+
+                        if obj.moved_confirmation_frames >= 30 or (is_large_displacement and not is_in_zone):
+                            # Genuine displacement confirmed: vehicle moved away
+                            obj.stationary_frames = 0
+                            obj.is_stationary = False
+                            obj.stationary_start = now
+                            obj.anchor_centroid = smoothed_centroid
+                            obj.anchor_bbox = bbox
+                            obj.dwell_duration = 0.0
+                            obj.is_triggered = False
+                            obj.alert_sent = False
+                            obj.moved_confirmation_frames = 0
+                        else:
+                            # Grace period / Sticky Coasting: maintain dwell accumulation during temporary jitter
+                            obj.dwell_duration = now - obj.stationary_start
+                    else:
+                        # Vehicle was never stationary; moving normally
+                        obj.stationary_frames = 0
+                        obj.is_stationary = False
+                        obj.stationary_start = now
+                        obj.anchor_centroid = smoothed_centroid
+                        obj.anchor_bbox = bbox
+                        obj.dwell_duration = 0.0
+                        obj.is_triggered = False
+                        obj.alert_sent = False
+                        obj.moved_confirmation_frames = 0
             else:
                 # Person never triggers dwell violation
                 obj.is_stationary = False
@@ -737,9 +805,9 @@ class CentroidTracker:
                 if getattr(obj, "class_label", "") in ("car", "bus", "truck"):
                     cur_lim = self._get_zone_dwell_limit(obj.zone_id)
                     new_lim = self._get_zone_dwell_limit(zone_id)
-                    has_moved = (frame_shift > 15.0 or anchor_dist > 30.0)
+                    has_moved = (frame_shift > 35.0 or anchor_dist > 50.0)
                     is_stricter_upgrade = (new_lim < cur_lim)
-                    if has_moved or is_stricter_upgrade:
+                    if (has_moved and obj.moved_confirmation_frames >= 10) or is_stricter_upgrade:
                         obj.dwell_duration = 0.0
                         obj.anchor_time = now
                         obj.stationary_start = now
@@ -758,7 +826,7 @@ class CentroidTracker:
             obj.last_occluded_time = 0.0
 
             if det_label is not None:
-                obj.class_label = det_label
+                obj.update_label(det_label, conf)
 
             assigned_rows.add(row)
             assigned_cols.add(col)

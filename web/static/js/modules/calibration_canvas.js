@@ -250,9 +250,12 @@ function setZoneMode(mode) {
    ========================================================================== */
 
 function findVertexNear(nativeX, nativeY, pts, thresholdPx = 32) {
+  const baseW = baseResolution[0] || 1920;
+  const resScale = Math.max(0.38, Math.min(1.0, baseW / 1920.0));
+  const effectiveThreshold = Math.max(14, Math.round(thresholdPx * resScale));
   for (let i = 0; i < pts.length; i++) {
     const d = Math.hypot(pts[i][0] - nativeX, pts[i][1] - nativeY);
-    if (d <= thresholdPx) {
+    if (d <= effectiveThreshold) {
       return i;
     }
   }
@@ -545,6 +548,7 @@ function renderZoneCanvas() {
 
   const baseW = canvas.width;
   const baseH = canvas.height;
+  const resScale = Math.max(0.38, Math.min(1.0, baseW / 1920.0));
 
   // 1. RENDER INACTIVE POLYGONS
   Object.keys(zoneData).forEach((zKey) => {
@@ -558,11 +562,11 @@ function renderZoneCanvas() {
       ctx.lineTo(pts[i][0], pts[i][1]);
     }
     ctx.closePath();
-    ctx.fillStyle = "rgba(148, 163, 184, 0.08)";
+    ctx.fillStyle = "rgba(148, 163, 184, 0.06)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 6]);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.40)";
+    ctx.lineWidth = Math.max(1, Math.round(1.8 * resScale));
+    ctx.setLineDash([Math.round(6 * resScale), Math.round(5 * resScale)]);
     ctx.stroke();
     ctx.setLineDash([]);
   });
@@ -577,8 +581,8 @@ function renderZoneCanvas() {
     ctx.moveTo(ld.p1[0], ld.p1[1]);
     ctx.lineTo(ld.p2[0], ld.p2[1]);
     ctx.strokeStyle = "rgba(6, 182, 212, 0.35)";
-    ctx.lineWidth = 2.5;
-    ctx.setLineDash([6, 6]);
+    ctx.lineWidth = Math.max(1.2, Math.round(2.0 * resScale));
+    ctx.setLineDash([Math.round(5 * resScale), Math.round(5 * resScale)]);
     ctx.stroke();
     ctx.setLineDash([]);
   });
@@ -604,10 +608,10 @@ function renderZoneCanvas() {
     const saveBtn = document.getElementById("btnSaveZones");
     if (valPill) {
       if (selfIntersect) {
-        valPill.textContent = "⚠ Garis Bersilangan";
+        valPill.textContent = "⚠ Bersilangan";
         valPill.className = "glass-validation-pill invalid";
       } else {
-        valPill.textContent = "Poligon Valid";
+        valPill.textContent = "Valid";
         valPill.className = "glass-validation-pill valid";
       }
     }
@@ -625,27 +629,29 @@ function renderZoneCanvas() {
     ctx.fillStyle = colors.fill;
     ctx.fill();
     ctx.strokeStyle = colors.stroke;
-    ctx.lineWidth = selfIntersect ? 4 : 3;
+    ctx.lineWidth = Math.max(1.5, Math.round((selfIntersect ? 3.5 : 2.5) * resScale));
     ctx.stroke();
 
     // Smart Midpoint (+) Ghost Handle
     if (ghostMidpoint !== null && !isMouseDown) {
+      const gRad = Math.max(4, Math.round(7 * resScale));
       ctx.save();
       ctx.beginPath();
-      ctx.arc(ghostMidpoint.x, ghostMidpoint.y, 8, 0, 2 * Math.PI);
+      ctx.arc(ghostMidpoint.x, ghostMidpoint.y, gRad, 0, 2 * Math.PI);
       ctx.fillStyle = colors.stroke;
       ctx.fill();
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * resScale));
       ctx.stroke();
 
+      const gCross = Math.max(2.5, Math.round(3.5 * resScale));
       ctx.beginPath();
-      ctx.moveTo(ghostMidpoint.x - 4, ghostMidpoint.y);
-      ctx.lineTo(ghostMidpoint.x + 4, ghostMidpoint.y);
-      ctx.moveTo(ghostMidpoint.x, ghostMidpoint.y - 4);
-      ctx.lineTo(ghostMidpoint.x, ghostMidpoint.y + 4);
+      ctx.moveTo(ghostMidpoint.x - gCross, ghostMidpoint.y);
+      ctx.lineTo(ghostMidpoint.x + gCross, ghostMidpoint.y);
+      ctx.moveTo(ghostMidpoint.x, ghostMidpoint.y - gCross);
+      ctx.lineTo(ghostMidpoint.x, ghostMidpoint.y + gCross);
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * resScale));
       ctx.stroke();
       ctx.restore();
     }
@@ -655,12 +661,12 @@ function renderZoneCanvas() {
       const isHover = idx === hoverPointIndex;
       const isSelected = idx === selectedVertexIndex || idx === window.selectedVertexIndex;
       const isDragged = idx === draggedPointIndex;
-      const radius = isSelected ? 11 : isDragged ? 10 : isHover ? 8 : 6;
+      const radius = Math.max(3.5, Math.round((isSelected ? 9 : isDragged ? 8 : isHover ? 6.5 : 5) * resScale));
 
       if (isSelected || isDragged || isHover) {
         ctx.beginPath();
-        ctx.arc(pt[0], pt[1], radius + 6, 0, 2 * Math.PI);
-        ctx.fillStyle = isSelected ? "rgba(239, 68, 68, 0.45)" : colors.glow;
+        ctx.arc(pt[0], pt[1], radius + Math.max(3, Math.round(4 * resScale)), 0, 2 * Math.PI);
+        ctx.fillStyle = isSelected ? "rgba(239, 68, 68, 0.40)" : colors.glow;
         ctx.fill();
       }
 
@@ -669,38 +675,48 @@ function renderZoneCanvas() {
       ctx.fillStyle = isSelected ? "#ef4444" : isDragged ? "#ffffff" : isHover ? colors.handle : colors.stroke;
       ctx.fill();
       ctx.strokeStyle = isSelected ? "#ffffff" : "#000000";
-      ctx.lineWidth = isSelected ? 3 : 2.5;
+      ctx.lineWidth = Math.max(1, Math.round(1.8 * resScale));
       ctx.stroke();
 
-      // Show Point Index Label on Hover or Select
+      // Show Point Index Label on Hover or Select (Sleek micro pill)
       if (isSelected || isHover) {
         ctx.save();
-        ctx.font = "bold 12px -apple-system, sans-serif";
-        const labelText = `P${idx + 1}${isSelected ? " (Terpilih)" : ""}`;
+        const fontSize = Math.max(8, Math.round(11 * resScale));
+        ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+        const labelText = `P${idx + 1}${isSelected ? " (Aktif)" : ""}`;
         const tw = ctx.measureText(labelText).width;
-        ctx.fillStyle = isSelected ? "rgba(239, 68, 68, 0.9)" : "rgba(15, 23, 42, 0.85)";
+        const badgeH = Math.max(12, Math.round(16 * resScale));
+        const badgeW = tw + Math.max(6, Math.round(10 * resScale));
+        const badgeY = pt[1] - radius - badgeH - Math.max(2, Math.round(4 * resScale));
+        ctx.fillStyle = isSelected ? "rgba(239, 68, 68, 0.88)" : "rgba(15, 23, 42, 0.80)";
         ctx.beginPath();
-        ctx.roundRect(pt[0] - tw / 2 - 6, pt[1] - radius - 24, tw + 12, 18, 4);
+        ctx.roundRect(pt[0] - badgeW / 2, badgeY, badgeW, badgeH, 3);
         ctx.fill();
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(labelText, pt[0] - tw / 2, pt[1] - radius - 11);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(labelText, pt[0], badgeY + badgeH / 2);
         ctx.restore();
       }
     });
 
     if (selfIntersect) {
       ctx.save();
-      ctx.font = "bold 16px -apple-system, sans-serif";
-      const warnMsg = "⚠ Poligon Bersilangan! Garis tidak boleh memotong satu sama lain.";
+      const warnFont = Math.max(10, Math.round(14 * resScale));
+      ctx.font = `bold ${warnFont}px -apple-system, sans-serif`;
+      const warnMsg = "⚠ Garis Poligon Bersilangan";
       const wText = ctx.measureText(warnMsg).width;
-      const bx = (baseW - wText) / 2 - 16;
-      const by = baseH - 70;
-      ctx.fillStyle = "rgba(239, 68, 68, 0.92)";
+      const bH = Math.max(20, Math.round(30 * resScale));
+      const bx = (baseW - wText) / 2 - Math.max(8, Math.round(14 * resScale));
+      const by = baseH - bH - Math.max(10, Math.round(18 * resScale));
+      ctx.fillStyle = "rgba(239, 68, 68, 0.90)";
       ctx.beginPath();
-      ctx.roundRect(bx, by, wText + 32, 38, 8);
+      ctx.roundRect(bx, by, wText + Math.max(16, Math.round(28 * resScale)), bH, 5);
       ctx.fill();
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(warnMsg, bx + 16, by + 24);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(warnMsg, baseW / 2, by + bH / 2);
       ctx.restore();
     }
   } else {
@@ -721,8 +737,8 @@ function renderZoneCanvas() {
       ctx.beginPath();
       ctx.moveTo(p1[0], p1[1]);
       ctx.lineTo(p2[0], p2[1]);
-      ctx.strokeStyle = "rgba(6, 182, 212, 0.4)";
-      ctx.lineWidth = 8;
+      ctx.strokeStyle = "rgba(6, 182, 212, 0.35)";
+      ctx.lineWidth = Math.max(3, Math.round(6 * resScale));
       ctx.stroke();
 
       // Main line
@@ -730,39 +746,48 @@ function renderZoneCanvas() {
       ctx.moveTo(p1[0], p1[1]);
       ctx.lineTo(p2[0], p2[1]);
       ctx.strokeStyle = "#06b6d4";
-      ctx.lineWidth = 4;
+      ctx.lineWidth = Math.max(1.8, Math.round(3.0 * resScale));
       ctx.stroke();
 
-      // Draw directional arrows
+      // Draw directional arrows (proportional)
+      const arrowSize = Math.max(7, Math.round(14 * resScale));
       ctx.fillStyle = "#38bdf8";
       if (dir === "a_to_b" || dir === "both") {
-        drawArrowHead(ctx, p1[0], p1[1], p2[0], p2[1], 18);
+        drawArrowHead(ctx, p1[0], p1[1], p2[0], p2[1], arrowSize);
       }
       if (dir === "b_to_a" || dir === "both") {
-        drawArrowHead(ctx, p2[0], p2[1], p1[0], p1[1], 18);
+        drawArrowHead(ctx, p2[0], p2[1], p1[0], p1[1], arrowSize);
       }
 
-      // Midpoint badge
+      // Midpoint badge (sleek, compact, semi-transparent)
       const midX = (p1[0] + p2[0]) / 2;
       const midY = (p1[1] + p2[1]) / 2;
       const dirText = dir === "both" ? "A ⇄ B" : dir === "a_to_b" ? "A ➔ B" : "B ➔ A";
       const labelText = `${ldata.name || selectedLine} (${dirText})`;
 
       ctx.save();
-      ctx.font = "bold 13px ui-monospace, monospace";
+      const fontSize = Math.max(8, Math.round(11 * resScale));
+      ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
       const textW = ctx.measureText(labelText).width;
-      ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
-      ctx.strokeStyle = "#06b6d4";
-      ctx.lineWidth = 1.5;
+      const badgeH = Math.max(14, Math.round(20 * resScale));
+      const badgeW = textW + Math.max(8, Math.round(14 * resScale));
+
+      ctx.fillStyle = "rgba(15, 23, 42, 0.72)";
+      ctx.strokeStyle = "rgba(6, 182, 212, 0.80)";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(midX - textW / 2 - 8, midY - 14, textW + 16, 26, 6);
+      ctx.roundRect(midX - badgeW / 2, midY - badgeH / 2, badgeW, badgeH, 4);
       ctx.fill();
       ctx.stroke();
+
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(labelText, midX - textW / 2, midY + 4);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(labelText, midX, midY);
       ctx.restore();
 
-      // Endpoints Handles (A = P1, B = P2)
+      // Endpoints Handles (A = P1, B = P2) - Compact & proportional
+      const endRadius = Math.max(6, Math.round((hoverPointIndex >= 0 ? 9 : 7.5) * resScale));
       [
         { pt: p1, label: "A", idx: 0 },
         { pt: p2, label: "B", idx: 1 },
@@ -770,24 +795,27 @@ function renderZoneCanvas() {
         const isHover = idx === hoverPointIndex;
         const isSelected = idx === selectedVertexIndex;
         const isDragged = idx === draggedPointIndex;
-        const radius = isSelected || isDragged ? 12 : isHover ? 10 : 7;
 
         ctx.beginPath();
-        ctx.arc(pt[0], pt[1], radius + 5, 0, 2 * Math.PI);
-        ctx.fillStyle = "rgba(6, 182, 212, 0.4)";
+        ctx.arc(pt[0], pt[1], endRadius + Math.max(2, Math.round(4 * resScale)), 0, 2 * Math.PI);
+        ctx.fillStyle = "rgba(6, 182, 212, 0.35)";
         ctx.fill();
 
         ctx.beginPath();
-        ctx.arc(pt[0], pt[1], radius, 0, 2 * Math.PI);
+        ctx.arc(pt[0], pt[1], endRadius, 0, 2 * Math.PI);
         ctx.fillStyle = isSelected || isDragged ? "#ffffff" : isHover ? "#38bdf8" : "#06b6d4";
         ctx.fill();
         ctx.strokeStyle = "#000000";
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = Math.max(1, Math.round(1.8 * resScale));
         ctx.stroke();
 
-        ctx.font = "bold 11px sans-serif";
+        ctx.save();
+        ctx.font = `bold ${Math.max(7, Math.round(9 * resScale))}px sans-serif`;
         ctx.fillStyle = isSelected || isDragged ? "#000000" : "#ffffff";
-        ctx.fillText(label, pt[0] - 4, pt[1] + 4);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, pt[0], pt[1]);
+        ctx.restore();
       });
     }
   }

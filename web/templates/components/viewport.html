@@ -18,13 +18,13 @@
     <div class="zone-glass-toolbar" id="zoneToolbar" style="display: none;">
       <!-- Category Switcher: Poligon Zona vs Garis Tripwire -->
       <div class="glass-category-tabs">
-        <button type="button" id="tabPolygons" class="glass-tab active" onclick="switchEditorCategory('polygons')" title="Edit Zona Poligon Area (Dwell Time)">
+        <button type="button" id="tabPolygons" class="glass-tab active" onclick="switchEditorCategory('polygons')" title="Edit Zona Poligon (Dwell Time)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span>Poligon Zona</span>
+          <span>Poligon</span>
         </button>
-        <button type="button" id="tabTripwires" class="glass-tab" onclick="switchEditorCategory('tripwires')" title="Edit Garis Virtual Tripwire">
+        <button type="button" id="tabTripwires" class="glass-tab" onclick="switchEditorCategory('tripwires')" title="Edit Garis Tripwire (Tripwire Crossings)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-          <span>Garis Tripwire</span>
+          <span>Tripwire</span>
         </button>
       </div>
 
@@ -66,16 +66,15 @@
         <button type="button" id="btnZoneProperties" class="glass-btn" onclick="togglePropertiesDrawer()" data-tooltip="Atur Properti (Nama, Dwell Time, Arah)" aria-label="Properti">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
-        <button type="button" id="btnZoneGuide" class="glass-btn" onclick="openCalibrationGuide()" data-tooltip="Panduan & Cara Penggunaan (?)" aria-label="Bantuan Panduan">
+        <button type="button" id="btnZoneGuide" class="glass-btn" onclick="openCalibrationGuide()" data-tooltip="Panduan (?)" aria-label="Bantuan Panduan">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </button>
       </div>
 
       <div class="glass-divider"></div>
 
-      <!-- Status / Telemetry Badge -->
+      <!-- Status / Telemetry Badge (Compact) -->
       <div class="glass-status-wrap">
-        <span class="glass-coord" id="zoneCoordDisplay">X: --, Y: --</span>
         <span class="glass-validation-pill valid" id="zoneValidationPill">Valid</span>
       </div>
 
