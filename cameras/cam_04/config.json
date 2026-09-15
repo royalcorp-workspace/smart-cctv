@@ -43,12 +43,20 @@
     "enabled": false,
     "model_path": "models/face_detection_yunet_2023mar.onnx",
     "score_threshold": 0.32,
-    "nms_threshold": 0.30,
+    "nms_threshold": 0.3,
     "detect_interval_frames": 3,
-    "face_roi_crop": [100, 40, 1250, 520],
+    "face_roi_crop": [
+      100,
+      40,
+      1250,
+      520
+    ],
     "alternate_inference": true,
     "min_face_size": 16,
-    "aspect_ratio_range": [0.6, 1.4]
+    "aspect_ratio_range": [
+      0.6,
+      1.4
+    ]
   },
   "face_recognizer": {
     "enabled": false,

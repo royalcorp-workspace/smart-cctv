@@ -1,0 +1,38 @@
+<!-- RECENT INCIDENTS & DVR PLAYBACK SECTION -->
+<section class="incidents-section">
+  <div class="incidents-card">
+    <div class="incidents-header">
+      <div class="incidents-title">
+        <svg class="incidents-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        </svg>
+        <h3>Riwayat Insiden & Putar Ulang DVR (H.264 Ring Buffer)</h3>
+      </div>
+      <button class="btn-control btn-sm" onclick="loadRecentEvents()" title="Perbarui Riwayat Insiden">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <span>Segarkan Log</span>
+      </button>
+    </div>
+    <div class="incidents-table-wrapper">
+      <table class="incidents-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Waktu Deteksi</th>
+            <th>Kamera</th>
+            <th>Zona / Tripwire</th>
+            <th>Dwell Time</th>
+            <th>Status</th>
+            <th>Target Terkait</th>
+            <th>Rekaman Video</th>
+          </tr>
+        </thead>
+        <tbody id="incidentsTableBody">
+          <tr>
+            <td colspan="8" class="text-center py-4 text-muted">Memuat data riwayat insiden...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>

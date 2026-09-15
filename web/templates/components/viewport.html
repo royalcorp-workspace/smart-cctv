@@ -1,0 +1,96 @@
+<!-- LEFT: VIDEO STREAM VIEWPORT (16:9) & INTERACTIVE CANVAS -->
+<section class="video-container-section">
+  <div class="video-card" id="videoContainer">
+    <div class="video-overlay-header">
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span class="live-text">LIVE</span>
+      </div>
+      <span class="camera-badge" id="badgeCamId">cam_01</span>
+    </div>
+
+    <img id="streamFeed" src="/video_feed/cam_01" alt="CCTV Stream Feed" onerror="onStreamError()" onload="onStreamLoad()" />
+
+    <!-- INTERACTIVE ZONE & TRIPWIRE EDITOR CANVAS (NATIVE 1920x1080) -->
+    <canvas id="zoneEditorCanvas" width="1920" height="1080"></canvas>
+
+    <!-- FLOATING ENTERPRISE GLASSMORPHISM CALIBRATION BAR -->
+    <div class="zone-glass-toolbar" id="zoneToolbar" style="display: none;">
+      <!-- Category Switcher: Poligon Zona vs Garis Tripwire -->
+      <div class="glass-category-tabs">
+        <button type="button" id="tabPolygons" class="glass-tab active" onclick="switchEditorCategory('polygons')" title="Edit Zona Poligon Area (Dwell Time)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span>Poligon Zona</span>
+        </button>
+        <button type="button" id="tabTripwires" class="glass-tab" onclick="switchEditorCategory('tripwires')" title="Edit Garis Virtual Tripwire">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <span>Garis Tripwire</span>
+        </button>
+      </div>
+
+      <div class="glass-divider"></div>
+
+      <!-- Item Selector with Indicator Dot & Quick Actions -->
+      <div class="glass-zone-select-wrap">
+        <span class="glass-zone-dot" id="zoneColorDot"></span>
+        <select id="zoneSelector" class="glass-select" onchange="onZoneSelectChange()" title="Pilih Elemen untuk Diedit">
+          <!-- Populated dynamically -->
+        </select>
+        <button type="button" class="glass-btn glass-btn-subtle" onclick="openAddElementPrompt()" data-tooltip="Tambah Elemen Baru (+)" aria-label="Tambah Elemen">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+        </button>
+        <button type="button" class="glass-btn glass-btn-subtle btn-del-elem" onclick="promptDeleteZoneConfirm()" data-tooltip="Hapus Elemen Terpilih" aria-label="Hapus Elemen">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </div>
+
+      <div class="glass-divider"></div>
+
+      <!-- Drawing Tool Actions (Compact Micro-Icons with Hover Tooltips) -->
+      <div class="glass-tool-group">
+        <button type="button" id="btnModeDrag" class="glass-btn active" onclick="setZoneMode('drag')" data-tooltip="Mode Geser / Pilih Titik" aria-label="Geser Titik">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+        </button>
+        <button type="button" id="btnModeAdd" class="glass-btn" onclick="setZoneMode('add')" data-tooltip="Mode Tambah Titik Vertex Baru" aria-label="Tambah Titik">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+        </button>
+        <button type="button" id="btnDeleteSelected" class="glass-btn" onclick="deleteSelectedPoint()" data-tooltip="Hapus Titik (Del / Klik Kanan pada Titik)" aria-label="Hapus Titik">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        </button>
+        <button type="button" id="btnUndo" class="glass-btn" onclick="undoZoneAction()" data-tooltip="Urungkan Perubahan (Ctrl+Z)" aria-label="Undo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        </button>
+        <button type="button" id="btnResetZone" class="glass-btn" onclick="resetCurrentZone()" data-tooltip="Kembalikan ke Titik Awal" aria-label="Reset">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+        </button>
+        <button type="button" id="btnZoneProperties" class="glass-btn" onclick="togglePropertiesDrawer()" data-tooltip="Atur Properti (Nama, Dwell Time, Arah)" aria-label="Properti">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button type="button" id="btnZoneGuide" class="glass-btn" onclick="openCalibrationGuide()" data-tooltip="Panduan & Cara Penggunaan (?)" aria-label="Bantuan Panduan">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </button>
+      </div>
+
+      <div class="glass-divider"></div>
+
+      <!-- Status / Telemetry Badge -->
+      <div class="glass-status-wrap">
+        <span class="glass-coord" id="zoneCoordDisplay">X: --, Y: --</span>
+        <span class="glass-validation-pill valid" id="zoneValidationPill">Valid</span>
+      </div>
+
+      <div class="glass-divider"></div>
+
+      <!-- Right: Save & Close Buttons -->
+      <div class="glass-action-group">
+        <button type="button" id="btnSaveZones" class="glass-btn-save" onclick="saveZonesToServer()" data-tooltip="Simpan & Terapkan (Atomic Hot-Reload)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span>Simpan</span>
+        </button>
+        <button type="button" class="glass-btn-close" onclick="toggleZoneEditor(false)" title="Tutup Mode Kalibrasi (Esc)" aria-label="Tutup Kalibrasi">
+          &times;
+        </button>
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,9 +1,17 @@
 import asyncio
+import concurrent.futures
+import json
 import logging
+import os
 from pathlib import Path
+import re
+import shutil
 import threading
+import time
 from typing import Any, Dict, List, Optional
+import urllib.parse
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,9 +42,45 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
+def _sync_disk_cameras_into_buffer() -> None:
+    """Bidirectionally synchronize camera workspaces on disk with MultiCameraBuffer."""
+    buffer = MultiCameraBuffer.get_instance()
+    cam_root = Path(__file__).resolve().parent.parent / "cameras"
+    if not cam_root.exists():
+        return
+
+    disk_cams: Dict[str, str] = {}
+    for p in sorted(cam_root.iterdir()):
+        if p.is_dir() and not p.name.startswith(".") and (p / "config.json").exists():
+            cam_name = p.name
+            try:
+                with open(p / "config.json", "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cam_name = cfg.get("name", p.name)
+            except Exception:
+                pass
+            disk_cams[p.name] = cam_name
+
+    # 1. Unregister stale cameras that no longer exist or are archived on disk
+    with buffer._lock:
+        registered_ids = list(buffer._camera_names.keys())
+    for cid in registered_ids:
+        if cid not in disk_cams:
+            buffer.unregister_camera(cid)
+            logger.info(f"[WebServer] Stale/archived camera '{cid}' unregistered from buffer.")
+
+    # 2. Register any newly added cameras on disk
+    for cid, cname in disk_cams.items():
+        with buffer._lock:
+            already_registered = cid in buffer._camera_names
+        if not already_registered:
+            buffer.register_camera(cid, cname)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request) -> HTMLResponse:
     """Render the single-page dark mode surveillance dashboard."""
+    _sync_disk_cameras_into_buffer()
     buffer = MultiCameraBuffer.get_instance()
     cameras = buffer.get_cameras()
     return templates.TemplateResponse(
@@ -44,6 +88,7 @@ async def index_page(request: Request) -> HTMLResponse:
         name="index.html",
         context={"cameras": cameras},
     )
+
 
 
 async def async_stream_mjpeg(camera_id: str, request: Optional[Request] = None):
@@ -114,9 +159,332 @@ async def get_camera_status(camera_id: str) -> JSONResponse:
 @app.get("/api/cameras")
 async def list_cameras() -> JSONResponse:
     """Return list of all registered cameras."""
+    _sync_disk_cameras_into_buffer()
     buffer = MultiCameraBuffer.get_instance()
     cameras = buffer.get_cameras()
     return JSONResponse(content=cameras)
+
+
+@app.post("/api/cameras/test_rtsp")
+async def test_rtsp_connection(request: Request) -> JSONResponse:
+    """Test RTSP stream connectivity with strict timeout."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    rtsp_url = (data.get("rtsp_url") or "").strip()
+    ip = (data.get("ip") or "").strip()
+    port = data.get("port", 554)
+    user = (data.get("user") or "").strip()
+    password = (data.get("pass") or "").strip()
+    channel = data.get("channel", 102)
+
+    if not rtsp_url:
+        if not ip:
+            raise HTTPException(status_code=400, detail="IP address or full RTSP URL is required.")
+        enc_user = urllib.parse.quote(user, safe="")
+        enc_pass = urllib.parse.quote(password, safe="")
+        if enc_user and enc_pass:
+            rtsp_url = f"rtsp://{enc_user}:{enc_pass}@{ip}:{port}/Streaming/Channels/{channel}"
+        elif enc_user:
+            rtsp_url = f"rtsp://{enc_user}@{ip}:{port}/Streaming/Channels/{channel}"
+        else:
+            rtsp_url = f"rtsp://{ip}:{port}/Streaming/Channels/{channel}"
+
+    # Mask credentials for safe logging
+    masked_url = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:****@", rtsp_url)
+    logger.info(f"[WebServer] Testing RTSP connection to: {masked_url}")
+
+    def _probe_stream(url: str):
+        import cv2
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;2500000"
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            return False, 0, 0, "Gagal membuka RTSP stream (Connection Refused / Timeout)."
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            h, w = frame.shape[:2]
+            cap.release()
+            return True, w, h, f"Koneksi berhasil terverifikasi ({w}x{h})."
+        cap.release()
+        return False, 0, 0, "RTSP terbuka tetapi frame tidak diterima."
+
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            success, w, h, msg = await asyncio.wait_for(
+                loop.run_in_executor(pool, _probe_stream, rtsp_url),
+                timeout=4.5,
+            )
+        except asyncio.TimeoutError:
+            success, w, h, msg = False, 0, 0, "Koneksi RTSP timeout setelah 4.5 detik."
+        except Exception as e:
+            success, w, h, msg = False, 0, 0, f"Error RTSP probe: {e}"
+
+    return JSONResponse(content={
+        "success": success,
+        "message": msg,
+        "width": w,
+        "height": h,
+        "rtsp_url": masked_url,
+    })
+
+
+@app.post("/api/cameras/add")
+async def add_camera(request: Request) -> JSONResponse:
+    """Dynamically register a new camera, configure .env, create directory, and hot-start pipeline."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    raw_id = (data.get("camera_id") or "").strip().lower()
+    name = (data.get("name") or "").strip()
+    ip = (data.get("ip") or "").strip()
+    port = int(data.get("port") or 554)
+    user = (data.get("user") or "").strip()
+    password = (data.get("pass") or "").strip()
+    channel = int(data.get("channel") or 102)
+    custom_rtsp = (data.get("rtsp_url") or "").strip()
+
+    if not raw_id or not re.match(r"^[a-z0-9_-]+$", raw_id):
+        raise HTTPException(status_code=400, detail="Camera ID harus alfanumerik huruf kecil/garis bawah (contoh: cam_05).")
+    if not name:
+        name = raw_id.replace("_", " ").title()
+
+    camera_id = raw_id
+    workspace_dir = Path(__file__).resolve().parent.parent
+    cam_dir = workspace_dir / "cameras" / camera_id
+    if cam_dir.exists():
+        raise HTTPException(status_code=400, detail=f"Kamera '{camera_id}' sudah terdaftar.")
+
+    # 1. Update .env safely (append block)
+    env_path = workspace_dir / ".env"
+    cam_var = camera_id.upper().replace("-", "_")
+    if not cam_var.startswith("CAM"):
+        cam_var = f"CAM_{cam_var}"
+
+    env_lines = []
+    if env_path.exists():
+        with open(env_path, "r", encoding="utf-8") as f:
+            env_lines = f.readlines()
+
+    var_exists = any(line.strip().startswith(f"{cam_var}_IP=") for line in env_lines)
+    if not var_exists:
+        new_env_block = f"\n# --- KAMERA {camera_id.upper()} ({name}) ---\n"
+        new_env_block += f"{cam_var}_IP={ip}\n"
+        new_env_block += f"{cam_var}_PORT={port}\n"
+        new_env_block += f"{cam_var}_USER={user}\n"
+        new_env_block += f'{cam_var}_PASS="{password}"\n'
+        new_env_block += f"{cam_var}_CHANNEL={channel}\n"
+        with open(env_path, "a", encoding="utf-8") as f:
+            f.write(new_env_block)
+        logger.info(f"[WebServer] Appended camera credentials to .env for {camera_id}")
+
+    # Reload environment variables in process
+    load_dotenv(dotenv_path=env_path, override=True)
+
+    # 2. Build camera workspace directory
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    (cam_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+
+    # Source RTSP string
+    if custom_rtsp:
+        source_str = custom_rtsp
+    else:
+        source_str = f"rtsp://${{{cam_var}_USER}}:${{{cam_var}_PASS}}@${{{cam_var}_IP}}:${{{cam_var}_PORT}}/Streaming/Channels/${{{cam_var}_CHANNEL}}"
+
+    # 3. Create config.json
+    config_data = {
+        "camera_id": camera_id,
+        "name": name,
+        "source": source_str,
+        "target_resolution": None,
+        "detector": {
+            "enabled_classes": ["person", "backpack", "handbag", "suitcase", "car", "bus", "truck"],
+            "target_classes": ["backpack", "handbag", "suitcase"],
+            "confidence_threshold": 0.22,
+            "base_conf": 0.22,
+            "bag_conf": 0.18,
+            "stride": 2,
+        },
+        "face_detector": {
+            "enabled": False,
+            "model_path": "models/face_detection_yunet_2023mar.onnx",
+            "score_threshold": 0.32,
+            "nms_threshold": 0.30,
+            "detect_interval_frames": 3,
+        },
+        "face_recognizer": {
+            "enabled": False,
+            "model_path": "models/face_recognition_sface_2021dec.onnx",
+            "known_faces_dir": "data/known_faces",
+            "cosine_threshold": 0.52,
+        },
+        "motion_gating": {
+            "enabled": True,
+            "threshold_px": 120,
+            "diff_threshold": 25,
+            "hangover_sec": 2.0,
+            "quiescent_interval": 30,
+        },
+        "telegram": {
+            "enabled": True,
+            "bot_token": "${TELEGRAM_BOT_TOKEN}",
+            "chat_id": f"${{TELEGRAM_{cam_var}_CHAT_ID}}",
+        },
+        "buzzer": {
+            "enabled": True,
+            "cooldown_sec": 15,
+            "timeout_ms": 3000,
+            "trigger_events": ["tripwire_crossing"],
+        },
+        "zones": {
+            "zone_1": {
+                "name": "Zona Pemantauan 1",
+                "detect_unattended": False,
+                "dwell_threshold_sec": 300,
+                "dwell_time_threshold": 300.0,
+                "unattended_threshold": 300.0,
+                "min_contour_area": 300,
+            }
+        },
+    }
+    with open(cam_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+
+    # 4. Create roi_zones.json
+    roi_data = {
+        "base_resolution": [1920, 1080],
+        "zones": {
+            "zone_1": [
+                [200, 200],
+                [1720, 200],
+                [1720, 900],
+                [200, 900],
+            ]
+        },
+        "lines": {},
+    }
+    with open(cam_dir / "roi_zones.json", "w", encoding="utf-8") as f:
+        json.dump(roi_data, f, indent=2)
+
+    # 5. Register in MultiCameraBuffer
+    buffer = MultiCameraBuffer.get_instance()
+    buffer.register_camera(camera_id, name)
+
+    # 6. Hot-start CameraPipeline if main module is available
+    started = False
+    try:
+        import sys
+        main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+        if main_mod and hasattr(main_mod, "CameraPipeline"):
+            pipeline = main_mod.CameraPipeline(camera_dir=cam_dir)
+            pipeline.start()
+            started = True
+            logger.info(f"[WebServer] Dynamic CameraPipeline started for {camera_id}")
+    except Exception as e:
+        logger.warning(f"[WebServer] Note on pipeline auto-start for {camera_id}: {e}")
+
+    return JSONResponse(content={
+        "status": "success",
+        "message": f"Kamera '{name}' ({camera_id}) berhasil ditambahkan.",
+        "camera_id": camera_id,
+        "started": started,
+    })
+
+
+@app.post("/api/cameras/start/{camera_id}")
+async def start_camera(camera_id: str) -> JSONResponse:
+    """Explicitly start/hot-start a CameraPipeline for a camera if not already active."""
+    cam_id = camera_id.strip().lower()
+    workspace_dir = Path(__file__).resolve().parent.parent
+    cam_dir = workspace_dir / "cameras" / cam_id
+    if not cam_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Kamera '{cam_id}' tidak ditemukan di disk.")
+
+    buffer = MultiCameraBuffer.get_instance()
+    existing_pipe = buffer.get_pipeline(cam_id)
+    if existing_pipe is not None and getattr(existing_pipe, "is_alive", lambda: False)():
+        return JSONResponse(content={"status": "info", "message": f"Pipeline untuk {cam_id} sudah berjalan.", "started": True})
+
+    started = False
+    try:
+        import sys
+        main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+        if main_mod and hasattr(main_mod, "CameraPipeline"):
+            pipeline = main_mod.CameraPipeline(camera_dir=cam_dir)
+            pipeline.start()
+            started = True
+            logger.info(f"[WebServer] Dynamic CameraPipeline explicitly started for {cam_id}")
+    except Exception as e:
+        logger.error(f"[WebServer] Failed to start pipeline for {cam_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse(content={"status": "success", "message": f"Pipeline untuk {cam_id} berhasil dijalankan.", "started": started})
+
+
+@app.post("/api/cameras/delete")
+async def delete_camera(request: Request) -> JSONResponse:
+    """Deactivate camera, stop pipeline, unregister from buffer, and archive directory."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    camera_id = (data.get("camera_id") or "").strip().lower()
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="Camera ID diperlukan.")
+
+    workspace_dir = Path(__file__).resolve().parent.parent
+    cam_dir = workspace_dir / "cameras" / camera_id
+    # 1. Stop and unregister from MultiCameraBuffer (ALWAYS, even if folder was already moved)
+    buffer = MultiCameraBuffer.get_instance()
+    buffer.unregister_camera(camera_id)
+
+    # 2. Archive camera folder to .archived_{camera_id}_{timestamp} if it exists on disk
+    if cam_dir.exists():
+        archived_name = f".archived_{camera_id}_{int(time.time())}"
+        archived_path = workspace_dir / "cameras" / archived_name
+        try:
+            shutil.move(str(cam_dir), str(archived_path))
+            logger.info(f"[WebServer] Camera directory {camera_id} archived to {archived_name}")
+        except Exception as e:
+            logger.error(f"[WebServer] Failed to archive camera directory: {e}")
+            raise HTTPException(status_code=500, detail=f"Gagal mengarsipkan folder kamera: {e}")
+    else:
+        logger.info(f"[WebServer] Camera directory {camera_id} not on disk (already removed/archived).")
+
+    # 3. Clean up .env credentials for this camera
+    env_path = workspace_dir / ".env"
+    cam_var = camera_id.upper().replace("-", "_")
+    if not cam_var.startswith("CAM"):
+        cam_var = f"CAM_{cam_var}"
+    if env_path.exists():
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if f"KAMERA {camera_id.upper()}" in stripped:
+                    continue
+                if stripped.startswith(f"{cam_var}_"):
+                    continue
+                new_lines.append(line)
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            load_dotenv(dotenv_path=env_path, override=True)
+            logger.info(f"[WebServer] Cleaned .env credentials for {camera_id}")
+        except Exception as e:
+            logger.warning(f"[WebServer] Failed cleaning .env for {camera_id}: {e}")
+
+    return JSONResponse(content={
+        "status": "success",
+        "message": f"Kamera '{camera_id}' berhasil dinonaktifkan.",
+        "camera_id": camera_id,
+    })
 
 
 def _ccw(A: List[float], B: List[float], C: List[float]) -> bool:
@@ -151,25 +519,44 @@ def is_polygon_self_intersecting(points: List[List[float]]) -> bool:
 @app.get("/api/zones")
 @app.get("/api/zones/{camera_id}")
 async def get_zones(camera_id: Optional[str] = None, cam: Optional[str] = None) -> JSONResponse:
-    """Get current ROI zones configuration for a camera."""
+    """Get current ROI zones, tripwires, and zone metadata for a camera."""
     cam_id = cam or camera_id or "cam_01"
     cam_dir = Path(__file__).resolve().parent.parent / "cameras" / cam_id
     roi_file = cam_dir / "roi_zones.json"
+    cfg_file = cam_dir / "config.json"
 
     if not roi_file.exists():
         raise HTTPException(status_code=404, detail=f"ROI configuration for '{cam_id}' not found.")
 
     try:
-        import json
         with open(roi_file, "r", encoding="utf-8") as f:
             data = json.load(f)
+
         base_res = data.get("base_resolution", [1920, 1080])
-        zones = {k: v for k, v in data.items() if k != "base_resolution" and not k.startswith("_")}
+
+        if "zones" in data and isinstance(data["zones"], dict):
+            zones = data["zones"]
+            lines = data.get("lines", {})
+        else:
+            zones = {k: v for k, v in data.items() if k != "base_resolution" and not k.startswith("_") and k != "lines"}
+            lines = data.get("lines", {})
+
+        zone_configs = {}
+        if cfg_file.exists():
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as cf:
+                    cfg_data = json.load(cf)
+                zone_configs = cfg_data.get("zones", {})
+            except Exception as ce:
+                logger.warning(f"[WebServer] Could not read zone configs from config.json: {ce}")
+
         return JSONResponse(content={
             "status": "success",
             "camera_id": cam_id,
             "base_resolution": base_res,
             "zones": zones,
+            "lines": lines,
+            "zone_configs": zone_configs,
         })
     except Exception as e:
         logger.error(f"[WebServer] Failed to read zones for {cam_id}: {e}")
@@ -178,10 +565,7 @@ async def get_zones(camera_id: Optional[str] = None, cam: Optional[str] = None) 
 
 @app.post("/api/zones/update")
 async def update_zones(request: Request) -> JSONResponse:
-    """Validate, backup, write, and atomically reload camera ROI zones."""
-    import json
-    import shutil
-
+    """Validate, backup, write, and atomically reload camera ROI zones & tripwires."""
     try:
         data = await request.json()
     except Exception:
@@ -189,41 +573,55 @@ async def update_zones(request: Request) -> JSONResponse:
 
     camera_id = data.get("camera_id", "cam_01")
     zones = data.get("zones", {})
+    lines = data.get("lines", {})
+    zone_configs = data.get("zone_configs", {})
     base_res = data.get("base_resolution", [1920, 1080])
 
-    if not isinstance(zones, dict) or not zones:
-        raise HTTPException(status_code=400, detail="Zones object must contain at least one zone.")
+    if not isinstance(zones, dict):
+        zones = {}
+    if not isinstance(lines, dict):
+        lines = {}
 
     base_w, base_h = int(base_res[0]), int(base_res[1])
 
-    # Validate each polygon
+    # Validate each polygon zone
     for zone_name, pts in zones.items():
         if not isinstance(pts, list) or len(pts) < 3:
             raise HTTPException(
                 status_code=400,
-                detail=f"Zone '{zone_name}' must have at least 3 vertices (found {len(pts) if isinstance(pts, list) else 0}).",
+                detail=f"Zona '{zone_name}' harus memiliki minimal 3 titik koordinat (ditemukan {len(pts) if isinstance(pts, list) else 0}).",
             )
         for pt in pts:
             if not isinstance(pt, (list, tuple)) or len(pt) < 2:
-                raise HTTPException(status_code=400, detail=f"Invalid point format in zone '{zone_name}'.")
+                raise HTTPException(status_code=400, detail=f"Format titik koordinat tidak valid pada zona '{zone_name}'.")
             x, y = float(pt[0]), float(pt[1])
             if not (-100 <= x <= base_w + 100 and -100 <= y <= base_h + 100):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Point ({int(x)}, {int(y)}) in zone '{zone_name}' exceeds coordinate bounds (0..{base_w}, 0..{base_h}).",
+                    detail=f"Titik ({int(x)}, {int(y)}) pada zona '{zone_name}' melebihi batas resolusi (0..{base_w}, 0..{base_h}).",
                 )
         if is_polygon_self_intersecting([[float(p[0]), float(p[1])] for p in pts]):
             raise HTTPException(
                 status_code=400,
-                detail=f"Zone '{zone_name}' has self-intersecting edges. Please untangle polygon vertices.",
+                detail=f"Garis poligon pada zona '{zone_name}' saling memotong (self-intersecting). Rapihkan susunan titik sudut.",
             )
+
+    # Validate each tripwire line
+    for line_name, ldata in lines.items():
+        if not isinstance(ldata, dict):
+            raise HTTPException(status_code=400, detail=f"Tripwire '{line_name}' harus berupa objek valid.")
+        p1 = ldata.get("p1")
+        p2 = ldata.get("p2")
+        if not p1 or not p2 or len(p1) < 2 or len(p2) < 2:
+            raise HTTPException(status_code=400, detail=f"Tripwire '{line_name}' harus memiliki titik ujung p1 dan p2.")
 
     cam_dir = Path(__file__).resolve().parent.parent / "cameras" / camera_id
     if not cam_dir.exists():
-        raise HTTPException(status_code=404, detail=f"Camera directory '{camera_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Direktori kamera '{camera_id}' tidak ditemukan.")
 
     roi_file = cam_dir / "roi_zones.json"
     bak_file = cam_dir / "roi_zones.json.bak"
+    cfg_file = cam_dir / "config.json"
 
     # Backup existing configuration file
     if roi_file.exists():
@@ -236,13 +634,49 @@ async def update_zones(request: Request) -> JSONResponse:
     # Build normalized JSON
     save_payload: Dict[str, Any] = {
         "base_resolution": [base_w, base_h],
+        "zones": {},
+        "lines": {},
     }
     for k, v in zones.items():
-        save_payload[k] = [[int(round(p[0])), int(round(p[1]))] for p in v]
+        save_payload["zones"][k] = [[int(round(p[0])), int(round(p[1]))] for p in v]
+
+    for k, v in lines.items():
+        save_payload["lines"][k] = {
+            "name": v.get("name", k.replace("_", " ").title()),
+            "p1": [int(round(v["p1"][0])), int(round(v["p1"][1]))],
+            "p2": [int(round(v["p2"][0])), int(round(v["p2"][1]))],
+            "direction": v.get("direction", "both"),
+            "target_classes": v.get("target_classes", ["person"]),
+        }
 
     # Save to disk
     with open(roi_file, "w", encoding="utf-8") as f:
         json.dump(save_payload, f, indent=2)
+
+    # If zone_configs provided, update config.json
+    if zone_configs and cfg_file.exists():
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as cf:
+                cam_cfg = json.load(cf)
+            if "zones" not in cam_cfg or not isinstance(cam_cfg["zones"], dict):
+                cam_cfg["zones"] = {}
+            for z_key, z_val in zone_configs.items():
+                if z_key not in cam_cfg["zones"]:
+                    cam_cfg["zones"][z_key] = {}
+                cam_cfg["zones"][z_key]["name"] = z_val.get("name", z_key)
+                if "dwell_threshold_sec" in z_val:
+                    dval = float(z_val["dwell_threshold_sec"])
+                    cam_cfg["zones"][z_key]["dwell_threshold_sec"] = dval
+                    cam_cfg["zones"][z_key]["dwell_time_threshold"] = dval
+                if "detect_unattended" in z_val:
+                    cam_cfg["zones"][z_key]["detect_unattended"] = bool(z_val["detect_unattended"])
+            # Backup and write config.json
+            shutil.copyfile(cfg_file, cam_dir / "config.json.bak")
+            with open(cfg_file, "w", encoding="utf-8") as cf:
+                json.dump(cam_cfg, cf, indent=2)
+            logger.info(f"[WebServer] Updated zone metadata in {cfg_file}")
+        except Exception as e:
+            logger.warning(f"[WebServer] Could not update config.json zone metadata: {e}")
 
     # Perform atomic hot-reload on camera pipeline if active
     buffer = MultiCameraBuffer.get_instance()
@@ -258,11 +692,13 @@ async def update_zones(request: Request) -> JSONResponse:
 
     return JSONResponse(content={
         "status": "success",
-        "message": f"Zones for {camera_id} successfully saved and reloaded.",
+        "message": f"Konfigurasi zona & tripwire untuk {camera_id} berhasil disimpan dan di-reload.",
         "reloaded": reloaded,
         "camera_id": camera_id,
-        "zones": save_payload,
+        "zones": save_payload["zones"],
+        "lines": save_payload["lines"],
     })
+
 
 
 @app.get("/api/events")

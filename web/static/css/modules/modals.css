@@ -1,0 +1,375 @@
+/**
+ * Smart CCTV 2.0 - Modals & Dialog System
+ * Dedicated styles for Video DVR player, Form Onboarding, and Deletion Dialogs.
+ * Dual-Theme compatible (Zinc Dark & Slate Light).
+ */
+
+/* BACKDROP */
+.video-modal-backdrop,
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: modalFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: border-box;
+}
+
+/* DIALOG CONTAINER */
+.modal-dialog,
+.video-modal-dialog {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 820px;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: modalScaleUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.form-modal-dialog {
+  max-width: 660px;
+}
+
+.modal-dialog-sm {
+  max-width: 480px;
+}
+
+/* HEADER */
+.modal-header,
+.video-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+}
+
+.modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.badge-modal-live {
+  font-size: 0.68rem;
+  font-weight: 700;
+  background-color: var(--accent-primary);
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 5px;
+  letter-spacing: 0.5px;
+}
+
+.badge-modal-danger {
+  font-size: 0.68rem;
+  font-weight: 700;
+  background-color: #ef4444;
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 5px;
+  letter-spacing: 0.5px;
+}
+
+.danger-header {
+  border-bottom-color: rgba(239, 68, 68, 0.25);
+  background-color: rgba(239, 68, 68, 0.06);
+}
+
+[data-theme="light"] .danger-header {
+  border-bottom-color: #fecdd3;
+  background-color: #fff1f2;
+}
+
+.modal-title-wrap h3 {
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 0;
+}
+
+.btn-close-modal {
+  background: transparent;
+  border: none;
+  font-size: 1.4rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.btn-close-modal:hover {
+  color: var(--text-main);
+  background-color: var(--bg-card-hover);
+}
+
+/* MODAL BODIES */
+/* Video Body (Pure Black viewport for DVR clips) */
+.video-modal-body {
+  background-color: #000000;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+}
+
+.video-modal-body video {
+  width: 100%;
+  max-height: 480px;
+  outline: none;
+  display: block;
+}
+
+/* Form Body (Clean card surface for inputs and settings) */
+.modal-body,
+.form-modal-body {
+  background-color: var(--bg-surface);
+  color: var(--text-main);
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* FOOTER */
+.modal-footer,
+.video-modal-footer {
+  padding: 14px 20px;
+  background-color: var(--bg-surface);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.modal-clip-info {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.modal-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* FORM ELEMENTS & GRID SYSTEM */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  width: 100%;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.col-span-2 {
+  grid-column: span 2;
+}
+
+.form-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-main);
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.form-label .required {
+  color: #ef4444;
+}
+
+.form-input,
+.form-select {
+  width: 100%;
+  box-sizing: border-box;
+  background-color: var(--bg-base);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 0.84rem;
+  color: var(--text-main);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  font-family: inherit;
+}
+
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+  background-color: var(--bg-card);
+}
+
+.form-help {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* RTSP LIVE STRING PREVIEW BOX */
+.rtsp-preview-box {
+  background-color: #0b0f17;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: #38bdf8;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+[data-theme="light"] .rtsp-preview-box {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #0369a1;
+}
+
+/* DELETE CAMERA DIALOG STYLING */
+.del-confirm-text {
+  font-size: 0.95rem;
+  color: var(--text-main);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.del-confirm-text strong {
+  color: var(--accent-primary);
+  font-family: var(--font-mono);
+}
+
+.del-warning-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background-color: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: #fbbf24;
+  line-height: 1.45;
+}
+
+[data-theme="light"] .del-warning-box {
+  background-color: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.warn-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* RTSP TEST STATUS BANNER */
+.test-banner {
+  margin-top: 4px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+.test-banner.success {
+  background-color: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #10b981;
+}
+
+[data-theme="light"] .test-banner.success {
+  background-color: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #047857;
+}
+
+.test-banner.error {
+  background-color: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+}
+
+[data-theme="light"] .test-banner.error {
+  background-color: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+/* MODAL ACTION BUTTONS */
+.btn-primary {
+  background-color: var(--accent-primary) !important;
+  color: #ffffff !important;
+  border-color: var(--accent-primary) !important;
+}
+
+.btn-primary:hover {
+  background-color: var(--accent-hover) !important;
+}
+
+.btn-danger {
+  background-color: #dc2626 !important;
+  color: #ffffff !important;
+  border-color: #b91c1c !important;
+}
+
+.btn-danger:hover {
+  background-color: #b91c1c !important;
+}
+
+/* ANIMATIONS */
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modalScaleUp {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* RESPONSIVE */
+@media (max-width: 600px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .col-span-2 {
+    grid-column: span 1;
+  }
+}

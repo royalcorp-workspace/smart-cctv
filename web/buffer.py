@@ -70,6 +70,23 @@ class MultiCameraBuffer:
         with self._lock:
             return self._pipelines.get(camera_id)
 
+    def unregister_camera(self, camera_id: str) -> None:
+        """Safely unregister and remove camera from the buffer registry."""
+        with self._lock:
+            self._conditions.pop(camera_id, None)
+            self._frames.pop(camera_id, None)
+            self._frame_seqs.pop(camera_id, None)
+            self._telemetries.pop(camera_id, None)
+            self._camera_names.pop(camera_id, None)
+            self._last_update_times.pop(camera_id, None)
+            pipe = self._pipelines.pop(camera_id, None)
+            if pipe is not None and hasattr(pipe, "stop"):
+                try:
+                    pipe.stop()
+                except Exception as e:
+                    logger.warning(f"[MultiCameraBuffer] Error stopping pipeline '{camera_id}': {e}")
+
+
     def update_frame(
         self,
         camera_id: str,
@@ -90,6 +107,10 @@ class MultiCameraBuffer:
 
         now = time.time()
         with self._lock:
+            # If camera has been unregistered or not in registry, do not re-register via background frames
+            if camera_id not in self._camera_names:
+                return
+
             if camera_id not in self._conditions:
                 self._conditions[camera_id] = threading.Condition(self._lock)
 

@@ -1,0 +1,29 @@
+<!-- INCIDENT VIDEO PLAYER MODAL (DVR PLAYBACK) -->
+<div id="videoModal" class="video-modal-backdrop" style="display: none;">
+  <div class="video-modal-dialog">
+    <div class="video-modal-header">
+      <div class="modal-title-wrap">
+        <span class="badge-modal-live">DVR PLAYBACK</span>
+        <h3 id="modalClipTitle">Rekaman Insiden</h3>
+      </div>
+      <button type="button" class="btn-close-modal" onclick="closeVideoModal()" aria-label="Tutup Modal">&times;</button>
+    </div>
+    <div class="video-modal-body">
+      <video id="incidentVideoPlayer" controls preload="metadata" playsinline>
+        Browser Anda tidak mendukung video player HTML5.
+      </video>
+    </div>
+    <div class="video-modal-footer">
+      <div class="modal-clip-info" id="modalClipMeta">
+        Resolusi: 1280x720 | Codec: H.264 | Ring Buffer Deque
+      </div>
+      <div class="modal-footer-actions">
+        <a id="modalDownloadBtn" href="#" download class="btn-control">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Unduh MP4</span>
+        </a>
+        <button type="button" class="btn-control btn-secondary" onclick="closeVideoModal()">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>

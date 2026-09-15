@@ -1,0 +1,267 @@
+/**
+ * Smart CCTV 2.0 - Telemetry Sidebar, KPI Metrics & Hardware Monitor Styles
+ */
+
+.telemetry-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-card);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.panel-card-faces {
+  flex: 1;
+  min-height: 240px;
+}
+
+.panel-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 10px;
+}
+
+.panel-card-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.indicator-icon {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* STATUS BADGES */
+.status-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  letter-spacing: 0.02em;
+}
+
+.status-badge.connected {
+  background-color: var(--status-connected-bg);
+  color: var(--status-connected-text);
+  border: 1px solid var(--status-connected-border);
+}
+
+.status-badge.disconnected {
+  background-color: var(--status-alert-bg);
+  color: var(--status-alert-text);
+  border: 1px solid var(--status-alert-border);
+}
+
+.count-badge {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* KPI GRID & BOXES */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.kpi-box {
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.kpi-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: 1.45rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-main);
+}
+
+.kpi-value.alert-text {
+  color: var(--status-alert-text);
+}
+
+.kpi-value.success-text {
+  color: var(--status-connected-text);
+}
+
+/* HARDWARE BUZZER WIDGET */
+.buzzer-status-widget {
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.buzzer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+}
+
+.buzzer-tag {
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+}
+
+.buzzer-tag.ready {
+  background-color: var(--status-connected-bg);
+  color: var(--status-connected-text);
+}
+
+.buzzer-tag.cooldown {
+  background-color: var(--status-warn-bg);
+  color: var(--status-warn-text);
+}
+
+.buzzer-tag.offline {
+  background-color: var(--status-alert-bg);
+  color: var(--status-alert-text);
+}
+
+/* BIOMETRIC FACES LIST (SFACE) */
+.faces-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.faces-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.faces-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  padding: 24px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+  background-color: var(--bg-subtle);
+}
+
+.person-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+
+.person-card:hover {
+  border-color: var(--border-subtle);
+}
+
+.person-profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background-color: var(--accent-primary);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.person-avatar.unknown {
+  background-color: var(--border-subtle);
+  color: var(--text-muted);
+}
+
+.person-meta {
+  display: flex;
+  flex-direction: column;
+}
+
+.person-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-main);
+  line-height: 1.2;
+}
+
+.person-detail {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.tag-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.tag-badge.authorized {
+  background-color: var(--status-connected-bg);
+  color: var(--status-connected-text);
+  border: 1px solid var(--status-connected-border);
+}
+
+.tag-badge.unknown {
+  background-color: var(--status-alert-bg);
+  color: var(--status-alert-text);
+  border: 1px solid var(--status-alert-border);
+}

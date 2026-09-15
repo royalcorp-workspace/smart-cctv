@@ -1,0 +1,55 @@
+<!-- RIGHT: REAL-TIME TELEMETRY & ANALYTICS PANEL -->
+<aside class="telemetry-sidebar">
+  <!-- CARD 1: RTSP STREAM STATUS & PERFORMANCE -->
+  <div class="panel-card">
+    <div class="panel-card-header">
+      <div class="panel-card-title">
+        <span class="indicator-icon">●</span> Status Stream & RTSP
+      </div>
+      <span class="status-badge connected" id="pillRtspStatus">Connected</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-box">
+        <span class="kpi-label">PIPELINE FPS</span>
+        <span class="kpi-value" id="statFps">0.0</span>
+      </div>
+      <div class="kpi-box">
+        <span class="kpi-label">OBJEK TERLACAK</span>
+        <span class="kpi-value" id="statTracks">0</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CARD 2: CLEAR AREA VIOLATIONS -->
+  <div class="panel-card">
+    <div class="panel-card-header">
+      <div class="panel-card-title">
+        <span class="indicator-icon">⚠</span> Pelanggaran Clear Area
+      </div>
+      <span class="status-badge connected" id="pillViolations">Aman</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-box">
+        <span class="kpi-label">PELANGGARAN AKTIF (>60M)</span>
+        <span class="kpi-value alert-text" id="statViolations">0</span>
+      </div>
+      <div class="kpi-box">
+        <span class="kpi-label">ALERT TELEGRAM</span>
+        <span class="kpi-value success-text" id="statTelegram">Siap</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CARD 3: IDENTIFIED PERSONS & K3 STATUS -->
+  <div class="panel-card panel-card-faces">
+    <div class="panel-card-header">
+      <div class="panel-card-title">
+        <span class="indicator-icon">👤</span> Personil & Biometrik Wajah
+      </div>
+      <span class="count-badge" id="faceCount" style="opacity: 0.7;">K3 Walkway Aman</span>
+    </div>
+    <div class="faces-scroll" id="facesList">
+      <div class="empty-state">✓ Monitoring K3: Seluruh pejalan kaki patuh di jalur aman atau beraktivitas dekat kendaraan.</div>
+    </div>
+  </div>
+</aside>

@@ -1,0 +1,575 @@
+/**
+ * Smart CCTV 2.0 - Calibration Canvas, Floating Glass Toolbar & Properties Drawer Styles
+ * Precision layout with uniform micro-icons (14-15px), compact toolbars, and micro-tooltips.
+ * Dual-Theme compatible (Zinc Dark & Slate Light).
+ */
+
+/* ==========================================================================
+   INTERACTIVE CALIBRATION CANVAS OVERLAY
+   ========================================================================== */
+
+#zoneEditorCanvas {
+  position: absolute;
+  pointer-events: none;
+  z-index: 25;
+  display: none;
+}
+
+#zoneEditorCanvas.active {
+  display: block;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+/* ==========================================================================
+   FLOATING GLASSMORPHISM TOOLBAR (COMPACT ENTERPRISE DOCK)
+   ========================================================================== */
+
+.zone-glass-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+  padding: 4px 8px;
+  height: 38px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 35;
+  color: #f8fafc;
+  animation: fadeInDown 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+  user-select: none;
+  max-width: 96%;
+}
+
+[data-theme="light"] .zone-glass-toolbar {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  color: #0f172a;
+}
+
+/* STRICT ICON CONSTRAINT: Never allow SVG icons to expand beyond 14px */
+.zone-glass-toolbar svg {
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 14px !important;
+  min-height: 14px !important;
+  max-width: 14px !important;
+  max-height: 14px !important;
+  flex-shrink: 0;
+  stroke-width: 2;
+  display: block;
+}
+
+/* DIVIDER */
+.glass-divider {
+  width: 1px;
+  height: 20px;
+  background-color: rgba(255, 255, 255, 0.14);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+[data-theme="light"] .glass-divider {
+  background-color: rgba(0, 0, 0, 0.12);
+}
+
+/* ==========================================================================
+   CATEGORY TABS (POLYGON VS TRIPWIRE)
+   ========================================================================== */
+
+.glass-category-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+[data-theme="light"] .glass-category-tabs {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.glass-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  line-height: 1;
+}
+
+.glass-tab svg {
+  color: var(--text-muted);
+}
+
+.glass-tab:hover {
+  color: var(--text-main);
+}
+
+.glass-tab.active {
+  background: var(--accent-primary);
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.35);
+}
+
+.glass-tab.active svg {
+  color: #ffffff;
+}
+
+/* ==========================================================================
+   ZONE / TRIPWIRE SELECTOR & QUICK ACTIONS
+   ========================================================================== */
+
+.glass-zone-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.glass-zone-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #10b981;
+  box-shadow: 0 0 6px #10b981;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-select {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  border-radius: 5px;
+  padding: 4px 6px;
+  cursor: pointer;
+  outline: none;
+  max-width: 145px;
+  font-family: inherit;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+[data-theme="light"] .glass-select {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+.glass-select:focus {
+  border-color: var(--accent-primary);
+}
+
+/* ==========================================================================
+   DRAWING TOOL BUTTON GROUP
+   ========================================================================== */
+
+.glass-tool-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+[data-theme="light"] .glass-tool-group {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.glass-btn {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  position: relative;
+  padding: 0;
+}
+
+.glass-btn svg {
+  color: var(--text-muted);
+  transition: color 0.15s ease;
+}
+
+.glass-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.glass-btn:hover svg {
+  color: var(--text-main);
+}
+
+[data-theme="light"] .glass-btn:hover {
+  color: #0f172a;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.glass-btn.active {
+  background: var(--accent-primary);
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.35);
+}
+
+.glass-btn.active svg {
+  color: #ffffff;
+}
+
+.glass-btn-subtle {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="light"] .glass-btn-subtle {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.btn-del-elem:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.btn-del-elem:hover svg {
+  color: #ef4444;
+}
+
+/* ==========================================================================
+   CSS MICRO-TOOLTIP SYSTEM
+   ========================================================================== */
+
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  background-color: #0b0f17;
+  color: #f8fafc;
+  font-size: 0.68rem;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 100;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+  letter-spacing: 0.01em;
+}
+
+[data-theme="light"] [data-tooltip]::after {
+  background-color: #1e293b;
+  color: #ffffff;
+  border-color: #334155;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+}
+
+[data-tooltip]:hover::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ==========================================================================
+   STATUS / TELEMETRY BADGE
+   ========================================================================== */
+
+.glass-status-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.glass-coord {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 2px 5px;
+}
+
+.glass-validation-pill {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.glass-validation-pill.valid {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.glass-validation-pill.invalid {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  animation: pulseAlert 1.5s infinite;
+}
+
+/* ==========================================================================
+   SAVE & CLOSE BUTTONS
+   ========================================================================== */
+
+.glass-action-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.glass-btn-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #10b981;
+  border: 1px solid #059669;
+  color: #ffffff;
+  padding: 0 10px;
+  height: 28px;
+  border-radius: 5px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+  font-family: inherit;
+}
+
+.glass-btn-save svg {
+  color: #ffffff;
+}
+
+.glass-btn-save:hover {
+  background: #059669;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);
+}
+
+.glass-btn-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #374151;
+  border-color: #4b5563;
+}
+
+.glass-btn-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.glass-btn-close:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+/* ==========================================================================
+   DRAWER: ELEMENT PROPERTIES
+   ========================================================================== */
+
+.properties-drawer {
+  position: absolute;
+  top: 56px;
+  right: 14px;
+  width: 320px;
+  max-height: calc(100% - 70px);
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fadeIn 0.2s ease-out;
+}
+
+[data-theme="light"] .properties-drawer {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(0, 0, 0, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  color: #0f172a;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+[data-theme="light"] .drawer-header {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.drawer-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drawer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent-primary);
+}
+
+.drawer-title-wrap h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 0;
+}
+
+.btn-close-drawer {
+  background: transparent;
+  border: none;
+  font-size: 1.3rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.btn-close-drawer:hover {
+  color: var(--text-main);
+}
+
+.drawer-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.drawer-footer {
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+[data-theme="light"] .drawer-footer {
+  border-top-color: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.input-with-addon {
+  display: flex;
+  align-items: center;
+}
+
+.input-with-addon .form-input {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  flex: 1;
+}
+
+.input-addon {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-left: none;
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+  padding: 9px 12px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.checkbox-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
+/* ==========================================================================
+   ANIMATIONS
+   ========================================================================== */
+
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes pulseAlert {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

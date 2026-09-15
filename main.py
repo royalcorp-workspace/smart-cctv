@@ -352,9 +352,14 @@ class CameraPipeline:
                 frame_shape=(self.infer_resolution[1], self.infer_resolution[0]),
                 base_resolution=self.roi_base_resolution,
             )
+            tripwire_cfg = self.config.get("tripwire", {})
             self.tripwire_engine = TripwireEngine(
                 lines=self.zone_filter.scaled_lines,
-                cooldown_sec=5.0,
+                cooldown_sec=float(tripwire_cfg.get("cooldown_sec", 5.0)),
+                min_track_frames=int(tripwire_cfg.get("min_track_frames", 4)),
+                min_confidence=float(tripwire_cfg.get("min_confidence", 0.40)),
+                min_bbox_area=float(tripwire_cfg.get("min_bbox_area", 400.0)),
+                max_step_px=float(tripwire_cfg.get("max_step_px", 65.0)),
             )
             logger.info(
                 f"[{self.camera_id}] ZoneFilter atomically reloaded "
