@@ -10,6 +10,22 @@
 
 html {
   font-size: 14px;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+svg {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+svg:not([width]) {
+  width: 16px;
+  height: 16px;
+  max-width: 16px;
+  max-height: 16px;
 }
 
 body {
@@ -23,6 +39,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.2s ease, color 0.2s ease;
+  overflow-x: hidden;
 }
 
 .sr-only {
@@ -42,11 +59,12 @@ body {
   flex: 1;
   padding: 16px 20px;
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: 16px;
   max-width: 1920px;
   margin: 0 auto;
   width: 100%;
+  box-sizing: border-box;
 }
 
 @media (max-width: 1024px) {

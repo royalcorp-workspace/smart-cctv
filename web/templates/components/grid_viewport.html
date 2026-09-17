@@ -1,0 +1,56 @@
+<!-- MULTI-CAMERA GRID VIEWPORT COMPONENT (NVR / VMS MATRIX) -->
+<section class="grid-viewport-section" id="gridContainer">
+  <!-- GRID HEADER BAR -->
+  <div class="grid-header-bar">
+    <div class="grid-header-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="7" height="7"></rect>
+        <rect x="14" y="3" width="7" height="7"></rect>
+        <rect x="14" y="14" width="7" height="7"></rect>
+        <rect x="3" y="14" width="7" height="7"></rect>
+      </svg>
+      <span>Matriks Pengawasan Multi-Kamera (Live Monitoring)</span>
+    </div>
+
+    <!-- PAGINATION & AUTO-TOUR CONTROLS (Active when total cameras > slot capacity) -->
+    <div class="grid-nav-controls" id="gridNavControls" style="display: none;">
+      <!-- Page Navigation Stepper -->
+      <div class="grid-page-stepper">
+        <button type="button" class="btn-grid-nav" id="btnGridPrev" onclick="prevGridPage()" title="Halaman Sebelumnya (Panah Kiri)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </button>
+        <span class="grid-page-indicator" id="gridPageIndicator">Hal 1 / 1</span>
+        <button type="button" class="btn-grid-nav" id="btnGridNext" onclick="nextGridPage()" title="Halaman Berikutnya (Panah Kanan)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </button>
+      </div>
+
+      <!-- Auto-Tour / Patrol Mode -->
+      <div class="grid-tour-controls">
+        <button type="button" class="btn-grid-tour" id="btnGridTourToggle" onclick="toggleAutoTour()" title="Aktifkan Patroli / Auto-Tour Otomatis">
+          <svg id="tourIconPlay" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <svg id="tourIconPause" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="display: none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+          <span id="tourStatusText">Auto-Tour</span>
+        </button>
+        <select id="tourIntervalSelect" class="grid-tour-select" onchange="onTourIntervalChange(this.value)" title="Durasi Rotasi Tiap Halaman">
+          <option value="5">5d</option>
+          <option value="10" selected>10d</option>
+          <option value="15">15d</option>
+          <option value="30">30d</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <span class="grid-meta-badge" id="gridActiveCamCount">4 Kamera Aktif</span>
+      <span class="grid-meta-badge" id="gridCurrentLayoutBadge" style="background: rgba(16, 185, 129, 0.12); color: #34d399; border-color: rgba(16, 185, 129, 0.3);">
+        Tata Letak: 2x2 (4 Slot)
+      </span>
+    </div>
+  </div>
+
+  <!-- DYNAMIC GRID MATRIX CONTAINER (Default: 2x2) -->
+  <div class="camera-grid-matrix grid-matrix-2x2" id="cameraGridMatrix">
+    <!-- Populated dynamically by grid_manager.js -->
+  </div>
+</section>

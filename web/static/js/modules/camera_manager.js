@@ -149,11 +149,18 @@ async function submitAddCamera(event) {
     closeAddCameraModal();
     await loadCameraList();
 
-    // Automatically switch to the newly registered camera
-    const select = document.getElementById("cameraSelect");
-    if (select) {
-      select.value = camera_id;
-      onCameraChange();
+    // Dynamically update Grid View matrix with auto-scaling
+    if (typeof reloadGridCameras === "function") {
+      await reloadGridCameras(true);
+    }
+
+    // Automatically switch to the newly registered camera if currently in Single View
+    if (typeof currentViewMode !== "undefined" && currentViewMode === "single") {
+      const select = document.getElementById("cameraSelect");
+      if (select) {
+        select.value = camera_id;
+        onCameraChange();
+      }
     }
   } catch (err) {
     console.error("Add camera error:", err);
@@ -204,10 +211,15 @@ async function confirmDeleteCamera() {
     showToast("Kamera Dinonaktifkan", result.message, "success", 4000);
     closeDeleteCameraModal();
     await loadCameraList();
+    if (typeof reloadGridCameras === "function") {
+      await reloadGridCameras(false);
+    }
     const select = document.getElementById("cameraSelect");
     if (select && select.options.length > 0) {
       select.value = select.options[0].value;
-      onCameraChange();
+      if (typeof currentViewMode !== "undefined" && currentViewMode === "single") {
+        onCameraChange();
+      }
     }
   } catch (err) {
     console.error("Delete camera error:", err);

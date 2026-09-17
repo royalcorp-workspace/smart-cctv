@@ -441,8 +441,12 @@ function deleteSelectedPoint() {
 
 async function saveZonesToServer() {
   for (const [zKey, pts] of Object.entries(zoneData)) {
+    if (!pts || pts.length === 0) {
+      // Zona kosong (0 titik) diperbolehkan sebagai zona cadangan / nonaktif
+      continue;
+    }
     if (pts.length < 3) {
-      showToast("Gagal Menyimpan", `Zona '${zKey}' memiliki titik kurang dari 3!`, "warning");
+      showToast("Gagal Menyimpan", `Zona '${zKey}' belum selesai dibuat (hanya ${pts.length} titik, minimal 3 titik)!`, "warning");
       return;
     }
     if (isPolygonSelfIntersecting(pts)) {

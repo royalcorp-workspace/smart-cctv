@@ -55,21 +55,78 @@ def test_fastapi_endpoints():
     print("\n[2] Testing FastAPI endpoints with TestClient...")
     client = TestClient(app)
 
-    # Test GET /
-    resp = client.get("/")
-    assert resp.status_code == 200, f"GET / returned {resp.status_code}"
-    assert "SMART CCTV 2.0" in resp.text
-    assert "cameraSelect" in resp.text
-    assert "streamFeed" in resp.text
-    assert "/static/css/dashboard.css" in resp.text
-    assert "/static/js/dashboard.js" in resp.text
-    print(" - [OK] GET / rendered dashboard HTML with static asset links")
+    # Test GET / (Redirect to /dashboard)
+    resp_root = client.get("/", follow_redirects=False)
+    assert resp_root.status_code == 307, f"GET / returned {resp_root.status_code}"
+    assert resp_root.headers.get("location") == "/dashboard"
+    print(" - [OK] GET / successfully redirects (307) to /dashboard")
+
+    # Test GET /dashboard (View-Only)
+    resp_view = client.get("/dashboard")
+    assert resp_view.status_code == 200, f"GET /dashboard returned {resp_view.status_code}"
+    assert "SMART CCTV 2.0" in resp_view.text
+    assert "Monitoring (View Only)" in resp_view.text
+    assert "cameraSelect" in resp_view.text
+    assert "streamFeed" in resp_view.text
+    assert "Riwayat Insiden & Putar Ulang DVR" not in resp_view.text
+    assert "window.IS_ADMIN = false;" in resp_view.text
+    # Grid View components
+    assert "dashboardMain" in resp_view.text
+    assert "gridContainer" in resp_view.text
+    assert "cameraGridMatrix" in resp_view.text
+    assert "btnModeGrid" in resp_view.text
+    assert "btnModeSingle" in resp_view.text
+    assert "gridSizeSelect" in resp_view.text
+    assert "grid_manager.js" in resp_view.text
+    assert "toggleFullscreen()" in resp_view.text
+    # Edit controls must NOT be present
+    assert "btnAddCamera" not in resp_view.text
+    assert "btnDeleteCamera" not in resp_view.text
+    assert "btnToggleEditor" not in resp_view.text
+    assert "zoneEditorCanvas" not in resp_view.text
+    assert "zoneToolbar" not in resp_view.text
+    assert "modal_add_camera" not in resp_view.text
+    assert "camera_manager.js" not in resp_view.text
+    assert "calibration_canvas.js" not in resp_view.text
+    print(" - [OK] GET /dashboard rendered View-Only mode with Grid View matrix & controls")
+
+    # Test GET /dashboard_admin (Full Access)
+    resp_admin = client.get("/dashboard_admin")
+    assert resp_admin.status_code == 200, f"GET /dashboard_admin returned {resp_admin.status_code}"
+    assert "SMART CCTV 2.0" in resp_admin.text
+    assert "Admin Console" in resp_admin.text
+    assert "window.IS_ADMIN = true;" in resp_admin.text
+    assert "gridContainer" in resp_admin.text
+    # Edit controls MUST be present
+    assert "btnAddCamera" in resp_admin.text
+    assert "btnDeleteCamera" in resp_admin.text
+    assert "btnToggleEditor" in resp_admin.text
+    assert "zoneEditorCanvas" in resp_admin.text
+    assert "zoneToolbar" in resp_admin.text
+    assert "camera_manager.js" in resp_admin.text
+    assert "calibration_canvas.js" in resp_admin.text
+    print(" - [OK] GET /dashboard_admin rendered Admin mode with full edit controls")
 
     # Test GET /static/css/dashboard.css
     resp_css = client.get("/static/css/dashboard.css")
     assert resp_css.status_code == 200, f"GET /static/css/dashboard.css returned {resp_css.status_code}"
-    assert "--bg-base" in resp_css.text
-    print(" - [OK] GET /static/css/dashboard.css returned HTTP 200 OK")
+    assert "@import" in resp_css.text and "variables.css" in resp_css.text
+    assert "grid.css" in resp_css.text
+    print(" - [OK] GET /static/css/dashboard.css returned HTTP 200 OK with grid.css import")
+
+    # Test GET /static/css/modules/grid.css
+    resp_grid_css = client.get("/static/css/modules/grid.css")
+    assert resp_grid_css.status_code == 200
+    assert ".grid-matrix-2x2" in resp_grid_css.text
+    assert ".grid-matrix-6x6" in resp_grid_css.text
+    print(" - [OK] GET /static/css/modules/grid.css returned valid 2x2..6x6 matrix classes")
+
+    # Test GET /static/js/modules/grid_manager.js
+    resp_grid_js = client.get("/static/js/modules/grid_manager.js")
+    assert resp_grid_js.status_code == 200
+    assert "toggleCameraFullscreen" in resp_grid_js.text
+    assert "switchViewMode" in resp_grid_js.text
+    print(" - [OK] GET /static/js/modules/grid_manager.js returned valid grid orchestrator")
 
     # Test GET /static/js/dashboard.js
     resp_js = client.get("/static/js/dashboard.js")

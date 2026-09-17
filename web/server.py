@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional
 import urllib.parse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -78,15 +78,44 @@ def _sync_disk_cameras_into_buffer() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index_page(request: Request) -> HTMLResponse:
-    """Render the single-page dark mode surveillance dashboard."""
+async def root_redirect():
+    """Redirect root path to the view-only surveillance dashboard."""
+    return RedirectResponse(url="/dashboard", status_code=307)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_view_page(request: Request) -> HTMLResponse:
+    """Render the View-Only live surveillance monitoring dashboard."""
     _sync_disk_cameras_into_buffer()
     buffer = MultiCameraBuffer.get_instance()
     cameras = buffer.get_cameras()
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"cameras": cameras},
+        context={
+            "cameras": cameras,
+            "is_admin": False,
+            "page_title": "Smart CCTV • Live Monitoring (View Only)",
+            "brand_badge": "Monitoring (View Only)",
+        },
+    )
+
+
+@app.get("/dashboard_admin", response_class=HTMLResponse)
+async def dashboard_admin_page(request: Request) -> HTMLResponse:
+    """Render the Full Access administrative dashboard with camera & zone controls."""
+    _sync_disk_cameras_into_buffer()
+    buffer = MultiCameraBuffer.get_instance()
+    cameras = buffer.get_cameras()
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "cameras": cameras,
+            "is_admin": True,
+            "page_title": "Smart CCTV • Admin Console",
+            "brand_badge": "Admin Console",
+        },
     )
 
 
@@ -300,7 +329,7 @@ async def add_camera(request: Request) -> JSONResponse:
         "camera_id": camera_id,
         "name": name,
         "source": source_str,
-        "target_resolution": None,
+        "target_resolution": [640, 360],
         "detector": {
             "enabled_classes": ["person", "backpack", "handbag", "suitcase", "car", "bus", "truck"],
             "target_classes": ["backpack", "handbag", "suitcase"],
@@ -340,31 +369,15 @@ async def add_camera(request: Request) -> JSONResponse:
             "timeout_ms": 3000,
             "trigger_events": ["tripwire_crossing"],
         },
-        "zones": {
-            "zone_1": {
-                "name": "Zona Pemantauan 1",
-                "detect_unattended": False,
-                "dwell_threshold_sec": 300,
-                "dwell_time_threshold": 300.0,
-                "unattended_threshold": 300.0,
-                "min_contour_area": 300,
-            }
-        },
+        "zones": {},
     }
     with open(cam_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
 
-    # 4. Create roi_zones.json
+    # 4. Create roi_zones.json (Starts clean with 0 zones & 0 lines for user custom drawing)
     roi_data = {
         "base_resolution": [1920, 1080],
-        "zones": {
-            "zone_1": [
-                [200, 200],
-                [1720, 200],
-                [1720, 900],
-                [200, 900],
-            ]
-        },
+        "zones": {},
         "lines": {},
     }
     with open(cam_dir / "roi_zones.json", "w", encoding="utf-8") as f:
@@ -586,10 +599,15 @@ async def update_zones(request: Request) -> JSONResponse:
 
     # Validate each polygon zone
     for zone_name, pts in zones.items():
-        if not isinstance(pts, list) or len(pts) < 3:
+        if not isinstance(pts, list):
+            raise HTTPException(status_code=400, detail=f"Format titik koordinat tidak valid pada zona '{zone_name}'.")
+        if len(pts) == 0:
+            # Zona kosong (0 titik) diperbolehkan sebagai zona cadangan / nonaktif
+            continue
+        if len(pts) < 3:
             raise HTTPException(
                 status_code=400,
-                detail=f"Zona '{zone_name}' harus memiliki minimal 3 titik koordinat (ditemukan {len(pts) if isinstance(pts, list) else 0}).",
+                detail=f"Zona '{zone_name}' belum selesai dibuat (hanya memiliki {len(pts)} titik, harus memiliki minimal 3 titik koordinat).",
             )
         for pt in pts:
             if not isinstance(pt, (list, tuple)) or len(pt) < 2:
@@ -699,6 +717,33 @@ async def update_zones(request: Request) -> JSONResponse:
         "lines": save_payload["lines"],
     })
 
+
+@app.post("/api/cameras/{camera_id}/calibration_mode", response_model=None)
+@app.post("/api/calibration/mode", response_model=None)
+async def toggle_calibration_mode(
+    camera_id: Optional[str] = None,
+    cam: Optional[str] = None,
+    active: bool = Query(True),
+) -> JSONResponse:
+    """Toggle zone overlay rendering in camera pipeline during interactive calibration."""
+    cam_id = cam or camera_id or "cam_01"
+
+    buffer = MultiCameraBuffer.get_instance()
+    pipeline = buffer.get_pipeline(cam_id)
+    toggled = False
+    if pipeline is not None and hasattr(pipeline, "set_draw_zones"):
+        # When calibration is active, suppress video zone lines (clean feed)
+        pipeline.set_draw_zones(not active)
+        toggled = True
+        logger.info(f"[WebServer] Camera '{cam_id}' calibration mode set to {active} (draw_zones={not active}).")
+
+    return JSONResponse(content={
+        "status": "success",
+        "camera_id": cam_id,
+        "calibration_active": active,
+        "draw_zones": not active,
+        "toggled": toggled,
+    })
 
 
 @app.get("/api/events")

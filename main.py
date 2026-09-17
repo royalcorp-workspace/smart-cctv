@@ -132,8 +132,8 @@ class CameraPipeline:
             self.config.get("name", self.camera_id),
         )
 
-        # Target resolution (Display / Capture frame)
-        self.target_resolution: Optional[Tuple[int, int]] = None
+        # Target resolution (Display / Capture frame) - Standardized to 640x360 (16:9)
+        self.target_resolution: Optional[Tuple[int, int]] = (640, 360)
         cfg_res = self.config.get("target_resolution")
         if cfg_res and len(cfg_res) == 2:
             self.target_resolution = (int(cfg_res[0]), int(cfg_res[1]))
@@ -336,9 +336,15 @@ class CameraPipeline:
         self.active_db_events: Dict[int, int] = {}
         self._zone_lock = threading.Lock()
         self.ring_buffer = RingBufferRecorder(maxlen=250, target_size=(1280, 720), fps=13.0)
+        self.draw_zones: bool = True
 
         # Register pipeline in MultiCameraBuffer for web control and atomic reload
         MultiCameraBuffer.get_instance().register_pipeline(self.camera_id, self)
+
+    def set_draw_zones(self, enable: bool) -> None:
+        """Toggle real-time rendering of zones/tripwires on the live stream."""
+        self.draw_zones = bool(enable)
+        logger.info(f"[{self.camera_id}] Live stream zone drawing set to: {self.draw_zones}")
 
     def reload_zones(self) -> Dict[str, Any]:
         """Thread-safely reload ROI zones from roi_zones.json and re-initialize ZoneFilter & TripwireEngine."""
@@ -919,9 +925,10 @@ class CameraPipeline:
                         )
                         continue
 
-                    # Step tolerance margin: allow dynamic step tolerance capped strictly at max 10.0 px
+                    # Strict physical feet contact evaluation (margin_px=0.0)
+                    # Prevents persons walking on sidewalk/beside zone from falsely triggering the zone
                     matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
-                        ref_point, margin_px=10.0
+                        ref_point, margin_px=0.0
                     )
                     area = float(bbox[2] * bbox[3])
                     if matched_zone is not None:
@@ -943,9 +950,9 @@ class CameraPipeline:
                     if self._is_bag_overlapping_person(bbox, centroid, person_boxes, iof_threshold=0.60):
                         continue
 
-                    # Bags detected by YOLO (margin 8.0 px for overhead angle tolerance)
+                    # Bags detected by YOLO (strict margin 0.0 px for precision sterile zone monitoring)
                     matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
-                        ref_point, margin_px=8.0
+                        ref_point, margin_px=0.0
                     )
                     if matched_zone is not None:
                         # Zone Role Separation: Only allow unattended bag monitoring in unattended zones!
@@ -988,13 +995,13 @@ class CameraPipeline:
                     if v_w < 25 or v_h < 20 or area < 600:
                         continue
 
-                    # Multi-point wheel contact evaluation clamped within frame canvas [0, H - 1]
+                    # Ground contact patch evaluation clamped within frame canvas [0, H - 1]
+                    # Uses strict bottom-center wheel point (margin_px=0.0) to prevent side mirrors, cargo overhangs,
+                    # or ground shadows from falsely triggering the zone when driving beside it
                     wheel_y = min(max(0, bbox[1] + bbox[3] - 5), self.infer_resolution[1] - 1)
-                    left_wheel = (bbox[0] + int(bbox[2] * 0.25), wheel_y)
                     center_wheel = (centroid[0], wheel_y)
-                    right_wheel = (bbox[0] + int(bbox[2] * 0.75), wheel_y)
-                    matched_zone, edge_dist = self.zone_filter.find_best_zone_for_points(
-                        [left_wheel, center_wheel, right_wheel], margin_px=8.0
+                    matched_zone, edge_dist = self.zone_filter.find_zone_and_distance(
+                        center_wheel, margin_px=0.0
                     )
 
                     if matched_zone is not None:
@@ -1951,6 +1958,7 @@ class CameraPipeline:
                 lines=getattr(self, "roi_lines", {}),
                 flashing_lines=self.tripwire_engine.get_flashing_lines(now=now) if hasattr(self, "tripwire_engine") else None,
                 occluded_lines=self.tripwire_engine.get_occluded_lines() if hasattr(self, "tripwire_engine") else None,
+                draw_zones=self.draw_zones,
             )
 
             # Process pending alerts with synchronized VisualHUD annotated display_frame

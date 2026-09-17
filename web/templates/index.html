@@ -3,8 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Smart CCTV 2.0 &bull; Enterprise Monitoring Dashboard</title>
-  <link rel="stylesheet" href="/static/css/dashboard.css?v=2.4" />
+  <title>{{ page_title | default("Smart CCTV 2.0 • Enterprise Monitoring Dashboard") }}</title>
+  <!-- DIRECT CSS MODULE INCLUSIONS WITH CACHE BUSTER (BYPASSES STALE @IMPORT CACHING) -->
+  <link rel="stylesheet" href="/static/css/modules/variables.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/base.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/navbar.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/viewport.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/telemetry.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/calibration.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/incidents.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/modals.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/toast.css?v=5.5" />
+  <link rel="stylesheet" href="/static/css/modules/grid.css?v=5.5" />
 </head>
 <body>
 
@@ -12,21 +22,28 @@
   {% include "components/navbar.html" %}
 
   <!-- MAIN VIEWPORT & TELEMETRY GRID -->
-  <main class="dashboard-main">
-    <!-- LEFT: VIDEO STREAM & INTERACTIVE CANVAS -->
+  <main class="dashboard-main mode-grid" id="dashboardMain">
+    <!-- SINGLE VIEW: LEFT VIDEO STREAM VIEWPORT (1fr) -->
     {% include "components/viewport.html" %}
 
-    <!-- RIGHT: REAL-TIME TELEMETRY PANEL -->
+    <!-- SINGLE VIEW: RIGHT REAL-TIME TELEMETRY PANEL (380px) -->
     {% include "components/telemetry_sidebar.html" %}
+
+    <!-- MULTI-CAMERA GRID MATRIX VIEW (FULL WIDTH 1fr) -->
+    {% include "components/grid_viewport.html" %}
   </main>
 
-  <!-- RECENT INCIDENTS & DVR PLAYBACK SECTION -->
+  {% if is_admin %}
+  <!-- RECENT INCIDENTS & DVR PLAYBACK SECTION (ADMIN ONLY) -->
   {% include "components/incidents_section.html" %}
+  {% endif %}
 
   <!-- MODALS & DRAWERS -->
+  {% if is_admin %}
   {% include "components/modal_add_camera.html" %}
   {% include "components/modal_delete_camera.html" %}
   {% include "components/modal_calibration.html" %}
+  {% endif %}
   {% include "components/modal_dvr.html" %}
 
   <!-- TOAST NOTIFICATION CONTAINER -->
@@ -41,19 +58,25 @@
       <span class="footer-sep">&bull;</span>
       <span>DVR Ring Buffer (H.264)</span>
       <span class="footer-sep">&bull;</span>
-      <span>Modular Template Architecture</span>
+      <span>Multi-Camera Grid Matrix</span>
     </div>
     <div class="footer-right" id="footerStatus">Sinkronisasi buffer lokal aktif</div>
   </footer>
 
   <!-- MODULAR JAVASCRIPT ARCHITECTURE -->
-  <script src="/static/js/modules/toast.js?v=2.6"></script>
-  <script src="/static/js/modules/theme.js?v=2.6"></script>
-  <script src="/static/js/modules/camera_manager.js?v=2.6"></script>
-  <script src="/static/js/modules/telemetry.js?v=2.6"></script>
-  <script src="/static/js/modules/calibration_canvas.js?v=2.6"></script>
-  <script src="/static/js/modules/calibration_drawer.js?v=2.6"></script>
-  <script src="/static/js/modules/incidents.js?v=2.6"></script>
-  <script src="/static/js/dashboard.js?v=2.6"></script>
+  <script>
+    window.IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  </script>
+  <script src="/static/js/modules/toast.js?v=5.5"></script>
+  <script src="/static/js/modules/theme.js?v=5.5"></script>
+  <script src="/static/js/modules/telemetry.js?v=5.5"></script>
+  <script src="/static/js/modules/grid_manager.js?v=5.5"></script>
+  <script src="/static/js/modules/incidents.js?v=5.5"></script>
+  {% if is_admin %}
+  <script src="/static/js/modules/camera_manager.js?v=5.5"></script>
+  <script src="/static/js/modules/calibration_canvas.js?v=5.5"></script>
+  <script src="/static/js/modules/calibration_drawer.js?v=5.5"></script>
+  {% endif %}
+  <script src="/static/js/dashboard.js?v=5.5"></script>
 </body>
 </html>

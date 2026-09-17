@@ -1,17 +1,21 @@
-<!-- RIGHT: REAL-TIME TELEMETRY & ANALYTICS PANEL -->
-<aside class="telemetry-sidebar">
+<!-- RIGHT: REAL-TIME TELEMETRY & VMS CLEAN DUAL-CARD SIDEBAR -->
+<aside class="telemetry-sidebar" id="telemetrySidebar">
   <!-- CARD 1: RTSP STREAM STATUS & PERFORMANCE -->
   <div class="panel-card">
     <div class="panel-card-header">
       <div class="panel-card-title">
-        <span class="indicator-icon">●</span> Status Stream & RTSP
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="2"></circle>
+          <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"></path>
+        </svg>
+        <span>Status Stream & RTSP</span>
       </div>
       <span class="status-badge connected" id="pillRtspStatus">Connected</span>
     </div>
     <div class="kpi-grid">
       <div class="kpi-box">
         <span class="kpi-label">PIPELINE FPS</span>
-        <span class="kpi-value" id="statFps">0.0</span>
+        <span class="kpi-value" id="statFps">--</span>
       </div>
       <div class="kpi-box">
         <span class="kpi-label">OBJEK TERLACAK</span>
@@ -20,17 +24,22 @@
     </div>
   </div>
 
-  <!-- CARD 2: CLEAR AREA VIOLATIONS -->
+  <!-- CARD 2: CLEAR AREA MONITORING -->
   <div class="panel-card">
     <div class="panel-card-header">
       <div class="panel-card-title">
-        <span class="indicator-icon">⚠</span> Pelanggaran Clear Area
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <span>Pelanggaran Clear Area</span>
       </div>
       <span class="status-badge connected" id="pillViolations">Aman</span>
     </div>
     <div class="kpi-grid">
       <div class="kpi-box">
-        <span class="kpi-label">PELANGGARAN AKTIF (>60M)</span>
+        <span class="kpi-label">PELANGGARAN AKTIF</span>
         <span class="kpi-value alert-text" id="statViolations">0</span>
       </div>
       <div class="kpi-box">
@@ -40,16 +49,11 @@
     </div>
   </div>
 
-  <!-- CARD 3: IDENTIFIED PERSONS & K3 STATUS -->
-  <div class="panel-card panel-card-faces">
-    <div class="panel-card-header">
-      <div class="panel-card-title">
-        <span class="indicator-icon">👤</span> Personil & Biometrik Wajah
-      </div>
-      <span class="count-badge" id="faceCount" style="opacity: 0.7;">K3 Walkway Aman</span>
-    </div>
-    <div class="faces-scroll" id="facesList">
-      <div class="empty-state">✓ Monitoring K3: Seluruh pejalan kaki patuh di jalur aman atau beraktivitas dekat kendaraan.</div>
-    </div>
-  </div>
+  <!-- Backward-Compatibility Anchors (hidden from view) -->
+  <div id="sidebarZoneList" style="display: none;"></div>
+  <div id="quickEventTicker" style="display: none;"></div>
+  <span id="faceCount" style="display: none;"></span>
+  <div id="quickCamSwitcher" style="display: none;"></div>
+  <span id="quickCamCount" style="display: none;"></span>
+  <div id="facesList" style="display: none;"></div>
 </aside>

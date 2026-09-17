@@ -2,7 +2,10 @@
   "camera_id": "cam_04",
   "name": "Area Timbangan Truk",
   "source": "rtsp://${CAM04_USER}:${CAM04_PASS}@${CAM04_IP}:${CAM04_PORT}/Streaming/Channels/${CAM04_CHANNEL}",
-  "target_resolution": null,
+  "target_resolution": [
+    640,
+    360
+  ],
   "walkway_compliance": {
     "enabled": false,
     "safe_zone_id": "zone_1_koridor",

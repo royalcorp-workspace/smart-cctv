@@ -57,11 +57,14 @@ if (typeof window !== "undefined") {
 }
 
 function toggleFullscreen() {
-  const videoCard = document.getElementById("videoContainer");
-  if (!videoCard) return;
+  let target = document.getElementById("videoContainer");
+  if (typeof currentViewMode !== "undefined" && currentViewMode === "grid") {
+    target = document.getElementById("gridContainer") || target;
+  }
+  if (!target) return;
 
   if (!document.fullscreenElement) {
-    videoCard.requestFullscreen().catch((err) => {
+    target.requestFullscreen().catch((err) => {
       console.warn("Fullscreen request error:", err);
     });
   } else {

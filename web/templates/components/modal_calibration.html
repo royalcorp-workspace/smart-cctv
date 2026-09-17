@@ -1,75 +1,3 @@
-<!-- DRAWER: ELEMENT PROPERTIES (NAME, DWELL LIMIT, CROSSING DIRECTION) -->
-<div id="zonePropertiesDrawer" class="properties-drawer" style="display: none;">
-  <div class="drawer-header">
-    <div class="drawer-title-wrap">
-      <span class="drawer-dot" id="drawerElemDot"></span>
-      <h4 id="drawerElemTitle">Properti Elemen</h4>
-    </div>
-    <button type="button" class="btn-close-drawer" onclick="togglePropertiesDrawer(false)">&times;</button>
-  </div>
-
-  <div class="drawer-body">
-    <!-- PROPERTIES FOR POLYGON ZONES -->
-    <div id="propsPolygonSection">
-      <div class="form-group mb-3">
-        <label for="propZoneName" class="form-label">Nama Zona Area</label>
-        <input type="text" id="propZoneName" class="form-input" placeholder="Zebra Cross / Area Antrean" oninput="updateCurrentElemMeta()" />
-      </div>
-
-      <div class="form-group mb-3">
-        <label for="propZoneDwell" class="form-label">Batas Waktu Dwell (Detik)</label>
-        <div class="input-with-addon">
-          <input type="number" id="propZoneDwell" class="form-input" min="5" max="86400" value="60" oninput="updateCurrentElemMeta()" />
-          <span class="input-addon">detik</span>
-        </div>
-        <span class="form-help" id="propZoneDwellHelp">60 detik = 1 menit. Melebihi batas ini akan memicu alarm.</span>
-      </div>
-
-      <div class="form-group mb-3">
-        <label class="form-label">Target Kelas Pelanggaran</label>
-        <div class="checkbox-group">
-          <label class="checkbox-label"><input type="checkbox" id="propZoneClassTruck" value="truck" checked onchange="updateCurrentElemMeta()" /> Truk</label>
-          <label class="checkbox-label"><input type="checkbox" id="propZoneClassBus" value="bus" checked onchange="updateCurrentElemMeta()" /> Bus</label>
-          <label class="checkbox-label"><input type="checkbox" id="propZoneClassCar" value="car" checked onchange="updateCurrentElemMeta()" /> Mobil</label>
-          <label class="checkbox-label"><input type="checkbox" id="propZoneClassPerson" value="person" onchange="updateCurrentElemMeta()" /> Orang</label>
-        </div>
-      </div>
-    </div>
-
-    <!-- PROPERTIES FOR TRIPWIRE LINES -->
-    <div id="propsTripwireSection" style="display: none;">
-      <div class="form-group mb-3">
-        <label for="propLineName" class="form-label">Nama Garis Virtual</label>
-        <input type="text" id="propLineName" class="form-input" placeholder="Tripwire 1" oninput="updateCurrentElemMeta()" />
-      </div>
-
-      <div class="form-group mb-3">
-        <label for="propLineDirection" class="form-label">Arah Penyeberangan (Direction)</label>
-        <select id="propLineDirection" class="form-select" onchange="updateCurrentElemMeta()">
-          <option value="both">Dua Arah (A ⇄ B / Bolak-Balik)</option>
-          <option value="a_to_b">Satu Arah: Dari A ke B (Sesuai Panah)</option>
-          <option value="b_to_a">Satu Arah: Dari B ke A (Lawan Panah)</option>
-        </select>
-        <span class="form-help">Titik P1 adalah titik A, titik P2 adalah titik B.</span>
-      </div>
-
-      <div class="form-group mb-3">
-        <label class="form-label">Target Kelas yang Memicu Tripwire</label>
-        <div class="checkbox-group">
-          <label class="checkbox-label"><input type="checkbox" id="propLineClassPerson" value="person" checked onchange="updateCurrentElemMeta()" /> Pejalan Kaki (Person)</label>
-          <label class="checkbox-label"><input type="checkbox" id="propLineClassTruck" value="truck" onchange="updateCurrentElemMeta()" /> Truk</label>
-          <label class="checkbox-label"><input type="checkbox" id="propLineClassBus" value="bus" onchange="updateCurrentElemMeta()" /> Bus</label>
-          <label class="checkbox-label"><input type="checkbox" id="propLineClassCar" value="car" onchange="updateCurrentElemMeta()" /> Mobil</label>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="drawer-footer">
-    <button type="button" class="btn-control btn-sm" onclick="togglePropertiesDrawer(false)">Tutup Drawer</button>
-  </div>
-</div>
-
 <!-- MODAL: ADD NEW ZONE OR TRIPWIRE DIALOG -->
 <div id="addElementModal" class="video-modal-backdrop" style="display: none;">
   <div class="modal-dialog modal-dialog-sm form-modal-dialog">
@@ -133,7 +61,7 @@
     <div class="modal-body form-modal-body" style="max-height: 72vh; overflow-y: auto; padding: 20px;">
       <!-- Step 1 -->
       <div style="display: flex; gap: 14px; margin-bottom: 20px; align-items: flex-start;">
-        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">1</div>
+        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--accent-primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">1</div>
         <div style="flex: 1;">
           <h4 style="margin: 0 0 6px 0; font-size: 15px; color: var(--text-primary);">Pilih Kategori & Elemen</h4>
           <p style="margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
@@ -144,7 +72,7 @@
 
       <!-- Step 2 -->
       <div style="display: flex; gap: 14px; margin-bottom: 20px; align-items: flex-start;">
-        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">2</div>
+        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--accent-primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">2</div>
         <div style="flex: 1;">
           <h4 style="margin: 0 0 6px 0; font-size: 15px; color: var(--text-primary);">Mengubah Bentuk & Posisi Titik Sudut (Vertex)</h4>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px;">
@@ -178,7 +106,7 @@
 
       <!-- Step 3 -->
       <div style="display: flex; gap: 14px; margin-bottom: 20px; align-items: flex-start;">
-        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">3</div>
+        <div style="min-width: 32px; height: 32px; border-radius: 50%; background: var(--accent-primary); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;">3</div>
         <div style="flex: 1;">
           <h4 style="margin: 0 0 6px 0; font-size: 15px; color: var(--text-primary);">Atur Properti (Dwell Time & Arah)</h4>
           <p style="margin: 0 0 8px 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5;">

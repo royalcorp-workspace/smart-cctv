@@ -2,7 +2,10 @@
   "camera_id": "cam_02",
   "name": "Area Parkir POS-2",
   "source": "rtsp://${CAM02_USER}:${CAM02_PASS}@${CAM02_IP}:${CAM02_PORT}/Streaming/Channels/${CAM02_CHANNEL}",
-  "target_resolution": null,
+  "target_resolution": [
+    640,
+    360
+  ],
   "detector": {
     "enabled_classes": [
       "person",

@@ -139,7 +139,7 @@ def test_api_zones_and_atomic_reload():
     }
     resp_bad = client.post("/api/zones/update", json=bad_payload_short)
     assert resp_bad.status_code == 400
-    assert "at least 3 vertices" in resp_bad.json()["detail"]
+    assert "minimal 3 titik koordinat" in resp_bad.json()["detail"]
 
     # 3. POST invalid: self-intersecting bowtie
     bad_payload_bowtie = {
@@ -176,7 +176,8 @@ def test_api_zones_and_atomic_reload():
         # Verify updated content written
         with open(roi_file, "r", encoding="utf-8") as f:
             updated_data = json.load(f)
-        assert updated_data["zone_1_koridor"][0] == [150, 600]
+        actual_zones = updated_data.get("zones", updated_data)
+        assert actual_zones["zone_1_koridor"][0] == [150, 600]
 
     finally:
         # Restore original roi_zones.json to avoid side effects

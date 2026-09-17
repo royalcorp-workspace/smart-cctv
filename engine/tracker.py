@@ -107,6 +107,8 @@ class TrackedObject:
     stationary_frames: int = 0
     anchor_time: float = 0.0
     label_history: List[Tuple[str, float]] = field(default_factory=list)
+    pending_zone_id: Optional[str] = None
+    zone_confirmation_frames: int = 0
 
     def __post_init__(self) -> None:
         if self.associated_face_meta is not None and self.last_owner_info is None:
@@ -736,7 +738,7 @@ class CentroidTracker:
                 cur_limit = self._get_zone_dwell_limit(obj.zone_id)
                 new_limit = self._get_zone_dwell_limit(zone_id)
 
-                if is_physically_still and obj.zone_id and "outside" not in obj.zone_id:
+                if obj.is_stationary and is_physically_still and obj.zone_id and "outside" not in obj.zone_id:
                     # Vehicle is still. Protect active zone from boundary jitter (outside_zone or weaker zone)
                     if new_limit >= cur_limit:
                         effective_zone = obj.zone_id
@@ -804,20 +806,33 @@ class CentroidTracker:
                 obj.is_triggered = False
                 obj.alert_sent = False
 
+            # Sensor-Grade Temporal Debounce Confirmation (3 consecutive frames before zone switch)
             if zone_id and zone_id != obj.zone_id:
-                # Reset dwell and timer state when a vehicle changes its active zone
-                if getattr(obj, "class_label", "") in ("car", "bus", "truck"):
-                    cur_lim = self._get_zone_dwell_limit(obj.zone_id)
-                    new_lim = self._get_zone_dwell_limit(zone_id)
-                    has_moved = (frame_shift > 35.0 or anchor_dist > 50.0)
-                    is_stricter_upgrade = (new_lim < cur_lim)
-                    if (has_moved and obj.moved_confirmation_frames >= 10) or is_stricter_upgrade:
-                        obj.dwell_duration = 0.0
-                        obj.anchor_time = now
-                        obj.stationary_start = now
-                        obj.is_triggered = False
-                        obj.alert_sent = False
-                obj.zone_id = zone_id
+                if zone_id == getattr(obj, "pending_zone_id", None):
+                    obj.zone_confirmation_frames = getattr(obj, "zone_confirmation_frames", 0) + 1
+                else:
+                    obj.pending_zone_id = zone_id
+                    obj.zone_confirmation_frames = 1
+
+                if obj.zone_confirmation_frames >= 3:
+                    # Confirmed transition to new zone!
+                    if getattr(obj, "class_label", "") in ("car", "bus", "truck"):
+                        cur_lim = self._get_zone_dwell_limit(obj.zone_id)
+                        new_lim = self._get_zone_dwell_limit(zone_id)
+                        has_moved = (frame_shift > 35.0 or anchor_dist > 50.0)
+                        is_stricter_upgrade = (new_lim < cur_lim)
+                        if (has_moved and obj.moved_confirmation_frames >= 10) or is_stricter_upgrade:
+                            obj.dwell_duration = 0.0
+                            obj.anchor_time = now
+                            obj.stationary_start = now
+                            obj.is_triggered = False
+                            obj.alert_sent = False
+                    obj.zone_id = zone_id
+                    obj.pending_zone_id = None
+                    obj.zone_confirmation_frames = 0
+            else:
+                obj.pending_zone_id = None
+                obj.zone_confirmation_frames = 0
 
             obj.centroid = smoothed_centroid
             obj.bbox = bbox

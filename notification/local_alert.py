@@ -163,6 +163,7 @@ class VisualHUD:
         lines: Optional[Dict[str, Any]] = None,
         flashing_lines: Optional[Set[str]] = None,
         occluded_lines: Optional[Set[str]] = None,
+        draw_zones: bool = True,
     ) -> np.ndarray:
         """Render complete CCTV visual indicators onto canvas."""
         h, w = canvas.shape[:2]
@@ -231,18 +232,22 @@ class VisualHUD:
                 continue
             if len(pts) < 3:
                 continue
-            scaled_pts = [[int(round(pt[0] * zone_scale_x)), int(round(pt[1] * zone_scale_y))] for pt in pts]
-            np_pts = np.array(scaled_pts, dtype=np.int32).reshape((-1, 1, 2))
             is_violated = zone_id in violated_zones
 
             if is_violated:
+                scaled_pts = [[int(round(pt[0] * zone_scale_x)), int(round(pt[1] * zone_scale_y))] for pt in pts]
+                np_pts = np.array(scaled_pts, dtype=np.int32).reshape((-1, 1, 2))
                 zone_color = COLOR_VIOLATION if blink_state else COLOR_WARNING
                 cv2.polylines(overlay_zones_alert, [np_pts], isClosed=True, color=zone_color, thickness=2, lineType=cv2.LINE_AA)
                 has_alert_poly = True
-            else:
+            elif draw_zones:
                 zone_color = ZONE_PALETTE[poly_idx % len(ZONE_PALETTE)]
-                # Ultra-thin crisp perimeter line (thickness=1, no floor fill)
-                cv2.polylines(overlay_zones_safe, [np_pts], isClosed=True, color=zone_color, thickness=1, lineType=cv2.LINE_AA)
+                # Ultra-thin crisp perimeter line with sub-pixel fixed-point precision (shift=4)
+                shift = 4
+                sub_scale = 1 << shift  # 16
+                scaled_sub_pts = [[int(round(pt[0] * zone_scale_x * sub_scale)), int(round(pt[1] * zone_scale_y * sub_scale))] for pt in pts]
+                np_sub_pts = np.array(scaled_sub_pts, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(overlay_zones_safe, [np_sub_pts], isClosed=True, color=zone_color, thickness=1, lineType=cv2.LINE_AA, shift=shift)
                 has_safe_poly = True
             poly_idx += 1
 
@@ -295,18 +300,21 @@ class VisualHUD:
                     line_thick = 2
                     target_layer = overlay_trip_alert
                     badge_text = f"[BREACH] {l_name}"
-                elif is_occluded:
-                    has_occluded_trip = True
-                    line_color = (120, 120, 120)  # Dim gray
-                    line_thick = 1
-                    target_layer = overlay_trip_occluded
-                    badge_text = f"{l_name} [OCCLUDED]"
+                elif draw_zones:
+                    if is_occluded:
+                        has_occluded_trip = True
+                        line_color = (120, 120, 120)  # Dim gray
+                        line_thick = 1
+                        target_layer = overlay_trip_occluded
+                        badge_text = f"{l_name} [OCCLUDED]"
+                    else:
+                        has_safe_trip = True
+                        line_color = (255, 200, 0)  # Neon Cyan
+                        line_thick = 1  # Ultra-thin crisp line
+                        target_layer = overlay_trip_safe
+                        badge_text = l_name
                 else:
-                    has_safe_trip = True
-                    line_color = (255, 200, 0)  # Neon Cyan
-                    line_thick = 1  # Ultra-thin crisp line
-                    target_layer = overlay_trip_safe
-                    badge_text = l_name
+                    continue
 
                 # Draw hairline tripwire line on target layer
                 cv2.line(target_layer, sp1, sp2, line_color, line_thick, lineType=cv2.LINE_AA)

@@ -165,10 +165,12 @@ def test_moving_vehicle_zone_change_resets_dwell():
     assert trk.dwell_duration > 0.0, f"Dwell must accumulate, got {trk.dwell_duration}"
 
     # Truck genuinely moves: shifts 40px (> 15px) into outside_zone
-    cur_t += 2.0
-    det_moved = ((100, 140, 100, 80), (150, 180), "outside_zone", 8000.0, "truck", -10.0, 0.9, "yolo")
-    active_mv, _ = tracker.update([det_moved], timestamp=cur_t)
-    trk = active_mv[0]
+    # Due to sensor-grade 3-frame debounce filter, 3 consecutive frames are required to confirm zone transition
+    for _ in range(3):
+        cur_t += 0.5
+        det_moved = ((100, 140, 100, 80), (150, 180), "outside_zone", 8000.0, "truck", -10.0, 0.9, "yolo")
+        active_mv, _ = tracker.update([det_moved], timestamp=cur_t)
+        trk = active_mv[0]
 
     assert trk.is_stationary is False, "Truck must not be stationary after moving 56px."
     assert trk.dwell_duration == 0.0, f"Dwell must reset to 0.0 when vehicle moves, got {trk.dwell_duration}"

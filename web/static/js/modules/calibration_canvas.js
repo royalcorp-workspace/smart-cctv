@@ -72,13 +72,17 @@ function getActiveZoneColors(zKey, isInvalid = false) {
 
 /**
  * Dynamically align and anchor zoneEditorCanvas directly over visible video pixels,
- * eliminating letterbox/pillarbox offsets (e.g. 4:3 streams in 16:9 containers or fullscreen).
+ * eliminating letterbox/pillarbox offsets in normal and fullscreen viewports.
+ * The canvas is anchored relative to its direct parent (.video-frame-inner).
  */
 function syncCanvasWithVideoFeed() {
   const canvas = document.getElementById("zoneEditorCanvas");
   const img = document.getElementById("streamFeed");
-  const container = document.getElementById("videoContainer");
-  if (!canvas || !container) return;
+  if (!canvas) return;
+
+  // Crucial: The canvas is positioned absolute inside its direct parent container (.video-frame-inner)
+  const container = canvas.parentElement || document.querySelector(".video-frame-inner");
+  if (!container) return;
 
   const baseW = baseResolution[0] || 1920;
   const baseH = baseResolution[1] || 1080;
@@ -92,32 +96,35 @@ function syncCanvasWithVideoFeed() {
   if (containerRect.width === 0 || containerRect.height === 0) return;
 
   const containerRatio = containerRect.width / containerRect.height;
-  const imgRatio = (img && img.naturalWidth && img.naturalHeight)
-    ? (img.naturalWidth / img.naturalHeight)
-    : (baseW / baseH);
+  // Use camera's native base resolution ratio (e.g. 640/360 or 1920/1080) for mathematically exact 1:1 pixel mapping
+  const streamRatio = (baseW > 0 && baseH > 0)
+    ? (baseW / baseH)
+    : ((img && img.naturalWidth && img.naturalHeight && img.naturalWidth > 0)
+      ? (img.naturalWidth / img.naturalHeight)
+      : (16 / 9));
 
   let renderW, renderH, renderLeft, renderTop;
 
-  if (containerRatio > imgRatio) {
+  if (containerRatio > streamRatio) {
     // Pillarbox: video is constrained by container height, black bars on left and right
     renderH = containerRect.height;
-    renderW = renderH * imgRatio;
+    renderW = renderH * streamRatio;
     renderLeft = (containerRect.width - renderW) / 2;
     renderTop = 0;
   } else {
     // Letterbox: video is constrained by container width, black bars on top and bottom
     renderW = containerRect.width;
-    renderH = renderW / imgRatio;
+    renderH = renderW / streamRatio;
     renderLeft = 0;
     renderTop = (containerRect.height - renderH) / 2;
   }
 
-  // Anchor the canvas directly over visible video pixels with zero pixel offset
+  // Anchor the canvas directly over visible video pixels with sub-pixel precision
   canvas.style.position = "absolute";
-  canvas.style.left = `${Math.round(renderLeft)}px`;
-  canvas.style.top = `${Math.round(renderTop)}px`;
-  canvas.style.width = `${Math.round(renderW)}px`;
-  canvas.style.height = `${Math.round(renderH)}px`;
+  canvas.style.left = `${renderLeft.toFixed(2)}px`;
+  canvas.style.top = `${renderTop.toFixed(2)}px`;
+  canvas.style.width = `${renderW.toFixed(2)}px`;
+  canvas.style.height = `${renderH.toFixed(2)}px`;
 }
 
 function getNativeCoords(e) {
@@ -136,6 +143,17 @@ function getNativeCoords(e) {
   };
 }
 
+async function setCameraCalibrationMode(camId, isActive) {
+  try {
+    const target = camId || (typeof activeCamera !== "undefined" ? activeCamera : "cam_01");
+    await fetch(`/api/cameras/${target}/calibration_mode?active=${Boolean(isActive)}`, {
+      method: "POST",
+    });
+  } catch (err) {
+    console.warn("Could not toggle calibration mode on server:", err);
+  }
+}
+
 async function toggleZoneEditor(forceState) {
   const canvas = document.getElementById("zoneEditorCanvas");
   const toolbar = document.getElementById("zoneToolbar");
@@ -148,13 +166,15 @@ async function toggleZoneEditor(forceState) {
     canvas.classList.add("active");
     toolbar.style.display = "flex";
     if (btn) btn.classList.add("active");
+    setupFrameResizeObserver();
+    setCameraCalibrationMode(activeCamera, true);
     await fetchCameraZones();
     syncCanvasWithVideoFeed();
     setupCanvasEvents();
     renderZoneCanvas();
     showToast(
       "Mode Kalibrasi Aktif",
-      "Geser titik poligon dengan mouse untuk mengatur area. Klik (?) di toolbar untuk panduan lengkap.",
+      "Garis video dinonaktifkan sementara untuk kalibrasi bersih tanpa bayangan ganda.",
       "success",
       4000
     );
@@ -162,6 +182,7 @@ async function toggleZoneEditor(forceState) {
     canvas.classList.remove("active");
     toolbar.style.display = "none";
     if (btn) btn.classList.remove("active");
+    setCameraCalibrationMode(activeCamera, false);
     if (typeof togglePropertiesDrawer === "function") {
       togglePropertiesDrawer(false);
     }
@@ -192,10 +213,15 @@ async function fetchCameraZones() {
     const polyKeys = Object.keys(zoneData);
     if (polyKeys.length > 0 && (!selectedZone || !zoneData[selectedZone])) {
       selectedZone = polyKeys[0];
+    } else if (polyKeys.length === 0) {
+      selectedZone = null;
     }
+
     const lineKeys = Object.keys(lineData);
     if (lineKeys.length > 0 && (!selectedLine || !lineData[selectedLine])) {
       selectedLine = lineKeys[0];
+    } else if (lineKeys.length === 0) {
+      selectedLine = null;
     }
 
     syncCanvasWithVideoFeed();
@@ -402,10 +428,13 @@ function setupCanvasEvents() {
       const keys = Object.keys(zoneData || {});
       if (keys.length === 0 || !selectedZone || !zoneData[selectedZone]) {
         if (typeof pushHistory === "function") pushHistory();
-        const newKey = "zone_1";
+        let newKey = "zone_1";
+        while (zoneData[newKey]) {
+          newKey = `zone_${Object.keys(zoneData).length + 1}`;
+        }
         zoneData[newKey] = [[x, y]];
         zoneConfigs[newKey] = {
-          name: "Zona Pemantauan 1",
+          name: `Zona Pemantauan ${Object.keys(zoneData).length + 1}`,
           dwell_threshold_sec: 60,
           detect_unattended: false,
         };
@@ -413,9 +442,10 @@ function setupCanvasEvents() {
         selectedVertexIndex = 0;
         window.selectedVertexIndex = 0;
         draggedPointIndex = 0;
+        if (typeof setZoneMode === "function") setZoneMode("add");
         if (typeof populateElementSelector === "function") populateElementSelector();
         renderZoneCanvas();
-        showToast("Zona Baru Dimulai", "Titik P1 dibuat. Klik area lain untuk menambahkan titik sudut berikutnya.", "info", 3500);
+        showToast("Zona Baru Dimulai", "Titik P1 dibuat. Klik titik lain pada layar untuk melanjutkan titik sudut.", "info", 3000);
         return;
       }
 
@@ -444,6 +474,9 @@ function setupCanvasEvents() {
         window.selectedVertexIndex = selectedVertexIndex;
         draggedPointIndex = selectedVertexIndex;
         renderZoneCanvas();
+        if (pts.length === 3) {
+          showToast("Poligon Terhubung", "Zona memiliki 3 titik dan otomatis terhubung. Klik 'Simpan' untuk menerapkan atau klik lagi untuk menambah sudut.", "success", 3500);
+        }
       } else {
         selectedVertexIndex = -1;
         window.selectedVertexIndex = -1;
@@ -589,8 +622,8 @@ function renderZoneCanvas() {
 
   // 3. RENDER ACTIVE CATEGORY
   if (activeEditorCategory === "polygons") {
-    const activePts = zoneData[selectedZone];
-    if (!activePts || activePts.length === 0) {
+    const keys = Object.keys(zoneData || {});
+    if (keys.length === 0 || !selectedZone || !zoneData[selectedZone]) {
       const valPill = document.getElementById("zoneValidationPill");
       const saveBtn = document.getElementById("btnSaveZones");
       if (valPill) {
@@ -598,39 +631,82 @@ function renderZoneCanvas() {
         valPill.className = "glass-validation-pill valid";
       }
       if (saveBtn) saveBtn.disabled = false;
+
+      // Draw elegant helpful hint when camera has 0 zones
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.70)";
+      ctx.font = `600 ${Math.max(12, Math.round(15 * resScale))}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        "Klik di mana saja pada layar untuk mulai membuat titik zona (P1, P2, P3...)",
+        baseW / 2,
+        baseH / 2
+      );
+      ctx.restore();
       return;
     }
 
-    const selfIntersect = isPolygonSelfIntersecting(activePts);
-    const colors = getActiveZoneColors(selectedZone, selfIntersect);
+    const activePts = zoneData[selectedZone] || [];
+    if (activePts.length === 0) {
+      const valPill = document.getElementById("zoneValidationPill");
+      const saveBtn = document.getElementById("btnSaveZones");
+      if (valPill) {
+        valPill.textContent = "Zona Kosong (0 Titik)";
+        valPill.className = "glass-validation-pill valid";
+      }
+      if (saveBtn) saveBtn.disabled = false;
+      return;
+    }
 
     const valPill = document.getElementById("zoneValidationPill");
     const saveBtn = document.getElementById("btnSaveZones");
-    if (valPill) {
-      if (selfIntersect) {
-        valPill.textContent = "⚠ Bersilangan";
-        valPill.className = "glass-validation-pill invalid";
-      } else {
-        valPill.textContent = "Valid";
-        valPill.className = "glass-validation-pill valid";
+    let selfIntersect = false;
+
+    if (activePts.length < 3) {
+      if (valPill) {
+        valPill.textContent = `Belum Lengkap (${activePts.length}/3 Titik)`;
+        valPill.className = "glass-validation-pill warning";
+      }
+      if (saveBtn) {
+        saveBtn.disabled = true;
+      }
+    } else {
+      selfIntersect = isPolygonSelfIntersecting(activePts);
+      if (valPill) {
+        if (selfIntersect) {
+          valPill.textContent = "⚠ Bersilangan";
+          valPill.className = "glass-validation-pill invalid";
+        } else {
+          valPill.textContent = `Valid (${activePts.length} Titik)`;
+          valPill.className = "glass-validation-pill valid";
+        }
+      }
+      if (saveBtn) {
+        saveBtn.disabled = selfIntersect;
       }
     }
-    if (saveBtn) {
-      saveBtn.disabled = selfIntersect;
-    }
 
-    // Polygon Body
+    const colors = getActiveZoneColors(selectedZone, selfIntersect);
+
+    // Polygon Body / Lines
     ctx.beginPath();
     ctx.moveTo(activePts[0][0], activePts[0][1]);
     for (let i = 1; i < activePts.length; i++) {
       ctx.lineTo(activePts[i][0], activePts[i][1]);
     }
-    ctx.closePath();
-    ctx.fillStyle = colors.fill;
-    ctx.fill();
+    if (activePts.length >= 3) {
+      ctx.closePath();
+      ctx.fillStyle = colors.fill;
+      ctx.fill();
+    }
     ctx.strokeStyle = colors.stroke;
     ctx.lineWidth = Math.max(1.5, Math.round((selfIntersect ? 3.5 : 2.5) * resScale));
+    if (activePts.length < 3) {
+      ctx.setLineDash([Math.round(6 * resScale), Math.round(4 * resScale)]);
+    }
     ctx.stroke();
+    ctx.setLineDash([]);
 
     // Smart Midpoint (+) Ghost Handle
     if (ghostMidpoint !== null && !isMouseDown) {
@@ -821,6 +897,22 @@ function renderZoneCanvas() {
   }
 }
 
+// High-performance ResizeObserver on .video-frame-inner
+let _frameResizeObserver = null;
+function setupFrameResizeObserver() {
+  if (typeof ResizeObserver === "undefined") return;
+  const frameInner = document.querySelector(".video-frame-inner");
+  if (!frameInner || _frameResizeObserver) return;
+
+  _frameResizeObserver = new ResizeObserver(() => {
+    if (zoneEditorActive) {
+      syncCanvasWithVideoFeed();
+      renderZoneCanvas();
+    }
+  });
+  _frameResizeObserver.observe(frameInner);
+}
+
 // Window resize & Fullscreen responsive canvas resync
 window.addEventListener("resize", () => {
   if (zoneEditorActive) {
@@ -830,13 +922,32 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("fullscreenchange", () => {
+  if (zoneEditorActive) {
+    syncCanvasWithVideoFeed();
+    renderZoneCanvas();
+  }
+  // Delayed resync to accommodate browser fullscreen animation settling
   setTimeout(() => {
     if (zoneEditorActive) {
       syncCanvasWithVideoFeed();
       renderZoneCanvas();
     }
-  }, 100);
+  }, 120);
+  setTimeout(() => {
+    if (zoneEditorActive) {
+      syncCanvasWithVideoFeed();
+      renderZoneCanvas();
+    }
+  }, 300);
 });
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupFrameResizeObserver);
+} else {
+  setupFrameResizeObserver();
+}
 
 // Export to window for global access across modules
 window.syncCanvasWithVideoFeed = syncCanvasWithVideoFeed;
+window.setupFrameResizeObserver = setupFrameResizeObserver;
+window.setCameraCalibrationMode = setCameraCalibrationMode;
