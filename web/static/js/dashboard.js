@@ -3,6 +3,49 @@
  * Coordinates modular scripts: theme, camera_manager, telemetry, calibration, and incidents.
  */
 
+/* ==========================================================================
+   CSRF PROTECTION: AUTOMATIC FETCH INTERCEPTOR
+   Intercepts all mutating requests (POST, PUT, DELETE, PATCH) and injects
+   X-CSRF-Token and X-Requested-With headers automatically.
+   ========================================================================== */
+(function setupCsrfInterceptor() {
+  function getCsrfToken() {
+    const metaTag = document.querySelector('meta[name="csrf-token"]');
+    if (metaTag && metaTag.content && metaTag.content !== "None") {
+      return metaTag.content;
+    }
+    const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
+  const originalFetch = window.fetch;
+  window.fetch = async function (resource, init = {}) {
+    init = init || {};
+    const method = (init.method || (resource instanceof Request ? resource.method : "GET") || "GET").toUpperCase();
+    if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
+      const token = getCsrfToken();
+      if (resource instanceof Request) {
+        if (token && !resource.headers.has("X-CSRF-Token")) {
+          resource.headers.set("X-CSRF-Token", token);
+        }
+        if (!resource.headers.has("X-Requested-With")) {
+          resource.headers.set("X-Requested-With", "XMLHttpRequest");
+        }
+      } else {
+        const headers = new Headers(init.headers || {});
+        if (token && !headers.has("X-CSRF-Token")) {
+          headers.set("X-CSRF-Token", token);
+        }
+        if (!headers.has("X-Requested-With")) {
+          headers.set("X-Requested-With", "XMLHttpRequest");
+        }
+        init.headers = headers;
+      }
+    }
+    return originalFetch.call(this, resource, init);
+  };
+})();
+
 let pollTimer = null;
 
 // Digital clock update interval

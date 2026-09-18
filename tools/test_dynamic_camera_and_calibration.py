@@ -277,7 +277,64 @@ class TestDynamicCameraAndCalibration(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("baris baru", resp.json()["detail"].lower())
 
+    def test_07_csrf_origin_and_token_protection(self):
+        """Test comprehensive CSRF defense: Origin verification and Double-Submit Cookie tokens."""
+        # 1. Page load sets CSRF cookie and injects meta tag
+        dash_resp = self.client.get("/dashboard")
+        self.assertEqual(dash_resp.status_code, 200)
+        csrf_cookie = dash_resp.cookies.get("csrf_token")
+        self.assertTrue(csrf_cookie is not None and len(csrf_cookie) > 10, "CSRF cookie must be issued")
+        self.assertIn('name="csrf-token"', dash_resp.text)
+        self.assertIn(csrf_cookie, dash_resp.text)
+
+        # 2. Cross-Origin attack with malicious Origin must be blocked (403 Forbidden)
+        evil_origin_resp = self.client.post(
+            "/api/cameras/test_rtsp",
+            json={"ip": "192.168.1.100", "port": 554},
+            headers={"Origin": "http://evil-attacker.com"},
+        )
+        self.assertEqual(evil_origin_resp.status_code, 403)
+        self.assertIn("csrf protection", evil_origin_resp.json()["detail"].lower())
+
+        # 3. Cross-Origin attack with malicious Referer must be blocked (403 Forbidden)
+        evil_ref_resp = self.client.post(
+            "/api/cameras/test_rtsp",
+            json={"ip": "192.168.1.100", "port": 554},
+            headers={"Referer": "http://malicious-site.org/attack.html"},
+        )
+        self.assertEqual(evil_ref_resp.status_code, 403)
+        self.assertIn("csrf protection", evil_ref_resp.json()["detail"].lower())
+
+        # 4. Mismatched X-CSRF-Token against cookie must be blocked (403 Forbidden)
+        mismatch_resp = self.client.post(
+            "/api/cameras/test_rtsp",
+            json={"ip": "192.168.1.100", "port": 554},
+            headers={
+                "Origin": "http://testserver",
+                "X-CSRF-Token": "invalid_forged_token_value",
+            },
+            cookies={"csrf_token": csrf_cookie},
+        )
+        self.assertEqual(mismatch_resp.status_code, 403)
+        self.assertIn("token csrf tidak valid", mismatch_resp.json()["detail"].lower())
+
+        # 5. Legitimate request with matching Origin and CSRF token must pass (not 403)
+        valid_resp = self.client.post(
+            "/api/cameras/test_rtsp",
+            json={"ip": "127.0.0.1", "port": 554},  # Reaches IP validator, proving CSRF passed
+            headers={
+                "Origin": "http://testserver",
+                "X-CSRF-Token": csrf_cookie,
+            },
+            cookies={"csrf_token": csrf_cookie},
+        )
+        # Status code is 200 (SSRF handler caught loopback), proving CSRF middleware allowed request
+        self.assertEqual(valid_resp.status_code, 200)
+        self.assertFalse(valid_resp.json()["success"])
+        self.assertIn("loopback", valid_resp.json()["message"].lower())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
