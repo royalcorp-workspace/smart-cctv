@@ -242,3 +242,48 @@
   aspect-ratio: auto;
 }
 
+/* =========================================================================
+   RESPONSIVE VIEWPORT STYLES (TABLET & MOBILE)
+   ========================================================================= */
+@media (max-width: 640px) {
+  .video-card-header {
+    padding: 6px 10px;
+    gap: 6px;
+  }
+
+  .video-header-left {
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .video-cam-meta {
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .video-cam-name {
+    font-size: 0.78rem;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .video-header-right {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .video-stream-pill {
+    font-size: 0.65rem;
+    padding: 2px 5px;
+  }
+
+  .btn-video-expand {
+    width: 24px;
+    height: 24px;
+  }
+}
+
+

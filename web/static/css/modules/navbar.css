@@ -349,3 +349,116 @@ body.view-mode-single #btnToggleEditor {
   display: inline-flex !important;
 }
 
+/* ==========================================================================
+   RESPONSIVE NAVBAR MEDIA QUERIES
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  .navbar {
+    padding: 6px 12px;
+    gap: 8px;
+  }
+
+  .navbar-left {
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .navbar-right {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .camera-select {
+    min-width: 140px;
+    font-size: 0.82rem;
+    padding: 5px 24px 5px 28px;
+  }
+
+  .clock-display {
+    font-size: 0.72rem;
+    padding: 2px 6px;
+  }
+
+  /* Compact buttons: show crisp icons with tooltips */
+  .btn-control span,
+  .btn-view-toggle span {
+    display: none;
+  }
+
+  .btn-control,
+  .btn-view-toggle {
+    padding: 6px 8px;
+  }
+}
+
+@media (max-width: 640px) {
+  .navbar {
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    gap: 6px;
+  }
+
+  .navbar-left {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .brand-title {
+    font-size: 0.92rem;
+    white-space: nowrap;
+  }
+
+  .brand-badge {
+    display: none; /* Hide badge to keep single-line header clean on small phones */
+  }
+
+  .camera-select-container {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .select-wrapper {
+    width: 100%;
+  }
+
+  .camera-select {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.78rem;
+    padding: 4px 22px 4px 26px;
+  }
+
+  .grid-size-wrap {
+    padding: 2px 4px;
+    flex-shrink: 0;
+  }
+
+  .grid-size-label {
+    display: none;
+  }
+
+  .navbar-right {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 6px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+
+  .clock-display {
+    display: none; /* Clock hidden on small phones to give full room to action buttons */
+  }
+
+  .view-switcher-wrap {
+    flex-shrink: 0;
+  }
+}
+
+

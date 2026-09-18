@@ -365,11 +365,46 @@
 }
 
 /* RESPONSIVE */
-@media (max-width: 600px) {
+@media (max-width: 640px) {
+  .modal-backdrop,
+  .video-modal-backdrop {
+    padding: 8px;
+    align-items: flex-end; /* Mobile bottom-sheet feel */
+  }
+
+  .modal-dialog,
+  .video-modal-dialog,
+  .form-modal-dialog {
+    max-height: 92vh;
+    border-radius: 14px 14px 0 0;
+    width: 100%;
+    margin: 0;
+  }
+
+  .modal-header,
+  .video-modal-header {
+    padding: 12px 14px;
+  }
+
+  .modal-body {
+    padding: 12px 14px;
+    max-height: calc(92vh - 125px);
+    overflow-y: auto;
+  }
+
+  .modal-footer {
+    padding: 10px 14px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
   .form-grid {
     grid-template-columns: 1fr;
+    gap: 10px;
   }
+
   .col-span-2 {
     grid-column: span 1;
   }
 }
+

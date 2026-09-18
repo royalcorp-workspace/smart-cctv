@@ -101,3 +101,18 @@
   color: var(--text-subtle);
   font-style: italic;
 }
+
+/* =========================================================================
+   RESPONSIVE INCIDENTS SECTION (MOBILE)
+   ========================================================================= */
+@media (max-width: 640px) {
+  .incidents-section {
+    padding: 0 8px;
+    margin-bottom: 16px;
+  }
+
+  .incidents-card {
+    padding: 12px;
+  }
+}
+

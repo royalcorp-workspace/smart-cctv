@@ -122,7 +122,39 @@
 
 @media (max-width: 1024px) {
   .dashboard-main.mode-single {
-    grid-template-columns: 1fr;
+    display: flex !important;
+    flex-direction: column !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+    padding: 10px 14px;
+    gap: 14px;
+  }
+
+  .dashboard-main.mode-single .video-container-section {
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 260px !important;
+  }
+
+  .dashboard-main.mode-single .video-card {
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  .dashboard-main.mode-single .video-frame-inner {
+    aspect-ratio: 16 / 9 !important;
+    min-height: 220px !important;
+    height: auto !important;
+  }
+
+  .dashboard-main.mode-single .telemetry-sidebar {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: visible !important;
   }
 }
 
@@ -759,20 +791,40 @@ body:has(.dashboard-main.mode-single) #btnToggleEditor {
   display: none;
 }
 
-/* Small mobile screens fallback */
-@media (max-width: 600px) {
+/* Small mobile screens fallback: single column, clear feed aspect ratio */
+@media (max-width: 640px) {
   .dashboard-main.mode-grid {
-    height: auto;
-    max-height: none;
-    overflow-y: auto;
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+    padding: 6px 8px !important;
+  }
+  .grid-viewport-section {
+    height: auto !important;
+    overflow: visible !important;
+    padding: 6px 8px !important;
+  }
+  .grid-header-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .grid-nav-controls {
+    margin-left: 0;
+    margin-right: 0;
   }
   .camera-grid-matrix {
+    display: flex !important;
+    flex-direction: column !important;
     grid-template-columns: 1fr !important;
-    grid-template-rows: auto !important;
-    height: auto;
+    grid-template-rows: none !important;
+    height: auto !important;
+    gap: 10px !important;
   }
   .grid-cell {
-    aspect-ratio: 16 / 9;
-    height: auto;
+    width: 100% !important;
+    aspect-ratio: 16 / 9 !important;
+    min-height: 200px !important;
+    height: auto !important;
   }
 }
+

@@ -70,6 +70,22 @@ body {
 @media (max-width: 1024px) {
   .dashboard-main {
     grid-template-columns: 1fr;
+    padding: 10px 14px;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .dashboard-main {
+    padding: 8px;
+    gap: 10px;
+  }
+
+  .dashboard-footer {
+    flex-direction: column;
+    gap: 4px;
+    text-align: center;
+    padding: 8px 12px;
   }
 }
 
@@ -99,3 +115,4 @@ body {
 .footer-right {
   font-family: var(--font-mono);
 }
+

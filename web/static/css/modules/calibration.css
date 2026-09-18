@@ -708,3 +708,47 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* ==========================================================================
+   RESPONSIVE CALIBRATION OVERLAY (TABLET & MOBILE)
+   ========================================================================== */
+@media (max-width: 768px) {
+  .zone-glass-toolbar {
+    top: 10px;
+    width: 96%;
+    max-width: 96%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 4px 6px;
+    gap: 4px;
+  }
+
+  .zone-glass-toolbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tool-btn span {
+    display: none; /* Icon-only toolbar on small touch screens */
+  }
+
+  .tool-btn {
+    padding: 4px 8px;
+    min-width: 32px;
+    justify-content: center;
+  }
+
+  /* Bottom sheet drawer on mobile devices */
+  .properties-drawer {
+    top: auto;
+    bottom: 8px;
+    right: 8px;
+    left: 8px;
+    width: auto;
+    max-width: 100%;
+    max-height: 52vh;
+    border-radius: 12px;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.6);
+  }
+}
+
