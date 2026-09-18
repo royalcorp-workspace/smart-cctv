@@ -21,8 +21,8 @@
       "handbag",
       "suitcase"
     ],
-    "confidence_threshold": 0.22,
-    "base_conf": 0.22,
+    "confidence_threshold": 0.23,
+    "base_conf": 0.23,
     "bag_conf": 0.18,
     "stride": 2
   },

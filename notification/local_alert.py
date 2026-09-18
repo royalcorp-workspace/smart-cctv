@@ -420,11 +420,13 @@ class VisualHUD:
             is_traffic_cam = (camera_id in ("cam_02", "cam_03"))
 
             if is_person:
-                # On walkway compliance camera (cam_04), render person with K3 safety status.
-                # On traffic corridor cameras (cam_02, cam_03), render pedestrian bounding boxes without dwell alarm.
-                # On cam_01 (indoor corridor), hide person bounding boxes to eliminate clutter.
+                # STRICT ROI FILTER FOR PERSONS:
+                # On indoor cameras (cam_01, cam_05), only render persons who are inside an active ROI zone.
+                # Suppresses office chairs, jackets, and cubicles outside the monitored corridor/tables.
                 if not (is_walkway_cam or is_traffic_cam):
-                    continue
+                    p_zone = str(getattr(obj, "zone_id", ""))
+                    if not p_zone or p_zone in ("outside_zone", "unassigned") or p_zone not in zones:
+                        continue
             elif is_vehicle:
                 # On cam_02, cam_03 (traffic) or walkway cams with vehicle monitoring, render vehicles.
                 # On cam_01, hide vehicles.
@@ -539,9 +541,15 @@ class VisualHUD:
                         box_color = (0, 0, 255) if blink_state else (0, 165, 255)
                         badge_text = f"[ALERT K3] PELANGGARAN JALUR ({dwell_sec:.0f}s)"
                 else:
-                    # cam_02 or general pedestrian: Emerald Green (0, 255, 127)
+                    # cam_01, cam_02, cam_03, cam_05 or general pedestrian: Emerald Green (0, 255, 127)
                     box_color = (0, 255, 127)  # Emerald Green
-                    badge_text = f"PERSON [ID #{track_id}]"
+                    p_zone = str(getattr(obj, "zone_id", ""))
+                    p_zone_name = str(getattr(obj, "zone_name", ""))
+                    if p_zone and p_zone not in ("outside_zone", "unassigned"):
+                        z_lbl = p_zone_name if p_zone_name else p_zone
+                        badge_text = f"PERSON [ID #{track_id}] ({z_lbl})"
+                    else:
+                        badge_text = f"PERSON [ID #{track_id}]"
             else:
                 is_attended = getattr(obj, "is_attended", False)
                 dwell_max = float(getattr(obj, "dwell_threshold", 3600.0))

@@ -107,6 +107,12 @@ async def dashboard_admin_page(request: Request) -> HTMLResponse:
     _sync_disk_cameras_into_buffer()
     buffer = MultiCameraBuffer.get_instance()
     cameras = buffer.get_cameras()
+    # Ensure all camera pipelines have live zone drawing enabled by default
+    for c in cameras:
+        cid = c.get("camera_id")
+        pipe = buffer.get_pipeline(cid)
+        if pipe is not None and hasattr(pipe, "set_draw_zones"):
+            pipe.set_draw_zones(True)
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -688,6 +694,8 @@ async def update_zones(request: Request) -> JSONResponse:
                     cam_cfg["zones"][z_key]["dwell_time_threshold"] = dval
                 if "detect_unattended" in z_val:
                     cam_cfg["zones"][z_key]["detect_unattended"] = bool(z_val["detect_unattended"])
+                if "target_classes" in z_val and isinstance(z_val["target_classes"], list):
+                    cam_cfg["zones"][z_key]["target_classes"] = z_val["target_classes"]
             # Backup and write config.json
             shutil.copyfile(cfg_file, cam_dir / "config.json.bak")
             with open(cfg_file, "w", encoding="utf-8") as cf:

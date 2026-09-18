@@ -152,10 +152,10 @@ class YOLOOpenVINODetector:
             # Thresholds lowered to detect persons far from camera (e.g. back row desks at 640x360)
             area = w * h
             if cid == 0:
-                if h < 18 or w < 12 or area < 300:
+                if h < 14 or w < 8 or area < 140:
                     logger.debug(
                         f"[YOLODetector] Person blob filtered (too small): "
-                        f"w={w}px h={h}px area={area}px² (min: w>=12, h>=18, area>=300)"
+                        f"w={w}px h={h}px area={area}px² (min: w>=8, h>=14, area>=140)"
                     )
                     continue
             elif cid in (2, 5, 7):  # vehicles: car, bus, truck

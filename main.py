@@ -916,12 +916,12 @@ class CameraPipeline:
                     # Geometric sanity filter: discard tiny blobs that cannot be human.
                     # Uses absolute dimensions only (no aspect-ratio) to handle all postures:
                     # seated at desk (wide box), walking (tall box), or crouching (medium box).
-                    # Thresholds synced with yolo_detector.py to detect persons at back-row desks (640x360)
+                    # Thresholds synced with yolo_detector.py to detect persons at back-row desks and distant views (640x360)
                     p_w, p_h = bbox[2], bbox[3]
-                    if p_h < 18 or p_w < 12 or (p_w * p_h) < 300:
+                    if p_h < 14 or p_w < 8 or (p_w * p_h) < 140:
                         logger.debug(
                             f"[{self.camera_id}] Person detection filtered (too small for human): "
-                            f"w={p_w}px h={p_h}px area={p_w*p_h}px² (min: w>=12, h>=18, area>=300)"
+                            f"w={p_w}px h={p_h}px area={p_w*p_h}px² (min: w>=8, h>=14, area>=140)"
                         )
                         continue
 
@@ -1274,8 +1274,15 @@ class CameraPipeline:
                                 self._resolve_event_async(eid)
                         continue
 
-                # Persons never trigger baggage or parking dwell violations on traffic cameras
+                # 1b. PERSON HANDLING: Visual zone tracking (No audio alarm or Telegram spam per user preference)
                 if getattr(track, "class_label", "") == "person":
+                    if track.zone_id and "outside" not in track.zone_id and "unassigned" not in track.zone_id:
+                        zone_info = zones_cfg.get(track.zone_id, {})
+                        if not zone_info and track.zone_id.replace("__", "_") in zones_cfg:
+                            zone_info = zones_cfg[track.zone_id.replace("__", "_")]
+                        track.zone_name = zone_info.get("name", track.zone_id)
+                    else:
+                        track.zone_name = ""
                     if track.is_triggered:
                         track.is_triggered = False
                         track.alert_sent = False
@@ -2024,7 +2031,12 @@ class CameraPipeline:
             ) + len(walkway_violations)
             rendering_tracks = [
                 obj for obj in active_tracks
-                if not hasattr(obj, "should_render") or obj.should_render
+                if (not hasattr(obj, "should_render") or obj.should_render)
+                and not (
+                    getattr(obj, "class_label", "") == "person"
+                    and self.camera_id in ("cam_01", "cam_05")
+                    and (not getattr(obj, "zone_id", "") or getattr(obj, "zone_id", "") in ("outside_zone", "unassigned") or getattr(obj, "zone_id", "") not in self.roi_zones)
+                )
             ]
             face_telemetry = []
             for f in (self._cached_faces or []):

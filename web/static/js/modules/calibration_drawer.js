@@ -145,6 +145,17 @@ function syncPropertiesDrawerValues() {
       dwellHelp.textContent = `${dwellVal} detik = ${(dwellVal / 60).toFixed(1)} menit. Melebihi batas ini memicu alarm & Telegram.`;
     }
 
+    // Sync target classes checkboxes for polygons
+    const targetClasses = Array.isArray(cfg.target_classes) ? cfg.target_classes : ["truck", "bus", "car"];
+    const chkTruck = document.getElementById("propZoneClassTruck");
+    const chkBus = document.getElementById("propZoneClassBus");
+    const chkCar = document.getElementById("propZoneClassCar");
+    const chkPerson = document.getElementById("propZoneClassPerson");
+    if (chkTruck) chkTruck.checked = targetClasses.includes("truck");
+    if (chkBus) chkBus.checked = targetClasses.includes("bus");
+    if (chkCar) chkCar.checked = targetClasses.includes("car");
+    if (chkPerson) chkPerson.checked = targetClasses.includes("person");
+
     if (title) title.textContent = `Properti: ${cfg.name || selectedZone}`;
     if (dot && typeof getActiveZoneColors === "function") {
       dot.style.backgroundColor = getActiveZoneColors(selectedZone).stroke;
@@ -159,6 +170,17 @@ function syncPropertiesDrawerValues() {
 
     const dirSelect = document.getElementById("propLineDirection");
     if (dirSelect) dirSelect.value = ldata.direction || "both";
+
+    // Sync target classes checkboxes for tripwires
+    const lineTargetClasses = Array.isArray(ldata.target_classes) ? ldata.target_classes : ["person"];
+    const chkLinePerson = document.getElementById("propLineClassPerson");
+    const chkLineTruck = document.getElementById("propLineClassTruck");
+    const chkLineBus = document.getElementById("propLineClassBus");
+    const chkLineCar = document.getElementById("propLineClassCar");
+    if (chkLinePerson) chkLinePerson.checked = lineTargetClasses.includes("person");
+    if (chkLineTruck) chkLineTruck.checked = lineTargetClasses.includes("truck");
+    if (chkLineBus) chkLineBus.checked = lineTargetClasses.includes("bus");
+    if (chkLineCar) chkLineCar.checked = lineTargetClasses.includes("car");
 
     if (title) title.textContent = `Properti: ${ldata.name || selectedLine}`;
     if (dot) dot.style.backgroundColor = "#06b6d4";
@@ -176,6 +198,14 @@ function updateCurrentElemMeta() {
     zoneConfigs[selectedZone].name = nameVal;
     zoneConfigs[selectedZone].dwell_threshold_sec = dwellVal;
 
+    // Collect target classes for zone
+    const classes = [];
+    if (document.getElementById("propZoneClassTruck")?.checked) classes.push("truck");
+    if (document.getElementById("propZoneClassBus")?.checked) classes.push("bus");
+    if (document.getElementById("propZoneClassCar")?.checked) classes.push("car");
+    if (document.getElementById("propZoneClassPerson")?.checked) classes.push("person");
+    zoneConfigs[selectedZone].target_classes = classes;
+
     const dwellHelp = document.getElementById("propZoneDwellHelp");
     if (dwellHelp) {
       dwellHelp.textContent = `${dwellVal} detik = ${(dwellVal / 60).toFixed(1)} menit toleransi.`;
@@ -190,6 +220,14 @@ function updateCurrentElemMeta() {
 
     lineData[selectedLine].name = nameVal;
     lineData[selectedLine].direction = dirVal;
+
+    // Collect target classes for tripwire
+    const lineClasses = [];
+    if (document.getElementById("propLineClassPerson")?.checked) lineClasses.push("person");
+    if (document.getElementById("propLineClassTruck")?.checked) lineClasses.push("truck");
+    if (document.getElementById("propLineClassBus")?.checked) lineClasses.push("bus");
+    if (document.getElementById("propLineClassCar")?.checked) lineClasses.push("car");
+    lineData[selectedLine].target_classes = lineClasses;
 
     const opt = document.querySelector(`#zoneSelector option[value="${selectedLine}"]`);
     if (opt) opt.textContent = nameVal;
@@ -274,6 +312,7 @@ function submitAddElement() {
       name: nameVal,
       dwell_threshold_sec: dwellVal,
       detect_unattended: false,
+      target_classes: ["truck", "bus", "car"],
     };
 
     selectedZone = newKey;
