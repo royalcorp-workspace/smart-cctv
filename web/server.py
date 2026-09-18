@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import ipaddress
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import re
 import shutil
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import urllib.parse
 
 from dotenv import load_dotenv
@@ -22,6 +23,58 @@ from web.buffer import MultiCameraBuffer
 from notification.buzzer_alert import BuzzerNotifier
 
 logger = logging.getLogger("smart_cctv")
+
+# Security Whitelist: Allowed RTSP and secure RTSPS ports
+ALLOWED_RTSP_PORTS: Set[int] = {554, 8554, 5544, 10554, 322}
+
+
+def validate_rtsp_target(host: str, port: int) -> None:
+    """Strict SSRF and Port Guard: Block loopback, link-local, private cloud metadata, and non-RTSP ports."""
+    # 1. Validate Port
+    if port not in ALLOWED_RTSP_PORTS:
+        allowed_str = ", ".join(str(p) for p in sorted(ALLOWED_RTSP_PORTS))
+        raise ValueError(
+            f"Port {port} tidak diizinkan. Demi keamanan sistem, hanya port RTSP yang diperbolehkan ({allowed_str})."
+        )
+
+    # 2. Validate Host / IP
+    clean_host = (host or "").strip().lower()
+    if not clean_host:
+        raise ValueError("Alamat host/IP kamera tidak boleh kosong.")
+
+    # Explicit loopback and special hostname blocklist
+    if clean_host in ("localhost", "0.0.0.0", "::", "loopback", "127.0.0.1", "::1"):
+        raise ValueError(f"Alamat IP loopback / localhost '{clean_host}' ditolak demi keamanan jaringan internal.")
+
+    # IP Address Range checks
+    try:
+        ip_obj = ipaddress.ip_address(clean_host)
+        if ip_obj.is_loopback:
+            raise ValueError(f"Alamat IP loopback ({clean_host}) ditolak demi keamanan.")
+        if ip_obj.is_unspecified:
+            raise ValueError(f"Alamat IP unspecified ({clean_host}) tidak diizinkan.")
+        if ip_obj.is_link_local:
+            raise ValueError(f"Alamat IP link-local / metadata ({clean_host}) ditolak demi keamanan.")
+        if ip_obj.is_multicast:
+            raise ValueError(f"Alamat IP multicast ({clean_host}) tidak diizinkan.")
+    except ValueError as e:
+        if "ditolak demi keamanan" in str(e) or "tidak diizinkan" in str(e):
+            raise
+        # Domain name checks
+        if clean_host.endswith(".local") or clean_host.endswith(".localhost"):
+            raise ValueError(f"Domain internal/lokal '{clean_host}' tidak diizinkan.")
+
+
+def validate_rtsp_url(rtsp_url: str) -> None:
+    """Validate full RTSP URL for scheme, host, and port restrictions."""
+    parsed = urllib.parse.urlparse(rtsp_url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("rtsp", "rtsps"):
+        raise ValueError(f"Protokol '{scheme}' tidak didukung. Hanya protokol 'rtsp' atau 'rtsps' yang diizinkan.")
+
+    port = parsed.port if parsed.port is not None else (322 if scheme == "rtsps" else 554)
+    host = parsed.hostname or ""
+    validate_rtsp_target(host, port)
 
 # Paths, Templates, and Static Assets
 _BASE_DIR = Path(__file__).resolve().parent
@@ -215,9 +268,19 @@ async def test_rtsp_connection(request: Request) -> JSONResponse:
     password = (data.get("pass") or "").strip()
     channel = data.get("channel", 102)
 
-    if not rtsp_url:
+    if rtsp_url:
+        try:
+            validate_rtsp_url(rtsp_url)
+        except ValueError as ve:
+            return JSONResponse(content={"success": False, "message": str(ve), "width": 0, "height": 0, "rtsp_url": ""})
+    else:
         if not ip:
             raise HTTPException(status_code=400, detail="IP address or full RTSP URL is required.")
+        try:
+            validate_rtsp_target(ip, int(port))
+        except ValueError as ve:
+            return JSONResponse(content={"success": False, "message": str(ve), "width": 0, "height": 0, "rtsp_url": ""})
+
         enc_user = urllib.parse.quote(user, safe="")
         enc_pass = urllib.parse.quote(password, safe="")
         if enc_user and enc_pass:
@@ -287,6 +350,24 @@ async def add_camera(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Camera ID harus alfanumerik huruf kecil/garis bawah (contoh: cam_05).")
     if not name:
         name = raw_id.replace("_", " ").title()
+
+    # SSRF & Port Guard
+    if custom_rtsp:
+        try:
+            validate_rtsp_url(custom_rtsp)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+    else:
+        if not ip:
+            raise HTTPException(status_code=400, detail="Alamat IP kamera wajib diisi.")
+        try:
+            validate_rtsp_target(ip, port)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+
+    # Credential injection guard
+    if any(c in password for c in ("\r", "\n")) or any(c in user for c in ("\r", "\n")):
+        raise HTTPException(status_code=400, detail="Kredensial tidak boleh memuat karakter baris baru (newline).")
 
     camera_id = raw_id
     workspace_dir = Path(__file__).resolve().parent.parent

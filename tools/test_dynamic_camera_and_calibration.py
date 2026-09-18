@@ -219,6 +219,65 @@ class TestDynamicCameraAndCalibration(unittest.TestCase):
         msg_lower = data["message"].lower()
         self.assertTrue("gagal" in msg_lower or "timeout" in msg_lower, f"Unexpected message: {data['message']}")
 
+    def test_05_ssrf_and_port_whitelist_guard(self):
+        """Test SSRF rejection on loopback addresses and non-whitelisted ports."""
+        # 1. Loopback IP in test_rtsp
+        resp_lb = self.client.post("/api/cameras/test_rtsp", json={"ip": "127.0.0.1", "port": 554})
+        self.assertEqual(resp_lb.status_code, 200)
+        self.assertFalse(resp_lb.json()["success"])
+        self.assertIn("loopback", resp_lb.json()["message"].lower())
+
+        # 2. Localhost string in test_rtsp
+        resp_local = self.client.post("/api/cameras/test_rtsp", json={"ip": "localhost", "port": 554})
+        self.assertEqual(resp_local.status_code, 200)
+        self.assertFalse(resp_local.json()["success"])
+        self.assertIn("loopback", resp_local.json()["message"].lower())
+
+        # 3. Disallowed port in test_rtsp (e.g. 80, 22, 8080)
+        resp_port = self.client.post("/api/cameras/test_rtsp", json={"ip": "192.168.1.100", "port": 8080})
+        self.assertEqual(resp_port.status_code, 200)
+        self.assertFalse(resp_port.json()["success"])
+        self.assertIn("port 8080 tidak diizinkan", resp_port.json()["message"].lower())
+
+        # 4. Loopback in add_camera (should return 400)
+        resp_add_lb = self.client.post("/api/cameras/add", json={
+            "camera_id": "cam_evil_lb",
+            "ip": "127.0.0.1",
+            "port": 554,
+        })
+        self.assertEqual(resp_add_lb.status_code, 400)
+        self.assertIn("loopback", resp_add_lb.json()["detail"].lower())
+
+        # 5. Disallowed port in add_camera (should return 400)
+        resp_add_port = self.client.post("/api/cameras/add", json={
+            "camera_id": "cam_evil_port",
+            "ip": "192.168.1.100",
+            "port": 22,
+        })
+        self.assertEqual(resp_add_port.status_code, 400)
+        self.assertIn("port 22 tidak diizinkan", resp_add_port.json()["detail"].lower())
+
+        # 6. Custom RTSP with disallowed scheme or loopback in add_camera
+        resp_add_url = self.client.post("/api/cameras/add", json={
+            "camera_id": "cam_evil_url",
+            "rtsp_url": "http://192.168.1.100:554/feed",
+        })
+        self.assertEqual(resp_add_url.status_code, 400)
+        self.assertIn("protokol", resp_add_url.json()["detail"].lower())
+
+    def test_06_credential_injection_guard(self):
+        """Test rejection of credentials containing newline characters (preventing .env injection)."""
+        resp = self.client.post("/api/cameras/add", json={
+            "camera_id": "cam_inject",
+            "ip": "192.168.1.100",
+            "port": 554,
+            "user": "admin\nEVIL_VAR=hacked",
+            "pass": "password",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("baris baru", resp.json()["detail"].lower())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
