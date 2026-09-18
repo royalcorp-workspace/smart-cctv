@@ -413,8 +413,10 @@ def video_feed(camera_id: str, request: Request = Request({"type": "http"})) -> 
             "Pragma": "no-cache",
             "Expires": "0",
             "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
         },
     )
+
 
 
 @app.get("/api/status/{camera_id}", tags=["Telemetry & Events"], summary="Status Telemetri & Analitik Kamera Real-Time")
@@ -422,7 +424,7 @@ async def get_camera_status(camera_id: str) -> JSONResponse:
     """Return latest telemetry and analytics status for the specified camera."""
     buffer = MultiCameraBuffer.get_instance()
     telemetry = buffer.get_telemetry(camera_id=camera_id)
-    return JSONResponse(content=telemetry)
+    return JSONResponse(content=telemetry, headers={"Access-Control-Allow-Origin": "*"})
 
 
 @app.get("/api/cameras", tags=["Camera Management"], summary="Daftar Seluruh Kamera Terdaftar")
@@ -431,7 +433,8 @@ async def list_cameras() -> JSONResponse:
     _sync_disk_cameras_into_buffer()
     buffer = MultiCameraBuffer.get_instance()
     cameras = buffer.get_cameras()
-    return JSONResponse(content=cameras)
+    return JSONResponse(content=cameras, headers={"Access-Control-Allow-Origin": "*"})
+
 
 
 @app.post("/api/cameras/test_rtsp", tags=["Camera Management"], summary="Uji Konektivitas RTSP Kamera")
