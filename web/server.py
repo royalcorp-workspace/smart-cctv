@@ -179,13 +179,14 @@ async def csrf_protect_middleware(request: Request, call_next):
 
     # 3. Set cookie if newly generated
     if generated_token is not None:
+        is_https = (request.url.scheme == "https") or (request.headers.get("x-forwarded-proto") == "https")
         response.set_cookie(
             key="csrf_token",
             value=generated_token,
             httponly=False,  # Accessible to client JS for double-submit header
             samesite="lax",
             path="/",
-            secure=False,
+            secure=is_https,
         )
 
     return response
@@ -1048,6 +1049,8 @@ class DashboardServer:
             port=port,
             log_level="warning",
             access_log=False,
+            proxy_headers=True,
+            forwarded_allow_ips="*",
         )
         cls._uvicorn_server = uvicorn.Server(config)
 
