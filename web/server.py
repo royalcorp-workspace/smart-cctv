@@ -1052,7 +1052,7 @@ class DashboardServer:
             return cls._server_thread
 
         if enable_https is None:
-            env_val = os.getenv("ENABLE_HTTPS", "true").strip().lower()
+            env_val = os.getenv("ENABLE_HTTPS", "false").strip().lower()
             enable_https = env_val in ("true", "1", "yes")
 
         cls._is_https = bool(enable_https)
