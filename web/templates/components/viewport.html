@@ -18,7 +18,7 @@
 
     <!-- VIDEO FRAME INNER (UNOBSTRUCTED 16:9 FEED) -->
     <div class="video-frame-inner">
-      <img id="streamFeed" src="/video_feed/cam_01" alt="CCTV Stream Feed" />
+      <img id="streamFeed" src="/video_feed/cam_01{% if api_key %}?api_key={{ api_key }}{% endif %}" alt="CCTV Stream Feed" />
 
       {% if is_admin %}
       <!-- INTERACTIVE ZONE & TRIPWIRE EDITOR CANVAS (NATIVE 1920x1080) -->

@@ -136,9 +136,11 @@ function onCameraChange() {
   }
   window._camSwitchTimer = setTimeout(() => {
     if (feedImg) {
-      feedImg.src = `/api/stream/${activeCamera}?t=${Date.now()}`;
+      const apiKeyParam = window.API_KEY ? `&api_key=${encodeURIComponent(window.API_KEY)}` : "";
+      feedImg.src = `/api/stream/${activeCamera}?t=${Date.now()}${apiKeyParam}`;
     }
   }, 50);
+
 
   // If Zone Editor canvas is active, reload zones for new camera
   if (typeof zoneEditorActive !== "undefined" && zoneEditorActive) {

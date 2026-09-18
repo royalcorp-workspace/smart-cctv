@@ -136,9 +136,11 @@ function applyViewMode(mode, userInitiated = true) {
     // 4. Attach active single camera feed
     const targetCam = (typeof activeCamera !== "undefined" && activeCamera) ? activeCamera : "cam_01";
     if (singleStreamFeed) {
-      singleStreamFeed.src = `/video_feed/${targetCam}`;
+      const keyParam = window.API_KEY ? `?api_key=${encodeURIComponent(window.API_KEY)}` : "";
+      singleStreamFeed.src = `/video_feed/${targetCam}${keyParam}`;
     }
   }
+
 }
 
 /**
@@ -403,9 +405,11 @@ function attachAllGridStreams() {
   images.forEach((img) => {
     const camId = img.getAttribute("data-cam-id");
     if (camId && (!img.src || img.src.endsWith("/") || img.src === window.location.href)) {
-      img.src = `/video_feed/${camId}`;
+      const keyParam = window.API_KEY ? `?api_key=${encodeURIComponent(window.API_KEY)}` : "";
+      img.src = `/video_feed/${camId}${keyParam}`;
     }
   });
+
 }
 
 /**

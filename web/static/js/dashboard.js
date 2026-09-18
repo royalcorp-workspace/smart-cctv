@@ -22,6 +22,20 @@
   window.fetch = async function (resource, init = {}) {
     init = init || {};
     const method = (init.method || (resource instanceof Request ? resource.method : "GET") || "GET").toUpperCase();
+    const apiKey = window.API_KEY || "";
+
+    if (resource instanceof Request) {
+      if (apiKey && !resource.headers.has("X-API-Key")) {
+        resource.headers.set("X-API-Key", apiKey);
+      }
+    } else {
+      const headers = new Headers(init.headers || {});
+      if (apiKey && !headers.has("X-API-Key")) {
+        headers.set("X-API-Key", apiKey);
+      }
+      init.headers = headers;
+    }
+
     if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
       const token = getCsrfToken();
       if (resource instanceof Request) {
@@ -32,7 +46,7 @@
           resource.headers.set("X-Requested-With", "XMLHttpRequest");
         }
       } else {
-        const headers = new Headers(init.headers || {});
+        const headers = init.headers;
         if (token && !headers.has("X-CSRF-Token")) {
           headers.set("X-CSRF-Token", token);
         }
@@ -45,6 +59,7 @@
     return originalFetch.call(this, resource, init);
   };
 })();
+
 
 let pollTimer = null;
 

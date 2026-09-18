@@ -245,6 +245,71 @@ class MultiCameraBuffer:
         _, enc = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 75])
         return enc.tobytes()
 
+    def create_unauthorized_frame(self, message: str = "Silakan lampirkan ?api_key=... pada URL stream") -> bytes:
+        """Generate a sleek, dark 401 Unauthorized visual frame with crimson alert theme."""
+        cache_key = f"_unauth_{message}"
+        with self._lock:
+            if cache_key in self._placeholders:
+                return self._placeholders[cache_key]
+
+        canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+        canvas[:] = (18, 18, 22)  # Dark obsidian
+
+        # Subtle dark red grid lines
+        for y in range(0, 720, 40):
+            cv2.line(canvas, (0, y), (1280, y), (28, 22, 24), 1)
+        for x in range(0, 1280, 40):
+            cv2.line(canvas, (x, 0), (x, 720), (28, 22, 24), 1)
+
+        # Center card (Dark red glowing border)
+        cx, cy = 640, 360
+        cv2.rectangle(canvas, (cx - 320, cy - 90), (cx + 320, cy + 90), (26, 20, 24), -1)
+        cv2.rectangle(canvas, (cx - 320, cy - 90), (cx + 320, cy + 90), (45, 35, 180), 2)  # Crimson border
+        cv2.rectangle(canvas, (cx - 322, cy - 92), (cx + 322, cy + 92), (25, 20, 100), 1)
+
+        # Header: 401 UNAUTHORIZED
+        cv2.putText(
+            canvas,
+            "[ 401 UNAUTHORIZED - ACCESS DENIED ]",
+            (cx - 275, cy - 35),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.8,
+            (60, 60, 240),  # Red
+            2,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Subtitle
+        cv2.putText(
+            canvas,
+            "SIARAN CCTV INI DIPROTEKSI KUNCI KEAMANAN (API KEY)",
+            (cx - 265, cy + 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (210, 210, 210),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        # Action hint
+        cv2.putText(
+            canvas,
+            message,
+            (cx - 250, cy + 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (0, 200, 255),  # Amber
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        _, enc = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        frame_bytes = enc.tobytes()
+        with self._lock:
+            self._placeholders[cache_key] = frame_bytes
+        return frame_bytes
+
+
     def get_or_create_placeholder(self, camera_id: str, message: str = "") -> bytes:
         """Fetch or generate cached standby JPEG frame without repeated OpenCV encoding."""
         cam_name = self._camera_names.get(camera_id, camera_id)

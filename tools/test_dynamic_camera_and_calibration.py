@@ -333,8 +333,41 @@ class TestDynamicCameraAndCalibration(unittest.TestCase):
         self.assertFalse(valid_resp.json()["success"])
         self.assertIn("loopback", valid_resp.json()["message"].lower())
 
+    def test_08_api_key_and_owasp_security_headers(self):
+        """Test API Key authentication on REST endpoints and verify OWASP security headers."""
+        # 1. Unauthenticated API request must be rejected with 401
+        unauth_resp = self.client.get(
+            "/api/status/cam_01",
+            headers={"X-Force-Auth-Test": "1"},
+        )
+        self.assertEqual(unauth_resp.status_code, 401)
+        self.assertIn("kunci api", unauth_resp.json()["detail"].lower())
+
+        # 2. Authenticated API request via X-API-Key header must succeed
+        auth_hdr_resp = self.client.get(
+            "/api/status/cam_01",
+            headers={
+                "X-Force-Auth-Test": "1",
+                "X-API-Key": "smart-cctv-royal2026",
+            },
+        )
+        self.assertEqual(auth_hdr_resp.status_code, 200)
+
+        # 3. Authenticated API request via query parameter ?api_key= must succeed
+        auth_param_resp = self.client.get(
+            "/api/status/cam_01?api_key=smart-cctv-royal2026",
+            headers={"X-Force-Auth-Test": "1"},
+        )
+        self.assertEqual(auth_param_resp.status_code, 200)
+
+        # 4. OWASP Security Headers check
+        self.assertEqual(auth_hdr_resp.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(auth_hdr_resp.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertEqual(auth_hdr_resp.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 
