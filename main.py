@@ -2180,7 +2180,7 @@ def main() -> None:
 
     # Determine Web Dashboard & GUI Configuration
     dashboard_enabled = True
-    dashboard_host = args.host or os.getenv("WEB_DASHBOARD_HOST", "127.0.0.1")
+    dashboard_host = args.host or os.getenv("WEB_DASHBOARD_HOST", "0.0.0.0")
     dashboard_port = args.port or int(os.getenv("WEB_DASHBOARD_PORT", "8000"))
 
     # Read config.json defaults first (headless by default: enable_gui = false)
@@ -2227,7 +2227,8 @@ def main() -> None:
     # Start FastAPI Web Dashboard in background daemon thread
     if dashboard_enabled:
         DashboardServer.start(host=dashboard_host, port=dashboard_port)
-        logger.info(f"Web Dashboard live at: http://{dashboard_host}:{dashboard_port}")
+        scheme = "https" if getattr(DashboardServer, "_is_https", False) else "http"
+        logger.info(f"Web Dashboard live at: {scheme}://{dashboard_host}:{dashboard_port}")
 
     # Run GUI loop or Headless loop
     if enable_gui:

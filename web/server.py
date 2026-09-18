@@ -1031,17 +1031,44 @@ async def get_buzzer_status() -> JSONResponse:
 
 
 class DashboardServer:
-    """Daemon thread runner for Uvicorn / FastAPI server."""
+    """Daemon thread runner for Uvicorn / FastAPI server with built-in HTTPS/TLS encryption."""
 
     _server_thread: Optional[threading.Thread] = None
     _uvicorn_server: Optional[uvicorn.Server] = None
+    _is_https: bool = False
 
     @classmethod
-    def start(cls, host: str = "127.0.0.1", port: int = 8000) -> threading.Thread:
-        """Start Uvicorn in a daemon background thread."""
+    def start(
+        cls,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        enable_https: Optional[bool] = None,
+        server_ip: str = "172.16.2.185",
+    ) -> threading.Thread:
+        """Start Uvicorn in a daemon background thread with automatic SSL/TLS encryption."""
         if cls._server_thread is not None and cls._server_thread.is_alive():
-            logger.info(f"[DashboardServer] Already running on http://{host}:{port}")
+            scheme = "https" if cls._is_https else "http"
+            logger.info(f"[DashboardServer] Already running on {scheme}://{host}:{port}")
             return cls._server_thread
+
+        if enable_https is None:
+            env_val = os.getenv("ENABLE_HTTPS", "true").strip().lower()
+            enable_https = env_val in ("true", "1", "yes")
+
+        cls._is_https = bool(enable_https)
+        ssl_keyfile = None
+        ssl_certfile = None
+
+        if enable_https:
+            try:
+                from web.ssl_manager import get_or_create_ssl_certificates
+                cert_file, key_file = get_or_create_ssl_certificates(server_ip=server_ip)
+                ssl_certfile = str(cert_file)
+                ssl_keyfile = str(key_file)
+                logger.info(f"[DashboardServer] HTTPS/TLS enabled using certificate: {cert_file}")
+            except Exception as e:
+                logger.warning(f"[DashboardServer] Failed initializing SSL certs ({e}). Falling back to HTTP.")
+                cls._is_https = False
 
         config = uvicorn.Config(
             app=app,
@@ -1049,13 +1076,16 @@ class DashboardServer:
             port=port,
             log_level="warning",
             access_log=False,
+            ssl_keyfile=ssl_keyfile,
+            ssl_certfile=ssl_certfile,
             proxy_headers=True,
             forwarded_allow_ips="*",
         )
         cls._uvicorn_server = uvicorn.Server(config)
 
         def _run():
-            logger.info(f"[DashboardServer] Web Dashboard started on http://{host}:{port}")
+            scheme = "https" if cls._is_https else "http"
+            logger.info(f"[DashboardServer] Web Dashboard started on {scheme}://{host}:{port}")
             cls._uvicorn_server.run()
 
         cls._server_thread = threading.Thread(target=_run, name="DashboardServerThread", daemon=True)
@@ -1067,3 +1097,4 @@ class DashboardServer:
         """Gracefully stop the Uvicorn server."""
         if cls._uvicorn_server is not None:
             cls._uvicorn_server.should_exit = True
+
