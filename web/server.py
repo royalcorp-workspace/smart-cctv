@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 import uvicorn
 
 from web.buffer import MultiCameraBuffer
@@ -86,15 +87,94 @@ _STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
-# Initialize FastAPI App
+# ==============================================================================
+# OPENAPI / SWAGGER DOCUMENTATION METADATA & PYDANTIC SCHEMAS
+# ==============================================================================
+TAGS_METADATA = [
+    {
+        "name": "Surveillance Streams",
+        "description": "High-performance MJPEG live video feeds with visual overlay analytics and low latency.",
+    },
+    {
+        "name": "Camera Management",
+        "description": "Dynamic camera onboarding, RTSP connectivity probe, activation, and deactivation.",
+    },
+    {
+        "name": "Zones & Calibration",
+        "description": "Interactive polygon dwell zones, tripwire crossing lines, and target classes metadata.",
+    },
+    {
+        "name": "Telemetry & Events",
+        "description": "Real-time camera telemetry metrics, active tracking statistics, and DVR incident clips.",
+    },
+    {
+        "name": "Hardware Peripherals",
+        "description": "Physical alert mechanisms including IoT HTTP webhook buzzer triggers.",
+    },
+    {
+        "name": "Dashboard Web UI",
+        "description": "Server-side Jinja2 rendered HTML dashboard pages.",
+    },
+]
+
+
+class TestRtspPayload(BaseModel):
+    model_config = {"populate_by_name": True}
+    ip: Optional[str] = Field(None, description="Alamat IP kamera (contoh: 192.212.160.70)")
+    port: Optional[int] = Field(554, description="Port RTSP (554, 8554, 5544, 10554, 322)")
+    user: Optional[str] = Field("", description="Username autentikasi RTSP")
+    pass_: Optional[str] = Field("", alias="pass", description="Password autentikasi RTSP")
+    channel: Optional[int] = Field(102, description="Channel sub-stream video (contoh: 102)")
+    rtsp_url: Optional[str] = Field(None, description="Opsional: URL RTSP kustom lengkap")
+
+
+class AddCameraPayload(BaseModel):
+    model_config = {"populate_by_name": True}
+    camera_id: str = Field(..., description="ID kamera unik alfanumerik huruf kecil (contoh: cam_05)")
+    name: Optional[str] = Field("", description="Nama kamera yang ramah dibaca (contoh: Area Parkir Timur)")
+    ip: Optional[str] = Field(None, description="Alamat IP kamera")
+    port: Optional[int] = Field(554, description="Port RTSP (default 554)")
+    user: Optional[str] = Field("", description="Username autentikasi RTSP")
+    pass_: Optional[str] = Field("", alias="pass", description="Password autentikasi RTSP")
+    channel: Optional[int] = Field(102, description="Nomor channel RTSP (default 102)")
+    rtsp_url: Optional[str] = Field(None, description="Opsional: URL RTSP kustom langsung")
+
+
+class DeleteCameraPayload(BaseModel):
+    camera_id: str = Field(..., description="ID kamera yang ingin dinonaktifkan/diarsipkan (contoh: cam_05)")
+
+
+class UpdateZonesPayload(BaseModel):
+    camera_id: str = Field("cam_01", description="ID kamera target")
+    zones: Dict[str, Any] = Field(default_factory=dict, description="Objek pemetaan zona poligon {zone_id: [[x,y], ...]}")
+    lines: Dict[str, Any] = Field(default_factory=dict, description="Objek pemetaan garis tripwire {line_id: [[x1,y1], [x2,y2]]}")
+    zone_configs: Dict[str, Any] = Field(default_factory=dict, description="Metadata zona (dwell time, target classes, arah tripwire)")
+    base_resolution: List[int] = Field(default=[1920, 1080], description="Resolusi kanvas kalibrasi [width, height]")
+
+
+# Initialize FastAPI App with Swagger UI and OpenAPI documentation
 app = FastAPI(
-    title="Smart CCTV 2.0 Web Dashboard",
-    description="Real-Time Spatial Clearance & Biometric Monitoring Dashboard",
+    title="Smart CCTV 2.0 API Engine",
+    description=(
+        "Enterprise Real-Time Spatial Clearance, Biometric Monitoring & NVR Video Analytics API. "
+        "Ditenagai FastAPI, Intel OpenVINO / YOLOv11, dan Multi-Camera Buffering."
+    ),
     version="2.0.0",
+    openapi_tags=TAGS_METADATA,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 # Mount Static Assets Directory
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/swagger", include_in_schema=False)
+async def swagger_redirect():
+    """Redirect /swagger alias to Swagger UI /docs."""
+    return RedirectResponse(url="/docs", status_code=307)
+
 
 
 def _normalize_host(netloc: str) -> str:
@@ -233,7 +313,7 @@ async def root_redirect():
     return RedirectResponse(url="/dashboard", status_code=307)
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard Web UI"], summary="Halaman Dashboard Monitoring (View Only)")
 async def dashboard_view_page(request: Request) -> HTMLResponse:
     """Render the View-Only live surveillance monitoring dashboard."""
     _sync_disk_cameras_into_buffer()
@@ -253,7 +333,7 @@ async def dashboard_view_page(request: Request) -> HTMLResponse:
     )
 
 
-@app.get("/dashboard_admin", response_class=HTMLResponse)
+@app.get("/dashboard_admin", response_class=HTMLResponse, tags=["Dashboard Web UI"], summary="Halaman Konsol Admin Penuh (Single & Grid)")
 async def dashboard_admin_page(request: Request) -> HTMLResponse:
     """Render the Full Access administrative dashboard with camera & zone controls."""
     _sync_disk_cameras_into_buffer()
@@ -321,8 +401,8 @@ async def async_stream_mjpeg(camera_id: str, request: Optional[Request] = None):
         return
 
 
-@app.get("/video_feed/{camera_id}", response_class=StreamingResponse)
-@app.get("/api/stream/{camera_id}", response_class=StreamingResponse)
+@app.get("/video_feed/{camera_id}", response_class=StreamingResponse, tags=["Surveillance Streams"], summary="Stream MJPEG Feed Langsung")
+@app.get("/api/stream/{camera_id}", response_class=StreamingResponse, tags=["Surveillance Streams"], summary="API Stream MJPEG Feed Kamera")
 def video_feed(camera_id: str, request: Request = Request({"type": "http"})) -> StreamingResponse:
     """Stream live MJPEG feed for the requested camera with client disconnect termination."""
     return StreamingResponse(
@@ -337,7 +417,7 @@ def video_feed(camera_id: str, request: Request = Request({"type": "http"})) -> 
     )
 
 
-@app.get("/api/status/{camera_id}")
+@app.get("/api/status/{camera_id}", tags=["Telemetry & Events"], summary="Status Telemetri & Analitik Kamera Real-Time")
 async def get_camera_status(camera_id: str) -> JSONResponse:
     """Return latest telemetry and analytics status for the specified camera."""
     buffer = MultiCameraBuffer.get_instance()
@@ -345,7 +425,7 @@ async def get_camera_status(camera_id: str) -> JSONResponse:
     return JSONResponse(content=telemetry)
 
 
-@app.get("/api/cameras")
+@app.get("/api/cameras", tags=["Camera Management"], summary="Daftar Seluruh Kamera Terdaftar")
 async def list_cameras() -> JSONResponse:
     """Return list of all registered cameras."""
     _sync_disk_cameras_into_buffer()
@@ -354,20 +434,16 @@ async def list_cameras() -> JSONResponse:
     return JSONResponse(content=cameras)
 
 
-@app.post("/api/cameras/test_rtsp")
-async def test_rtsp_connection(request: Request) -> JSONResponse:
+@app.post("/api/cameras/test_rtsp", tags=["Camera Management"], summary="Uji Konektivitas RTSP Kamera")
+async def test_rtsp_connection(payload: TestRtspPayload, request: Request) -> JSONResponse:
     """Test RTSP stream connectivity with strict timeout."""
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+    rtsp_url = (payload.rtsp_url or "").strip()
+    ip = (payload.ip or "").strip()
+    port = payload.port or 554
+    user = (payload.user or "").strip()
+    password = (payload.pass_ or "").strip()
+    channel = payload.channel or 102
 
-    rtsp_url = (data.get("rtsp_url") or "").strip()
-    ip = (data.get("ip") or "").strip()
-    port = data.get("port", 554)
-    user = (data.get("user") or "").strip()
-    password = (data.get("pass") or "").strip()
-    channel = data.get("channel", 102)
 
     if rtsp_url:
         try:
@@ -430,22 +506,18 @@ async def test_rtsp_connection(request: Request) -> JSONResponse:
     })
 
 
-@app.post("/api/cameras/add")
-async def add_camera(request: Request) -> JSONResponse:
+@app.post("/api/cameras/add", tags=["Camera Management"], summary="Daftarkan Kamera Baru Secara Dinamis")
+async def add_camera(payload: AddCameraPayload, request: Request) -> JSONResponse:
     """Dynamically register a new camera, configure .env, create directory, and hot-start pipeline."""
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+    raw_id = (payload.camera_id or "").strip().lower()
+    name = (payload.name or "").strip()
+    ip = (payload.ip or "").strip()
+    port = int(payload.port or 554)
+    user = (payload.user or "").strip()
+    password = (payload.pass_ or "").strip()
+    channel = int(payload.channel or 102)
+    custom_rtsp = (payload.rtsp_url or "").strip()
 
-    raw_id = (data.get("camera_id") or "").strip().lower()
-    name = (data.get("name") or "").strip()
-    ip = (data.get("ip") or "").strip()
-    port = int(data.get("port") or 554)
-    user = (data.get("user") or "").strip()
-    password = (data.get("pass") or "").strip()
-    channel = int(data.get("channel") or 102)
-    custom_rtsp = (data.get("rtsp_url") or "").strip()
 
     if not raw_id or not re.match(r"^[a-z0-9_-]+$", raw_id):
         raise HTTPException(status_code=400, detail="Camera ID harus alfanumerik huruf kecil/garis bawah (contoh: cam_05).")
@@ -596,7 +668,7 @@ async def add_camera(request: Request) -> JSONResponse:
     })
 
 
-@app.post("/api/cameras/start/{camera_id}")
+@app.post("/api/cameras/start/{camera_id}", tags=["Camera Management"], summary="Jalankan Pipeline Kamera Secara Eksplisit")
 async def start_camera(camera_id: str) -> JSONResponse:
     """Explicitly start/hot-start a CameraPipeline for a camera if not already active."""
     cam_id = camera_id.strip().lower()
@@ -626,17 +698,13 @@ async def start_camera(camera_id: str) -> JSONResponse:
     return JSONResponse(content={"status": "success", "message": f"Pipeline untuk {cam_id} berhasil dijalankan.", "started": started})
 
 
-@app.post("/api/cameras/delete")
-async def delete_camera(request: Request) -> JSONResponse:
+@app.post("/api/cameras/delete", tags=["Camera Management"], summary="Nonaktifkan dan Arsipkan Kamera")
+async def delete_camera(payload: DeleteCameraPayload, request: Request) -> JSONResponse:
     """Deactivate camera, stop pipeline, unregister from buffer, and archive directory."""
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
-
-    camera_id = (data.get("camera_id") or "").strip().lower()
+    camera_id = (payload.camera_id or "").strip().lower()
     if not camera_id:
         raise HTTPException(status_code=400, detail="Camera ID diperlukan.")
+
 
     workspace_dir = Path(__file__).resolve().parent.parent
     cam_dir = workspace_dir / "cameras" / camera_id
@@ -717,8 +785,8 @@ def is_polygon_self_intersecting(points: List[List[float]]) -> bool:
     return False
 
 
-@app.get("/api/zones")
-@app.get("/api/zones/{camera_id}")
+@app.get("/api/zones", tags=["Zones & Calibration"], summary="Ambil Konfigurasi Zona & Tripwire Kamera (Query Param)")
+@app.get("/api/zones/{camera_id}", tags=["Zones & Calibration"], summary="Ambil Konfigurasi Zona & Tripwire Kamera (Path Param)")
 async def get_zones(camera_id: Optional[str] = None, cam: Optional[str] = None) -> JSONResponse:
     """Get current ROI zones, tripwires, and zone metadata for a camera."""
     cam_id = cam or camera_id or "cam_01"
@@ -764,26 +832,17 @@ async def get_zones(camera_id: Optional[str] = None, cam: Optional[str] = None) 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/zones/update")
-async def update_zones(request: Request) -> JSONResponse:
+@app.post("/api/zones/update", tags=["Zones & Calibration"], summary="Simpan & Reload Konfigurasi Zona ROI & Tripwire")
+async def update_zones(payload: UpdateZonesPayload, request: Request) -> JSONResponse:
     """Validate, backup, write, and atomically reload camera ROI zones & tripwires."""
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
-
-    camera_id = data.get("camera_id", "cam_01")
-    zones = data.get("zones", {})
-    lines = data.get("lines", {})
-    zone_configs = data.get("zone_configs", {})
-    base_res = data.get("base_resolution", [1920, 1080])
-
-    if not isinstance(zones, dict):
-        zones = {}
-    if not isinstance(lines, dict):
-        lines = {}
+    camera_id = payload.camera_id or "cam_01"
+    zones = payload.zones if isinstance(payload.zones, dict) else {}
+    lines = payload.lines if isinstance(payload.lines, dict) else {}
+    zone_configs = payload.zone_configs if isinstance(payload.zone_configs, dict) else {}
+    base_res = payload.base_resolution if isinstance(payload.base_resolution, list) and len(payload.base_resolution) == 2 else [1920, 1080]
 
     base_w, base_h = int(base_res[0]), int(base_res[1])
+
 
     # Validate each polygon zone
     for zone_name, pts in zones.items():
@@ -908,12 +967,12 @@ async def update_zones(request: Request) -> JSONResponse:
     })
 
 
-@app.post("/api/cameras/{camera_id}/calibration_mode", response_model=None)
-@app.post("/api/calibration/mode", response_model=None)
+@app.post("/api/cameras/{camera_id}/calibration_mode", response_model=None, tags=["Zones & Calibration"], summary="Toggle Mode Kalibrasi Kamera (Path Param)")
+@app.post("/api/calibration/mode", response_model=None, tags=["Zones & Calibration"], summary="Toggle Mode Kalibrasi Kamera (Query Param)")
 async def toggle_calibration_mode(
     camera_id: Optional[str] = None,
     cam: Optional[str] = None,
-    active: bool = Query(True),
+    active: bool = Query(True, description="True untuk menyembunyikan poligon HUD saat kalibrasi"),
 ) -> JSONResponse:
     """Toggle zone overlay rendering in camera pipeline during interactive calibration."""
     cam_id = cam or camera_id or "cam_01"
@@ -936,11 +995,11 @@ async def toggle_calibration_mode(
     })
 
 
-@app.get("/api/events")
+@app.get("/api/events", tags=["Telemetry & Events"], summary="Daftar Riwayat Insiden Pelanggaran")
 async def list_recent_events(
-    camera_id: Optional[str] = None,
-    cam: Optional[str] = None,
-    limit: int = 50,
+    camera_id: Optional[str] = Query(None, description="Filter berdasarkan ID kamera (opsional)"),
+    cam: Optional[str] = Query(None, description="Alias query parameter kamera"),
+    limit: int = Query(50, description="Maksimal jumlah insiden yang ditampilkan"),
 ) -> JSONResponse:
     """Retrieve recent incident events with clip paths and telemetry info."""
     from storage.db import get_recent_events
@@ -953,7 +1012,7 @@ async def list_recent_events(
         return JSONResponse(content={"status": "error", "message": str(e), "events": []}, status_code=500)
 
 
-@app.get("/api/clips/{filename}")
+@app.get("/api/clips/{filename}", tags=["Telemetry & Events"], summary="Streaming Video Klip Insiden DVR (Byte-Range)")
 async def stream_incident_clip(filename: str, request: Request):
     """Stream incident video clip with HTTP 206 Byte-Range partial content support."""
     safe_filename = Path(filename).name
@@ -1014,7 +1073,7 @@ async def stream_incident_clip(filename: str, request: Request):
     )
 
 
-@app.post("/api/buzzer/test")
+@app.post("/api/buzzer/test", tags=["Hardware Peripherals"], summary="Pemicu Uji Coba Hardware Buzzer")
 async def trigger_buzzer_test() -> JSONResponse:
     """Trigger a manual buzzer test webhook and verify device response."""
     notifier = BuzzerNotifier.get_instance()
@@ -1023,11 +1082,12 @@ async def trigger_buzzer_test() -> JSONResponse:
     return JSONResponse(status_code=status_code, content=result)
 
 
-@app.get("/api/buzzer/status")
+@app.get("/api/buzzer/status", tags=["Hardware Peripherals"], summary="Status Operasional & Antrean Hardware Buzzer")
 async def get_buzzer_status() -> JSONResponse:
     """Retrieve operational status, telemetry, and queue metrics for hardware buzzer."""
     notifier = BuzzerNotifier.get_instance()
     return JSONResponse(status_code=200, content=notifier.get_status())
+
 
 
 class DashboardServer:

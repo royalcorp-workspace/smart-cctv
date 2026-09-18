@@ -253,6 +253,34 @@
   color: #ffffff;
 }
 
+.btn-docs {
+  text-decoration: none;
+  background-color: rgba(16, 185, 129, 0.08);
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.3);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-docs svg {
+  color: #10b981;
+  transition: color 0.15s ease;
+}
+
+.btn-docs:hover {
+  background-color: #10b981;
+  color: #ffffff;
+  border-color: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+}
+
+.btn-docs:hover svg {
+  color: #ffffff;
+}
+
+
 /* VIEW MODE SWITCHER & GRID SELECTOR IN NAVBAR */
 .view-switcher-wrap {
   display: inline-flex;
