@@ -189,6 +189,25 @@ function onStreamLoad() {
   }
 }
 
+function bindStreamFeedListeners() {
+  const feedImg = document.getElementById("streamFeed");
+  if (!feedImg) return;
+  feedImg.removeEventListener("load", onStreamLoad);
+  feedImg.removeEventListener("error", onStreamError);
+  feedImg.addEventListener("load", onStreamLoad);
+  feedImg.addEventListener("error", onStreamError);
+
+  if (feedImg.complete && feedImg.naturalWidth > 0) {
+    onStreamLoad();
+  }
+}
+
+// Expose handlers globally immediately
+window.onStreamLoad = onStreamLoad;
+window.onStreamError = onStreamError;
+window.bindStreamFeedListeners = bindStreamFeedListeners;
+bindStreamFeedListeners();
+
 async function pollTelemetry() {
   if (_isTelemetryPolling) return;
   _isTelemetryPolling = true;
@@ -390,6 +409,7 @@ async function updateQuickEventTicker(camId) {
 
 // Initial triggers when script loads
 document.addEventListener("DOMContentLoaded", () => {
+  bindStreamFeedListeners();
   setTimeout(() => {
     updateActiveZonesSummary(activeCamera);
     updateQuickEventTicker(activeCamera);
